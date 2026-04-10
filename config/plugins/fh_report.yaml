@@ -1,0 +1,49 @@
+# fh_report.yaml — FH_Report Plugin Configuration
+# Place this file in: config/plugins/fh_report.yaml
+#
+# SERVER INSTANCES:
+#   Each server is defined by a unique name of your choice (e.g. "Foothold", "Server1").
+#   This name is only used internally by the plugin — it does NOT need to match
+#   any name in servers.yaml or anywhere else in DCSServerBot.
+#   It is used to identify the server in logs and to store its Discord message ID.
+#
+# REQUIRED per server:
+#   saves_dir      - Full path to the Foothold save files directory
+#   channel_id     - Discord channel ID where the embed will be posted
+#   campaign_name  - Name displayed in the embed title and footer
+#
+# OPTIONAL — define in DEFAULT to apply to all servers,
+#             or per server to override the default value:
+#   update_interval  - Seconds between embed refreshes        (default: 300)
+#   max_zones        - Max zones shown per column             (default: 14)
+#   bar_length       - Number of squares in the progress bar  (default: 20)
+#   max_pilots       - Max pilots in leaderboard, omit = all  (default: all)
+#   excluded_ucids   - UCIDs to hide from leaderboard         (default: none)
+
+DEFAULT:
+  update_interval: 300
+  bar_length: 20
+  max_zones: 14
+#  max_pilots:
+#  excluded_ucids:
+
+"== Nova314 Server-1 | Foothold ==":
+  saves_dir: "L:\\Saved Games\\DCS_Server\\Missions\\Saves"
+  channel_id: 1458145804685541508
+  campaign_name: "Operation Nova314 — Persian Gulf"
+  excluded_ucids:
+    - 71be6e5a09c1cd3979a8ec170fd99010   # Pier_Paolo
+#  update_interval: 300
+#  bar_length: 20
+#  max_zones: 14
+#  max_pilots:
+
+#"== Nova314 Server-2 | Campaña ==":
+#  saves_dir: "L:\\Saved Games\\DCS_Server2\\Missions\\Saves"
+#  channel_id: 1464645864684388402
+#  campaign_name: "Operation Nova314 — Campaña"
+#  update_interval: 300
+#  bar_length: 20
+#  max_zones: 14
+#  max_pilots:
+#  excluded_ucids:
