@@ -1,0 +1,2 @@
+-- FH_Report plugin does not use any database tables.
+-- This file exists only to satisfy the DCSServerBot plugin structure.

@@ -18,6 +18,7 @@ from discord.ext import tasks
 from core import Plugin, TEventListener
 from services.bot import DCSServerBot
 
+
 from .version import __version__
 
 log = logging.getLogger(__name__)
@@ -235,6 +236,10 @@ class FHReport(Plugin):
         self._default_cfg: dict = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
+
+    async def install(self) -> None:
+        """No database tables needed for this plugin."""
+        pass
 
     async def cog_load(self) -> None:
         await super().cog_load()
