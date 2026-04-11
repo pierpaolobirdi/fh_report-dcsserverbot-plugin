@@ -286,11 +286,29 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         value=red_text[:1024],
         inline=True
     )
-    embed.add_field(
-        name="\n🏆 __Pilot Leaderboard__",
-        value="\n" + pilots_text[:1020],
-        inline=False
-    )
+    # Split leaderboard into chunks respecting Discord 1024 char field limit
+    FIELD_LIMIT = 1020
+    chunks = []
+    current_chunk = []
+    current_len   = 0
+    for line in pilot_lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > FIELD_LIMIT and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_len   = line_len
+        else:
+            current_chunk.append(line)
+            current_len += line_len
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    for i, chunk in enumerate(chunks):
+        embed.add_field(
+            name="\n🏆 __Pilot Leaderboard__" if i == 0 else "\u200b",
+            value="\n" + chunk if i == 0 else chunk,
+            inline=False
+        )
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
 
