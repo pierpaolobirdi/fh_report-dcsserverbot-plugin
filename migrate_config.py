@@ -15,6 +15,7 @@ KNOWN_VARS = {
     "max_zones",
     "slot_status",
     "show_punishment",
+    "show_all_pilots",
     "max_pilots",
     "excluded_ucids",
     "saves_dir",
@@ -29,6 +30,7 @@ DEFAULTS = {
     "max_zones": 15,
     "slot_status": 0,
     "show_punishment": 0,
+    "show_all_pilots": 0,
 }
 
 COMMENTS = {
@@ -37,6 +39,7 @@ COMMENTS = {
     "max_zones":       "# Max zones shown per column (omit for all)",
     "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",
     "show_punishment":  "# 0 = disabled  |  1 = show punishment badges in leaderboard",
+    "show_all_pilots":      "# 0 = cut at limit show + X more  |  1 = split into multiple fields",
 }
 
 

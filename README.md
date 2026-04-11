@@ -115,6 +115,7 @@ The yaml uses a `DEFAULT` section for shared settings and one named block per se
 | `max_zones` | `15` | Max zones shown per column. Remainder shown as `+ X more bases`. Omit for all |
 | `bar_length` | `20` | Number of squares in the progress bar |
 | `slot_status` | `0` | `0` = show max level only / `1` = show active vs lost slots |
+| `show_all_pilots` | `0` | `0` = show pilots that fit, rest shown as `+ X more pilots` / `1` = show all pilots splitting into multiple fields if needed |
 | `show_punishment` | `0` | `0` = disabled / `1` = show punishment status below sanctioned pilots |
 | `max_pilots` | all | Max pilots shown in the leaderboard |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |

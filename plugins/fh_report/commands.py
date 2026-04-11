@@ -187,7 +187,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: int = 0,
                 punishment_points: dict | None = None,
-                show_punishment: int = 0) -> discord.Embed:
+                show_punishment: int = 0,
+                show_all_pilots: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -286,29 +287,51 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         value=red_text[:1024],
         inline=True
     )
-    # Split leaderboard into chunks respecting Discord 1024 char field limit
-    FIELD_LIMIT = 1020
-    chunks = []
-    current_chunk = []
-    current_len   = 0
-    for line in pilot_lines:
-        line_len = len(line) + 1  # +1 for newline
-        if current_len + line_len > FIELD_LIMIT and current_chunk:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = [line]
-            current_len   = line_len
-        else:
-            current_chunk.append(line)
-            current_len += line_len
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
 
-    for i, chunk in enumerate(chunks):
+    if show_all_pilots == 1:
+        # ── Option B: split into multiple fields, show all pilots ─────────────
+        FIELD_LIMIT = 1020
+        chunks = []
+        current_chunk, current_len = [], 0
+        for line in pilot_lines:
+            line_len = len(line) + 1
+            if current_len + line_len > FIELD_LIMIT and current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk, current_len = [line], line_len
+            else:
+                current_chunk.append(line)
+                current_len += line_len
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+        for i, chunk in enumerate(chunks):
+            embed.add_field(
+                name="\n🏆 __Pilot Leaderboard__" if i == 0 else "🎖️ __Leaderboard (cont.)__",
+                value=("\n" + chunk) if i == 0 else chunk,
+                inline=False
+            )
+    else:
+        # ── Option A (default): single field, cut at limit, show + X more ─────
+        FIELD_LIMIT = 1020
+        visible_lines, used = [], 0
+        more_label = ""
+        for i, line in enumerate(pilot_lines):
+            line_len = len(line) + 1
+            remaining = len(pilot_lines) - i
+            more_label = f"\n*+ {remaining} more pilots*" if remaining > 0 else ""
+            if used + line_len + len(more_label) > FIELD_LIMIT:
+                break
+            visible_lines.append(line)
+            used += line_len
+        remaining = len(pilot_lines) - len(visible_lines)
+        pilots_value = "\n" + "\n".join(visible_lines)
+        if remaining > 0:
+            pilots_value += f"\n*+ {remaining} more pilots*"
         embed.add_field(
-            name="\n🏆 __Pilot Leaderboard__" if i == 0 else "\u200b",
-            value=("\n" + chunk) if i == 0 else ("\u200b\n" + chunk),
+            name="\n🏆 __Pilot Leaderboard__",
+            value=pilots_value[:1024],
             inline=False
         )
+
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
 
@@ -467,6 +490,7 @@ class FHReport(Plugin):
             slot_status       = int(cfg.get("slot_status") or 0),
             punishment_points = punishment_points,
             show_punishment   = show_punishment,
+            show_all_pilots   = int(cfg.get("show_all_pilots") or 0),
         )
 
         try:
