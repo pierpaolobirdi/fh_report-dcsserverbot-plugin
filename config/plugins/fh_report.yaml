@@ -13,37 +13,60 @@
 #   campaign_name  - Name displayed in the embed title and footer
 #
 # OPTIONAL — define in DEFAULT to apply to all servers,
-#             or per server to override the default value:
-#   update_interval  - Seconds between embed refreshes        (default: 300)
-#   max_zones        - Max zones shown per column             (default: 14)
-#   bar_length       - Number of squares in the progress bar  (default: 20)
-#   max_pilots       - Max pilots in leaderboard, omit = all  (default: all)
-#   excluded_ucids   - UCIDs to hide from leaderboard         (default: none)
+#             or per server to override the default value.
+#
+#   update_interval  - Seconds between embed refreshes              (default: 300)
+#   max_zones        - Max zones shown per column, omit = all       (default: 15)
+#   bar_length       - Number of squares in the progress bar        (default: 20)
+#   max_pilots       - Max pilots in leaderboard, omit = all        (default: all)
+#   excluded_ucids   - UCIDs to hide from leaderboard               (default: none)
+#   slot_status      - Show upgrade slot damage per zone            (default: 0)
+#                      0 = show only max level (always fully filled)
+#                      1 = show active vs lost slots (🔹🔹🔹◇◇ / 🔺🔺△△△)
+#
+# ZONE DISPLAY NOTES:
+#   - Neutral zones (side=0) are counted in the progress bar as ⬜ but not listed.
+#   - Suspended zones are always shown as fully filled and listed at the bottom
+#     of each column. They suspend to save DCS resources but reactivate at full
+#     capacity, so they are treated as complete.
+#   - Hidden zones (name starts with "hidden") are fully ignored.
+#
+# UPGRADE SLOT INDICATORS (when slot_status: 1):
+#   🔹 = active BLUE upgrade slot    ◇ = lost/empty BLUE slot
+#   🔺 = active RED upgrade slot     △ = lost/empty RED slot
+#   Example: 🔹🔹🔹◇◇ = level 5 zone with 3 active and 2 destroyed upgrades.
 
 DEFAULT:
   update_interval: 300
   bar_length: 20
-  max_zones: 14
+  max_zones: 15
+  slot_status: 0
+  show_all_pilots: 0
+  show_punishment: 0
 #  max_pilots:
 #  excluded_ucids:
 
-"== Nova314 Server-1 | Foothold ==":
-  saves_dir: "L:\\Saved Games\\DCS_Server\\Missions\\Saves"
-  channel_id: 1458145804685541508
-  campaign_name: "Operation Nova314 — Persian Gulf"
+"== Server-1 | Foothold ==":
+  saves_dir: "C:\\Saved Games\\DCS_Server1\\Missions\\Saves"
+  channel_id: 125536244541508
+  campaign_name: "Operation — FootHoldMap"
   excluded_ucids:
-    - 71be6e5a09c1cd3979a8ec170fd99010   # Pier_Paolo
+    - 71derf45ftgssr0f6744d99010   # User Pilot
 #  update_interval: 300
 #  bar_length: 20
-#  max_zones: 14
+#  max_zones: 15
 #  max_pilots:
+#  slot_status: 0
 
-#"== Nova314 Server-2 | Campaña ==":
-#  saves_dir: "L:\\Saved Games\\DCS_Server2\\Missions\\Saves"
-#  channel_id: 1464645864684388402
-#  campaign_name: "Operation Nova314 — Campaña"
+#"== Server-2 | xxxx ==":
+#  saves_dir: "C:\\Saved Games\\DCS_Server2\\Missions\\Saves"
+#  channel_id: 125536244541508
+#  campaign_name: "OOperation — FootHoldMap"
 #  update_interval: 300
 #  bar_length: 20
-#  max_zones: 14
+#  max_zones: 15
 #  max_pilots:
+#  slot_status: 0
+#  show_all_pilots: 0
+#  show_punishment: 0
 #  excluded_ucids:

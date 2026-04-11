@@ -58,15 +58,42 @@ copy /Y "%SCRIPT_DIR%plugins\fh_report\listener.py"   "!DCSSB_PATH!\plugins\fh_r
 copy /Y "%SCRIPT_DIR%plugins\fh_report\version.py"    "!DCSSB_PATH!\plugins\fh_report\version.py"    > nul
 echo       OK - Plugin files copied.
 
-:: ── Copy config file (only if it doesn't exist) ───────────────────────────────
-echo [2/3] Copying configuration file...
+:: ── Handle config file ────────────────────────────────────────────────────────
+echo [2/3] Checking configuration file...
 if not exist "!DCSSB_PATH!\config\plugins\fh_report.yaml" (
+    :: First install — copy fresh config
     if not exist "!DCSSB_PATH!\config\plugins" mkdir "!DCSSB_PATH!\config\plugins"
     copy /Y "%SCRIPT_DIR%config\plugins\fh_report.yaml" "!DCSSB_PATH!\config\plugins\fh_report.yaml" > nul
     echo       OK - fh_report.yaml created. Edit it to configure your servers and channels.
 ) else (
-    echo       SKIPPED - fh_report.yaml already exists, not overwritten.
-    echo       Your existing configuration has been preserved.
+    :: Existing config found — run migration to add any new variables
+    echo       Existing fh_report.yaml found. Running migration...
+    set "PYTHON_EXE="
+
+    :: Try DCSServerBot virtual environment first
+    if exist "%USERPROFILE%\.dcssb\Scripts\python.exe" (
+        set "PYTHON_EXE=%USERPROFILE%\.dcssb\Scripts\python.exe"
+    )
+
+    :: Fallback to system Python
+    if "!PYTHON_EXE!"=="" (
+        where python >nul 2>&1
+        if !ERRORLEVEL! == 0 set "PYTHON_EXE=python"
+    )
+
+    if "!PYTHON_EXE!"=="" (
+        echo       WARNING - Python not found. Could not run migration.
+        echo       Your existing config has been preserved unchanged.
+        echo       Please manually check for new variables in the sample config.
+    ) else (
+        "!PYTHON_EXE!" "%SCRIPT_DIR%migrate_config.py" "!DCSSB_PATH!\config\plugins\fh_report.yaml"
+        if !ERRORLEVEL! == 0 (
+            echo       OK - Configuration migrated successfully.
+        ) else (
+            echo       WARNING - Migration script encountered an error.
+            echo       Your existing config has been preserved unchanged.
+        )
+    )
 )
 
 :: ── Check main.yaml for fh_report entry ──────────────────────────────────────

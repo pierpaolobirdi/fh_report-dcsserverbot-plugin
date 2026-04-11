@@ -18,6 +18,7 @@ from discord.ext import tasks
 from core import Plugin, TEventListener
 from services.bot import DCSServerBot
 
+
 from .version import __version__
 
 log = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ def parse_zones(filepath: str) -> dict:
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    zones = {"blue": [], "red": []}
+    zones = {"blue": [], "red": [], "neutral": 0}
     zone_names = re.findall(r"zonePersistance\['zones'\]\['([^']+)'\]", content)
 
     for zone in zone_names:
@@ -76,24 +77,42 @@ def parse_zones(filepath: str) -> dict:
             continue
         block = match.group(1)
 
-        side_m  = re.search(r"\['side'\]=(\d+)", block)
-        active_m = re.search(r"\['active'\]=(true|false)", block)
-        level_m  = re.search(r"\['level'\]=(\d+)", block)
+        side_m      = re.search(r"\['side'\]=(\d+)", block)
+        active_m    = re.search(r"\['active'\]=(true|false)", block)
+        level_m     = re.search(r"\['level'\]=(\d+)", block)
+        suspended_m = re.search(r"\['suspended'\]=(true|false)", block)
 
         if not side_m:
             continue
 
-        side   = int(side_m.group(1))
-        active = active_m.group(1) == "true" if active_m else False
-        level  = int(level_m.group(1)) if level_m else 0
+        side      = int(side_m.group(1))
+        active    = active_m.group(1) == "true" if active_m else False
+        level     = int(level_m.group(1)) if level_m else 0
+        suspended = suspended_m.group(1) == "true" if suspended_m else False
 
-        if side == 0 or not active or level == 0:
+        if not active or level == 0:
             continue
         # Skip hidden/internal zones
         if zone.lower().startswith("hidden"):
             continue
 
-        info = {"name": zone, "level": level}
+        # Neutral zones — count for bar but don't list
+        if side == 0:
+            zones["neutral"] += 1
+            continue
+
+        # Count active upgrade slots from remainingUnits
+        ru_match = re.search(r"\['remainingUnits'\]=\{(.*?)\n  \},", block, re.DOTALL)
+        active_slots = 0
+        if ru_match:
+            ru_block = ru_match.group(1)
+            # Each top-level slot is [N]={ ... } — count those with content
+            slot_matches = re.findall(r"\[(\d+)\]=\{([^}]*)\}", ru_block)
+            active_slots = sum(1 for _, slot_content in slot_matches if slot_content.strip())
+        if active_slots == 0 and not ru_match:
+            active_slots = min(level, 5)
+
+        info = {"name": zone, "level": min(level, 5), "active_slots": active_slots, "suspended": suspended}
         if side == 2:
             zones["blue"].append(info)
         elif side == 1:
@@ -115,6 +134,12 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
         if m:
             excluded_names.add(m.group(1))
 
+    # Build name->ucid mapping from ucidToName table
+    name_to_ucid = {}
+    ucid_pattern = r"\['([a-f0-9]{32})'\]=\"([^\"]+)\""
+    for ucid_m in re.finditer(ucid_pattern, content):
+        name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
+
     players = {}
     block_pattern = r"\['([^']+)'\]=\{([^}]+)\}"
     for m in re.finditer(block_pattern, content):
@@ -129,46 +154,94 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
         clean_name = name.strip()
         if not clean_name or len(clean_name) < 2:
             continue
-        players[clean_name] = {"credits": float(credit_m.group(1))}
+        players[clean_name] = {
+            "credits": float(credit_m.group(1)),
+            "ucid":    name_to_ucid.get(clean_name),
+        }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+# ── Punishment thresholds ─────────────────────────────────────────────────────
+# (min_points, icon, label, hammer_count)
+PUNISHMENT_THRESHOLDS = [
+    (200, "💀", "Dishonorably discharged", 6),
+    (101, "🔒", "Brig time",               5),
+    (51,  "⛓️", "Confined to quarters",    4),
+    (26,  "⚖️", "JAG indictment filed",    3),
+    (11,  "🔍", "JAG's investigation",    2),
+    (1,   "⚠️", "JAG's radar",            1),
+]
+
+def get_punishment_badge(points: float, name: str = "") -> str | None:
+    """Returns indented badge line for a given punishment points total, or None."""
+    for min_pts, icon, label, hammers in PUNISHMENT_THRESHOLDS:
+        if points >= min_pts:
+            prefix  = f"`{name}` " if name else ""
+            gravity = "🔨" * hammers
+            return f"·　{icon} {prefix}{label} {gravity}"
+    return None
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
-                bar_length: int) -> discord.Embed:
+                bar_length: int, slot_status: int = 0,
+                punishment_points: dict | None = None,
+                show_punishment: int = 0,
+                show_all_pilots: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    blue_count = len(zones["blue"])
-    red_count  = len(zones["red"])
-    total      = blue_count + red_count
+    blue_count  = len(zones["blue"])
+    red_count   = len(zones["red"])
+    neutral_count = zones.get("neutral", 0)
+    total         = blue_count + red_count + neutral_count
+    active_total  = blue_count + red_count
 
-    # Progress bar
-    pct_blue  = round(blue_count / total * 100) if total > 0 else 50
-    pct_red   = 100 - pct_blue
-    blue_bars = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
-    red_bars  = bar_length - blue_bars
-    bar       = "🟦" * blue_bars + "🟥" * red_bars
-    progress  = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
+    # Progress bar — neutrals shown as ⬜
+    pct_blue     = round(blue_count / active_total * 100) if active_total > 0 else 50
+    pct_red      = 100 - pct_blue
+    blue_bars    = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
+    neutral_bars = round((neutral_count / total) * bar_length) if total > 0 else 0
+    red_bars     = bar_length - blue_bars - neutral_bars
+    bar          = "🟦" * blue_bars + "⬜" * neutral_bars + "🟥" * red_bars
+    progress     = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
 
-    # BLUE zones
-    blue_sorted = sorted(zones["blue"], key=lambda z: z["level"], reverse=True)
-    limit       = max_zones if max_zones else len(blue_sorted)
-    blue_lines  = []
+    # BLUE zones — actives first sorted by level+slots, suspended last
+    blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
+    blue_suspended = [z for z in zones["blue"] if z.get("suspended")]
+    blue_active    = sorted(blue_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    blue_suspended = sorted(blue_suspended, key=lambda z: z["level"], reverse=True)
+    blue_sorted    = blue_active + blue_suspended
+    limit          = max_zones if max_zones else len(blue_sorted)
+    blue_lines     = []
     for z in blue_sorted[:limit]:
-        stars = "🔹" * min(z["level"], 5)
+        lvl = min(z["level"], 5)
+        if slot_status == 1 and not z.get("suspended"):
+            active = min(z.get("active_slots", lvl), lvl)
+            stars  = "🔹" * active + "◇" * (lvl - active)
+        else:
+            stars  = "🔹" * lvl
         blue_lines.append(f"`{z['name']}` {stars}")
     if max_zones and len(blue_sorted) > max_zones:
         blue_lines.append(f"*+ {len(blue_sorted) - max_zones} more bases*")
     blue_lines.append(".")
     blue_text = "\n".join(blue_lines) if blue_lines else "—"
 
-    # RED zones
-    red_sorted = sorted(zones["red"], key=lambda z: z["level"], reverse=True)
-    limit      = max_zones if max_zones else len(red_sorted)
-    red_lines  = []
+    # RED zones — actives first sorted by level+slots, suspended last
+    red_active    = [z for z in zones["red"] if not z.get("suspended")]
+    red_suspended = [z for z in zones["red"] if z.get("suspended")]
+    red_active    = sorted(red_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    red_suspended = sorted(red_suspended, key=lambda z: z["level"], reverse=True)
+    red_sorted    = red_active + red_suspended
+    limit         = max_zones if max_zones else len(red_sorted)
+    red_lines     = []
     for z in red_sorted[:limit]:
-        stars = "🔺" * min(z["level"], 5)
+        lvl = min(z["level"], 5)
+        if slot_status == 1 and not z.get("suspended"):
+            active = min(z.get("active_slots", lvl), lvl)
+            stars  = "🔺" * active + "△" * (lvl - active)
+        else:
+            stars  = "🔺" * lvl
         red_lines.append(f"`{z['name']}` {stars}")
     if max_zones and len(red_sorted) > max_zones:
         red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
@@ -180,12 +253,20 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     if max_pilots:
         pilot_items = pilot_items[:max_pilots]
     pilot_lines = []
+    pp = punishment_points or {}
     for i, (name, data) in enumerate(pilot_items):
         credits = int(data["credits"])
         rank    = get_rank(credits)
         medal   = medals[i] if i < len(medals) else "•"
         short   = name.replace('`', '') if len(name) <= 22 else name[:20].replace('`', '') + '..'
-        pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,} pts)")
+        pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,})")
+        # Punishment badge — shown indented below if show_punishment is enabled
+        if show_punishment and pp:
+            ucid = data.get("ucid")
+            pts  = pp.get(ucid, 0) if ucid else 0
+            badge = get_punishment_badge(pts, short)
+            if badge:
+                pilot_lines.append(badge)
     pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
 
     embed = discord.Embed(
@@ -206,11 +287,51 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         value=red_text[:1024],
         inline=True
     )
-    embed.add_field(
-        name="\n🏆 __Pilot Leaderboard__",
-        value="\n" + pilots_text[:1020],
-        inline=False
-    )
+
+    if show_all_pilots == 1:
+        # ── Option B: split into multiple fields, show all pilots ─────────────
+        FIELD_LIMIT = 1020
+        chunks = []
+        current_chunk, current_len = [], 0
+        for line in pilot_lines:
+            line_len = len(line) + 1
+            if current_len + line_len > FIELD_LIMIT and current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk, current_len = [line], line_len
+            else:
+                current_chunk.append(line)
+                current_len += line_len
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+        for i, chunk in enumerate(chunks):
+            embed.add_field(
+                name="\n🏆 __Pilot Leaderboard__" if i == 0 else "🎖️ __Leaderboard (cont.)__",
+                value=("\n" + chunk) if i == 0 else chunk,
+                inline=False
+            )
+    else:
+        # ── Option A (default): single field, cut at limit, show + X more ─────
+        FIELD_LIMIT = 1020
+        visible_lines, used = [], 0
+        more_label = ""
+        for i, line in enumerate(pilot_lines):
+            line_len = len(line) + 1
+            remaining = len(pilot_lines) - i
+            more_label = f"\n*+ {remaining} more pilots*" if remaining > 0 else ""
+            if used + line_len + len(more_label) > FIELD_LIMIT:
+                break
+            visible_lines.append(line)
+            used += line_len
+        remaining = len(pilot_lines) - len(visible_lines)
+        pilots_value = "\n" + "\n".join(visible_lines)
+        if remaining > 0:
+            pilots_value += f"\n*+ {remaining} more pilots*"
+        embed.add_field(
+            name="\n🏆 __Pilot Leaderboard__",
+            value=pilots_value[:1024],
+            inline=False
+        )
+
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
 
@@ -235,6 +356,10 @@ class FHReport(Plugin):
         self._default_cfg: dict = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
+
+    async def install(self) -> None:
+        """No database tables needed for this plugin."""
+        pass
 
     async def cog_load(self) -> None:
         await super().cog_load()
@@ -301,6 +426,24 @@ class FHReport(Plugin):
             except Exception as e:
                 self.log.error(f"FH_Report [{server_name}]: unexpected error: {e}", exc_info=True)
 
+    async def _fetch_punishment_points(self) -> dict:
+        """Fetch total punishment points per UCID from pu_events table.
+        Returns empty dict if table doesn't exist or any error occurs."""
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("""
+                        SELECT init_id, COALESCE(SUM(points), 0) AS total
+                        FROM pu_events
+                        WHERE points > 0
+                        GROUP BY init_id
+                    """)
+                    rows = await cur.fetchall()
+                    return {row[0]: float(row[1]) for row in rows}
+        except Exception as e:
+            self.log.debug(f"FH_Report: punishment points not available: {e}")
+            return {}
+
     async def _update_server(self, server_name: str, cfg: dict):
         channel_id = cfg.get("channel_id")
         saves_dir  = cfg.get("saves_dir")
@@ -331,13 +474,23 @@ class FHReport(Plugin):
             self.log.error(f"FH_Report [{server_name}]: error parsing data: {e}")
             return
 
+        # Fetch punishment points if enabled
+        show_punishment = int(cfg.get("show_punishment") or 0)
+        punishment_points = {}
+        if show_punishment:
+            punishment_points = await self._fetch_punishment_points()
+
         embed = build_embed(
-            zones         = zones,
-            players       = players,
-            campaign_name = cfg.get("campaign_name", "Foothold Campaign"),
-            max_zones     = cfg.get("max_zones", 14),
-            max_pilots    = cfg.get("max_pilots") or None,
-            bar_length    = int(cfg.get("bar_length") or 20),
+            zones             = zones,
+            players           = players,
+            campaign_name     = cfg.get("campaign_name", "Foothold Campaign"),
+            max_zones         = cfg.get("max_zones") or None,
+            max_pilots        = cfg.get("max_pilots") or None,
+            bar_length        = int(cfg.get("bar_length") or 20),
+            slot_status       = int(cfg.get("slot_status") or 0),
+            punishment_points = punishment_points,
+            show_punishment   = show_punishment,
+            show_all_pilots   = int(cfg.get("show_all_pilots") or 0),
         )
 
         try:
