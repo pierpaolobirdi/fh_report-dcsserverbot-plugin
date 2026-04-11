@@ -62,7 +62,6 @@ Zone ordering with `slot_status: 1`:
 ## Compatibility
 
 - Works with **any Foothold map** — the plugin reads `foothold.status` in the saves directory to identify the active persistence file automatically.
-- Tested with **Foothold Persian Gulf** and **Foothold Sinai** on DCSServerBot v3.x.
 - Requires **no database** — no tables are created.
 
 ---
@@ -142,18 +141,18 @@ DEFAULT:
   max_zones: 15
   slot_status: 0
 
-"Foothold Server":
-  saves_dir: "L:\\Saved Games\\DCS_Server\\Missions\\Saves"
-  channel_id: 1458145804685541508
-  campaign_name: "Operation Nova314 — Persian Gulf"
+"== Server-1 | Foothold ==":
+  saves_dir: "C:\\Saved Games\\DCS_Server1\\Missions\\Saves"
+  channel_id: 125536244541508
+  campaign_name: "Operation — FootHoldMap"
   slot_status: 1        # override — show damage on this server
   excluded_ucids:
-    - 71be6e5a09c1cd3979a8ec170fd99010   # Pier_Paolo
+    - 71derf45ftgssr0f6744d99010   # User Pilot
 
-# "Second Server":
-#   saves_dir: "L:\\Saved Games\\DCS_Server2\\Missions\\Saves"
-#   channel_id: 1464645864684388402
-#   campaign_name: "Operation Nova314 — Sinai"
+#"== Server-2 | xxxx ==":
+#  saves_dir: "C:\\Saved Games\\DCS_Server2\\Missions\\Saves"
+#  channel_id: 125536244541508
+#  campaign_name: "Operation — FootHoldMap"
 ```
 
 ---
