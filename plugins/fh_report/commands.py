@@ -306,7 +306,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for i, chunk in enumerate(chunks):
         embed.add_field(
             name="\n🏆 __Pilot Leaderboard__" if i == 0 else "\u200b",
-            value="\n" + chunk if i == 0 else chunk,
+            value=("\n" + chunk) if i == 0 else ("\u200b\n" + chunk),
             inline=False
         )
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
