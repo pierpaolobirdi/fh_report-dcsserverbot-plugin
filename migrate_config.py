@@ -14,6 +14,7 @@ KNOWN_VARS = {
     "bar_length",
     "max_zones",
     "slot_status",
+    "show_punishment",
     "max_pilots",
     "excluded_ucids",
     "saves_dir",
@@ -27,6 +28,7 @@ DEFAULTS = {
     "bar_length": 20,
     "max_zones": 15,
     "slot_status": 0,
+    "show_punishment": 0,
 }
 
 COMMENTS = {
@@ -34,6 +36,7 @@ COMMENTS = {
     "bar_length":      "# Number of squares in the progress bar",
     "max_zones":       "# Max zones shown per column (omit for all)",
     "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",
+    "show_punishment":  "# 0 = disabled  |  1 = show punishment badges in leaderboard",
 }
 
 
@@ -61,7 +64,15 @@ def main():
         sys.exit(0)
 
     default_block = default_match.group(0)
-    insert_pos    = default_match.end()
+
+    # Insert before trailing blank lines at end of DEFAULT block
+    # so new variables appear inside the block, not after it
+    block_end = default_match.end()
+    trailing = re.search(r"(\n+)$", default_match.group(1))
+    if trailing:
+        insert_pos = block_end - len(trailing.group(1)) + 1
+    else:
+        insert_pos = block_end
 
     lines_to_add = []
     for key, default_val in DEFAULTS.items():

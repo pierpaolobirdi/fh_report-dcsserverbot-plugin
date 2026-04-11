@@ -115,6 +115,7 @@ The yaml uses a `DEFAULT` section for shared settings and one named block per se
 | `max_zones` | `15` | Max zones shown per column. Remainder shown as `+ X more bases`. Omit for all |
 | `bar_length` | `20` | Number of squares in the progress bar |
 | `slot_status` | `0` | `0` = show max level only / `1` = show active vs lost slots |
+| `show_punishment` | `0` | `0` = disabled / `1` = show punishment status below sanctioned pilots |
 | `max_pilots` | all | Max pilots shown in the leaderboard |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 
@@ -181,6 +182,37 @@ Ranks are taken directly from the Foothold engine and assigned based on accumula
 
 The plugin reads `foothold.status` from the `saves_dir` to identify which persistence file is currently active. This file is written by Foothold and always points to the correct `.lua` for the running mission, regardless of which map is loaded. If `foothold.status` is not found, the plugin falls back to the most recently modified `foothold_*.lua` file.
 
+
+---
+
+## Pilot punishment status (`show_punishment`)
+
+When `show_punishment: 1` is set, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` database table and shows a status badge indented below each sanctioned pilot in the leaderboard:
+
+```
+🥇 Pier_Paolo — First Lieutenant (152,612)
+🥈 Eskuvy — Technical Sergeant (19,765)
+·　🔍 `Eskuvy` JAG's investigation 🔨🔨
+🥉 Amirus — Staff Sergeant (14,639)
+⭐ DOLAR — Recruit (1,034)
+·　🔒 `DOLAR` Brig time 🔨🔨🔨🔨🔨
+```
+
+### Punishment thresholds
+
+| Points | Icon | Status | Severity |
+|---|---|---|---|
+| 1 – 10 | ⚠️ | JAG's radar | 🔨 |
+| 11 – 25 | 🔍 | JAG's investigation | 🔨🔨 |
+| 26 – 50 | ⚖️ | JAG indictment filed | 🔨🔨🔨 |
+| 51 – 100 | ⛓️ | Confined to quarters | 🔨🔨🔨🔨 |
+| 101 – 200 | 🔒 | Brig time | 🔨🔨🔨🔨🔨 |
+| 200+ | 💀 | Dishonorably discharged | 🔨🔨🔨🔨🔨🔨 |
+
+### Requirements
+
+- The **DCSServerBot Punishment plugin** must be installed and active
+- If the punishment plugin is not active or the `pu_events` table does not exist, this option does nothing — no errors, no warnings
 
 ---
 

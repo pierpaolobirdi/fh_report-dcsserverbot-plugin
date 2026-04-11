@@ -134,6 +134,12 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
         if m:
             excluded_names.add(m.group(1))
 
+    # Build name->ucid mapping from ucidToName table
+    name_to_ucid = {}
+    ucid_pattern = r"\['([a-f0-9]{32})'\]=\"([^\"]+)\""
+    for ucid_m in re.finditer(ucid_pattern, content):
+        name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
+
     players = {}
     block_pattern = r"\['([^']+)'\]=\{([^}]+)\}"
     for m in re.finditer(block_pattern, content):
@@ -148,14 +154,40 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
         clean_name = name.strip()
         if not clean_name or len(clean_name) < 2:
             continue
-        players[clean_name] = {"credits": float(credit_m.group(1))}
+        players[clean_name] = {
+            "credits": float(credit_m.group(1)),
+            "ucid":    name_to_ucid.get(clean_name),
+        }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+# ── Punishment thresholds ─────────────────────────────────────────────────────
+# (min_points, icon, label, hammer_count)
+PUNISHMENT_THRESHOLDS = [
+    (200, "💀", "Dishonorably discharged", 6),
+    (101, "🔒", "Brig time",               5),
+    (51,  "⛓️", "Confined to quarters",    4),
+    (26,  "⚖️", "JAG indictment filed",    3),
+    (11,  "🔍", "JAG's investigation",    2),
+    (1,   "⚠️", "JAG's radar",            1),
+]
+
+def get_punishment_badge(points: float, name: str = "") -> str | None:
+    """Returns indented badge line for a given punishment points total, or None."""
+    for min_pts, icon, label, hammers in PUNISHMENT_THRESHOLDS:
+        if points >= min_pts:
+            prefix  = f"`{name}` " if name else ""
+            gravity = "🔨" * hammers
+            return f"·　{icon} {prefix}{label} {gravity}"
+    return None
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
-                bar_length: int, slot_status: int = 0) -> discord.Embed:
+                bar_length: int, slot_status: int = 0,
+                punishment_points: dict | None = None,
+                show_punishment: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -220,12 +252,20 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     if max_pilots:
         pilot_items = pilot_items[:max_pilots]
     pilot_lines = []
+    pp = punishment_points or {}
     for i, (name, data) in enumerate(pilot_items):
         credits = int(data["credits"])
         rank    = get_rank(credits)
         medal   = medals[i] if i < len(medals) else "•"
         short   = name.replace('`', '') if len(name) <= 22 else name[:20].replace('`', '') + '..'
-        pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,} pts)")
+        pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,})")
+        # Punishment badge — shown indented below if show_punishment is enabled
+        if show_punishment and pp:
+            ucid = data.get("ucid")
+            pts  = pp.get(ucid, 0) if ucid else 0
+            badge = get_punishment_badge(pts, short)
+            if badge:
+                pilot_lines.append(badge)
     pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
 
     embed = discord.Embed(
@@ -345,6 +385,24 @@ class FHReport(Plugin):
             except Exception as e:
                 self.log.error(f"FH_Report [{server_name}]: unexpected error: {e}", exc_info=True)
 
+    async def _fetch_punishment_points(self) -> dict:
+        """Fetch total punishment points per UCID from pu_events table.
+        Returns empty dict if table doesn't exist or any error occurs."""
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("""
+                        SELECT init_id, COALESCE(SUM(points), 0) AS total
+                        FROM pu_events
+                        WHERE points > 0
+                        GROUP BY init_id
+                    """)
+                    rows = await cur.fetchall()
+                    return {row[0]: float(row[1]) for row in rows}
+        except Exception as e:
+            self.log.debug(f"FH_Report: punishment points not available: {e}")
+            return {}
+
     async def _update_server(self, server_name: str, cfg: dict):
         channel_id = cfg.get("channel_id")
         saves_dir  = cfg.get("saves_dir")
@@ -375,14 +433,22 @@ class FHReport(Plugin):
             self.log.error(f"FH_Report [{server_name}]: error parsing data: {e}")
             return
 
+        # Fetch punishment points if enabled
+        show_punishment = int(cfg.get("show_punishment") or 0)
+        punishment_points = {}
+        if show_punishment:
+            punishment_points = await self._fetch_punishment_points()
+
         embed = build_embed(
-            zones         = zones,
-            players       = players,
-            campaign_name = cfg.get("campaign_name", "Foothold Campaign"),
-            max_zones     = cfg.get("max_zones") or None,
-            max_pilots    = cfg.get("max_pilots") or None,
-            bar_length    = int(cfg.get("bar_length") or 20),
-            slot_status   = int(cfg.get("slot_status") or 0),
+            zones             = zones,
+            players           = players,
+            campaign_name     = cfg.get("campaign_name", "Foothold Campaign"),
+            max_zones         = cfg.get("max_zones") or None,
+            max_pilots        = cfg.get("max_pilots") or None,
+            bar_length        = int(cfg.get("bar_length") or 20),
+            slot_status       = int(cfg.get("slot_status") or 0),
+            punishment_points = punishment_points,
+            show_punishment   = show_punishment,
         )
 
         try:

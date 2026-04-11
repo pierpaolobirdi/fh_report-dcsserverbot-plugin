@@ -41,6 +41,7 @@ DEFAULT:
   bar_length: 20
   max_zones: 15
   slot_status: 0
+  show_punishment: 0
 #  max_pilots:
 #  excluded_ucids:
 
@@ -65,4 +66,5 @@ DEFAULT:
 #  max_zones: 15
 #  max_pilots:
 #  slot_status: 0
+#  show_punishment: 0
 #  excluded_ucids:
