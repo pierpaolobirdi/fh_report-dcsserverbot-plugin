@@ -67,7 +67,7 @@ def parse_zones(filepath: str) -> dict:
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    zones = {"blue": [], "red": []}
+    zones = {"blue": [], "red": [], "neutral": 0}
     zone_names = re.findall(r"zonePersistance\['zones'\]\['([^']+)'\]", content)
 
     for zone in zone_names:
@@ -77,24 +77,42 @@ def parse_zones(filepath: str) -> dict:
             continue
         block = match.group(1)
 
-        side_m  = re.search(r"\['side'\]=(\d+)", block)
-        active_m = re.search(r"\['active'\]=(true|false)", block)
-        level_m  = re.search(r"\['level'\]=(\d+)", block)
+        side_m      = re.search(r"\['side'\]=(\d+)", block)
+        active_m    = re.search(r"\['active'\]=(true|false)", block)
+        level_m     = re.search(r"\['level'\]=(\d+)", block)
+        suspended_m = re.search(r"\['suspended'\]=(true|false)", block)
 
         if not side_m:
             continue
 
-        side   = int(side_m.group(1))
-        active = active_m.group(1) == "true" if active_m else False
-        level  = int(level_m.group(1)) if level_m else 0
+        side      = int(side_m.group(1))
+        active    = active_m.group(1) == "true" if active_m else False
+        level     = int(level_m.group(1)) if level_m else 0
+        suspended = suspended_m.group(1) == "true" if suspended_m else False
 
-        if side == 0 or not active or level == 0:
+        if not active or level == 0:
             continue
         # Skip hidden/internal zones
         if zone.lower().startswith("hidden"):
             continue
 
-        info = {"name": zone, "level": level}
+        # Neutral zones — count for bar but don't list
+        if side == 0:
+            zones["neutral"] += 1
+            continue
+
+        # Count active upgrade slots from remainingUnits
+        ru_match = re.search(r"\['remainingUnits'\]=\{(.*?)\n  \},", block, re.DOTALL)
+        active_slots = 0
+        if ru_match:
+            ru_block = ru_match.group(1)
+            # Each top-level slot is [N]={ ... } — count those with content
+            slot_matches = re.findall(r"\[(\d+)\]=\{([^}]*)\}", ru_block)
+            active_slots = sum(1 for _, slot_content in slot_matches if slot_content.strip())
+        if active_slots == 0 and not ru_match:
+            active_slots = min(level, 5)
+
+        info = {"name": zone, "level": min(level, 5), "active_slots": active_slots, "suspended": suspended}
         if side == 2:
             zones["blue"].append(info)
         elif side == 1:
@@ -137,39 +155,60 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
 
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
-                bar_length: int) -> discord.Embed:
+                bar_length: int, slot_status: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    blue_count = len(zones["blue"])
-    red_count  = len(zones["red"])
-    total      = blue_count + red_count
+    blue_count  = len(zones["blue"])
+    red_count   = len(zones["red"])
+    neutral_count = zones.get("neutral", 0)
+    total         = blue_count + red_count + neutral_count
+    active_total  = blue_count + red_count
 
-    # Progress bar
-    pct_blue  = round(blue_count / total * 100) if total > 0 else 50
-    pct_red   = 100 - pct_blue
-    blue_bars = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
-    red_bars  = bar_length - blue_bars
-    bar       = "🟦" * blue_bars + "🟥" * red_bars
-    progress  = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
+    # Progress bar — neutrals shown as ⬜
+    pct_blue     = round(blue_count / active_total * 100) if active_total > 0 else 50
+    pct_red      = 100 - pct_blue
+    blue_bars    = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
+    neutral_bars = round((neutral_count / total) * bar_length) if total > 0 else 0
+    red_bars     = bar_length - blue_bars - neutral_bars
+    bar          = "🟦" * blue_bars + "⬜" * neutral_bars + "🟥" * red_bars
+    progress     = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
 
-    # BLUE zones
-    blue_sorted = sorted(zones["blue"], key=lambda z: z["level"], reverse=True)
-    limit       = max_zones if max_zones else len(blue_sorted)
-    blue_lines  = []
+    # BLUE zones — actives first sorted by level+slots, suspended last
+    blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
+    blue_suspended = [z for z in zones["blue"] if z.get("suspended")]
+    blue_active    = sorted(blue_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    blue_suspended = sorted(blue_suspended, key=lambda z: z["level"], reverse=True)
+    blue_sorted    = blue_active + blue_suspended
+    limit          = max_zones if max_zones else len(blue_sorted)
+    blue_lines     = []
     for z in blue_sorted[:limit]:
-        stars = "🔹" * min(z["level"], 5)
+        lvl = min(z["level"], 5)
+        if slot_status == 1 and not z.get("suspended"):
+            active = min(z.get("active_slots", lvl), lvl)
+            stars  = "🔹" * active + "◇" * (lvl - active)
+        else:
+            stars  = "🔹" * lvl
         blue_lines.append(f"`{z['name']}` {stars}")
     if max_zones and len(blue_sorted) > max_zones:
         blue_lines.append(f"*+ {len(blue_sorted) - max_zones} more bases*")
     blue_lines.append(".")
     blue_text = "\n".join(blue_lines) if blue_lines else "—"
 
-    # RED zones
-    red_sorted = sorted(zones["red"], key=lambda z: z["level"], reverse=True)
-    limit      = max_zones if max_zones else len(red_sorted)
-    red_lines  = []
+    # RED zones — actives first sorted by level+slots, suspended last
+    red_active    = [z for z in zones["red"] if not z.get("suspended")]
+    red_suspended = [z for z in zones["red"] if z.get("suspended")]
+    red_active    = sorted(red_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    red_suspended = sorted(red_suspended, key=lambda z: z["level"], reverse=True)
+    red_sorted    = red_active + red_suspended
+    limit         = max_zones if max_zones else len(red_sorted)
+    red_lines     = []
     for z in red_sorted[:limit]:
-        stars = "🔺" * min(z["level"], 5)
+        lvl = min(z["level"], 5)
+        if slot_status == 1 and not z.get("suspended"):
+            active = min(z.get("active_slots", lvl), lvl)
+            stars  = "🔺" * active + "△" * (lvl - active)
+        else:
+            stars  = "🔺" * lvl
         red_lines.append(f"`{z['name']}` {stars}")
     if max_zones and len(red_sorted) > max_zones:
         red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
@@ -340,9 +379,10 @@ class FHReport(Plugin):
             zones         = zones,
             players       = players,
             campaign_name = cfg.get("campaign_name", "Foothold Campaign"),
-            max_zones     = cfg.get("max_zones", 14),
+            max_zones     = cfg.get("max_zones") or None,
             max_pilots    = cfg.get("max_pilots") or None,
             bar_length    = int(cfg.get("bar_length") or 20),
+            slot_status   = int(cfg.get("slot_status") or 0),
         )
 
         try:
