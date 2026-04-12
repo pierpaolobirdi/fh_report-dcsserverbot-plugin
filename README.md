@@ -191,12 +191,12 @@ The plugin reads `foothold.status` from the `saves_dir` to identify which persis
 When `show_punishment: 1` is set, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` database table and shows a status badge indented below each sanctioned pilot in the leaderboard:
 
 ```
-🥇 Pier_Paolo — First Lieutenant (152,612)
-🥈 Eskuvy — Technical Sergeant (19,765)
-·　🔍 `Eskuvy` JAG's investigation 🔨🔨
-🥉 Amirus — Staff Sergeant (14,639)
-⭐ DOLAR — Recruit (1,034)
-·　🔒 `DOLAR` Brig time 🔨🔨🔨🔨🔨
+🥇 Pilot1 — First Lieutenant (152,612)
+🥈 Pilot2 — Technical Sergeant (19,765)
+·　🔍 `Pilot2` JAG's investigation 🔨🔨
+🥉 Pilot3 — Staff Sergeant (14,639)
+⭐ Pilot4 — Recruit (1,034)
+·　🔒 `Pilot4` Brig time 🔨🔨🔨🔨🔨
 ```
 
 ### Punishment thresholds
