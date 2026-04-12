@@ -15,6 +15,7 @@ KNOWN_VARS = {
     "max_zones",
     "slot_status",
     "show_punishment",
+    "strip_callsign",
     "show_all_pilots",
     "max_pilots",
     "excluded_ucids",
@@ -30,6 +31,7 @@ DEFAULTS = {
     "max_zones": 15,
     "slot_status": 0,
     "show_punishment": 0,
+    "strip_callsign": 0,
     "show_all_pilots": 0,
 }
 

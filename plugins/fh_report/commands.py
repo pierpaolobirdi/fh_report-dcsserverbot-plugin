@@ -162,6 +162,28 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+def strip_callsign(name: str) -> str:
+    """Remove flight callsign prefix from pilot name.
+    Handles separators (|, /, \, ,) and callsign patterns (WORD N-N).
+    Preserves squadron tags like [MA] at the start."""
+    # Step 1 — split on separator, keep rightmost part
+    for sep in ['|', '/', '\\', ',']:
+        if sep in name:
+            name = name.split(sep)[-1].strip()
+            break
+
+    # Step 2 — remove leading callsign pattern: WORD(s) N-N
+    # e.g. "UZI 1-1 zarpa" → "zarpa", but not "[MA] Leka" or "132nd Kimkiller"
+    import re as _re
+    callsign_pattern = _re.compile(r'^[A-Z][A-Z0-9]* \d+-\d+\s*', _re.IGNORECASE)
+    stripped = callsign_pattern.sub('', name).strip()
+    # Only apply if result is not empty
+    if stripped:
+        name = stripped
+
+    return name.strip()
+
+
 # ── Punishment thresholds ─────────────────────────────────────────────────────
 # (min_points, icon, label, hammer_count)
 PUNISHMENT_THRESHOLDS = [
@@ -188,7 +210,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 bar_length: int, slot_status: int = 0,
                 punishment_points: dict | None = None,
                 show_punishment: int = 0,
-                show_all_pilots: int = 0) -> discord.Embed:
+                show_all_pilots: int = 0,
+                strip_callsign_flag: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -258,7 +281,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         credits = int(data["credits"])
         rank    = get_rank(credits)
         medal   = medals[i] if i < len(medals) else "•"
-        short   = name.replace('`', '') if len(name) <= 22 else name[:20].replace('`', '') + '..'
+        display = strip_callsign(name) if strip_callsign_flag else name
+        short   = display.replace('`', '') if len(display) <= 22 else display[:20].replace('`', '') + '..'
         pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,})")
         # Punishment badge — shown indented below if show_punishment is enabled
         if show_punishment and pp:
@@ -491,6 +515,7 @@ class FHReport(Plugin):
             punishment_points = punishment_points,
             show_punishment   = show_punishment,
             show_all_pilots   = int(cfg.get("show_all_pilots") or 0),
+            strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
         )
 
         try:
