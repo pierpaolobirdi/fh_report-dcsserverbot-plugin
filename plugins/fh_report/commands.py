@@ -164,10 +164,10 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
 
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
-    Handles separators (|, /, \, ,) and callsign patterns (WORD N-N).
+    Handles separators (|, /, backslash, ,) and callsign patterns (WORD N-N).
     Preserves squadron tags like [MA] at the start."""
     # Step 1 — split on separator, keep rightmost part
-    for sep in ['|', '/', '\\', ',']:
+    for sep in ['|', '/', chr(92), ',']:
         if sep in name:
             name = name.split(sep)[-1].strip()
             break
@@ -280,14 +280,23 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for i, (name, data) in enumerate(pilot_items):
         credits = int(data["credits"])
         rank    = get_rank(credits)
-        medal   = medals[i] if i < len(medals) else "•"
+        medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
         display = strip_callsign(name) if strip_callsign_flag else name
         short   = display.replace('`', '') if len(display) <= 22 else display[:20].replace('`', '') + '..'
-        pilot_lines.append(f"{medal} `{short}` — **{rank}** ({credits:,})")
-        # Punishment badge — shown indented below if show_punishment is enabled
-        if show_punishment and pp:
+        # Hook overrides
+        rank    = data.get("custom_rank") or rank
+        hide_credits = data.get("hide_credits", False)
+        credits_str = f"({credits:,})" if not hide_credits else ""
+        pilot_lines.append(f"{medal} `{short}` — **{rank}** {credits_str}".rstrip())
+        # Punishment badge — hook_punishment overrides DB points
+        if show_punishment:
             ucid = data.get("ucid")
-            pts  = pp.get(ucid, 0) if ucid else 0
+            if "hook_punishment" in data:
+                pts = data["hook_punishment"]
+            elif pp and ucid:
+                pts = pp.get(ucid, 0)
+            else:
+                pts = 0
             badge = get_punishment_badge(pts, short)
             if badge:
                 pilot_lines.append(badge)
@@ -362,7 +371,28 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     return embed
 
 
+# ── Optional private hook ─────────────────────────────────────────────────────
+import importlib.util as _iutil
+import os as _os
+
+def _load_hook():
+    _hook_path = _os.path.join(_os.path.dirname(__file__), "fh_hook.py")
+    if not _os.path.exists(_hook_path):
+        return None, False
+    try:
+        _spec = _iutil.spec_from_file_location("fh_hook", _hook_path)
+        _mod  = _iutil.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod, True
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"FH_Report: fh_hook load error: {e}")
+        return None, False
+
+_fh_hook, _HAS_HOOK = _load_hook()
+
 # ── Plugin class ──────────────────────────────────────────────────────────────
+
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
@@ -497,6 +527,13 @@ class FHReport(Plugin):
         except Exception as e:
             self.log.error(f"FH_Report [{server_name}]: error parsing data: {e}")
             return
+
+        # ── Optional private hook — post-processes players dict ───────────────
+        if _HAS_HOOK:
+            try:
+                players = _fh_hook.post_process(players, cfg, server_name)
+            except Exception:
+                pass  # Hook errors are silently ignored
 
         # Fetch punishment points if enabled
         show_punishment = int(cfg.get("show_punishment") or 0)
