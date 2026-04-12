@@ -16,6 +16,10 @@ KNOWN_VARS = {
     "slot_status",
     "show_punishment",
     "strip_callsign",
+<<<<<<< Updated upstream
+=======
+    "points_order",
+>>>>>>> Stashed changes
     "show_all_pilots",
     "max_pilots",
     "excluded_ucids",
@@ -32,6 +36,10 @@ DEFAULTS = {
     "slot_status": 0,
     "show_punishment": 0,
     "strip_callsign": 0,
+<<<<<<< Updated upstream
+=======
+    "points_order": "R",
+>>>>>>> Stashed changes
     "show_all_pilots": 0,
 }
 

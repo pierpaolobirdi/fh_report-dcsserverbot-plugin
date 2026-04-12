@@ -121,6 +121,29 @@ def parse_zones(filepath: str) -> dict:
     return zones
 
 
+def parse_player_stats(filepath: str) -> dict:
+    """Parse playerStats from Foothold persistence file.
+    Returns dict {player_name: campaign_points}."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        stats_match = re.search(
+            r"zonePersistance\['playerStats'\] = \{(.*?)^\}",
+            content, re.DOTALL | re.MULTILINE
+        )
+        if not stats_match:
+            return {}
+        block = stats_match.group(1)
+        results = {}
+        for m in re.finditer(r"\['([^']+)'\]=\{([^}]+)\}", block, re.DOTALL):
+            pts_m = re.search(r"\['Points'\]=(\d+)", m.group(2))
+            if pts_m:
+                results[m.group(1)] = int(pts_m.group(1))
+        return results
+    except Exception:
+        return {}
+
+
 def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
     """Parse Foothold_Ranks.lua. Returns pilot dict sorted by credits desc.
     Pilots whose UCID is in excluded_ucids are omitted."""
@@ -205,13 +228,30 @@ def get_punishment_badge(points: float, name: str = "") -> str | None:
     return None
 
 
+def _lb_title(points_order: str) -> str:
+    """Build leaderboard field title based on points_order."""
+    if points_order == "BR":
+        return "\n🏆 __Pilot Leaderboard · by Rank (R: Rank · S: Session)__"
+    if points_order == "BS":
+        return "\n📊 __Session Leaderboard · by Current Session (S: Session · R: Rank)__"
+    if points_order in ("S", "2S"):
+        return "\n📊 __Session Leaderboard · by Current Session__"
+    return "\n🏆 __Pilot Leaderboard · by Rank__"
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: int = 0,
                 punishment_points: dict | None = None,
                 show_punishment: int = 0,
                 show_all_pilots: int = 0,
+<<<<<<< Updated upstream
                 strip_callsign_flag: int = 0) -> discord.Embed:
+=======
+                strip_callsign_flag: int = 0,
+                campaign_stats: dict | None = None,
+                points_order: str = "T") -> discord.Embed:
+>>>>>>> Stashed changes
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -270,11 +310,33 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
     red_text = "\n".join(red_lines) if red_lines else "—"
 
-    # Pilot leaderboard
-    medals      = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
-    pilot_items = list(players.items())
+    # Pilot leaderboard — apply session stats and ordering
+    cs = campaign_stats or {}
+
+    # Add session_points to each player
+    for name, data in players.items():
+        s_pts = cs.get(name, 0)
+        if s_pts == 0:
+            for cs_name, cs_pts in cs.items():
+                if strip_callsign(cs_name) == strip_callsign(name):
+                    s_pts = cs_pts
+                    break
+        data["session_points"] = s_pts
+
+    # Determine sort key and display flags from points_order
+    order_by_session = points_order in ("S", "BS", "2S")
+    show_rank        = points_order in ("R", "BR", "BS", "2R", "2S")
+    show_session     = points_order in ("S", "BR", "BS", "2R", "2S")
+
+    if order_by_session:
+        pilot_items = sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
+    else:
+        pilot_items = list(players.items())  # already sorted by total credits
+
     if max_pilots:
         pilot_items = pilot_items[:max_pilots]
+
+    medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
     pilot_lines = []
     pp = punishment_points or {}
     for i, (name, data) in enumerate(pilot_items):
@@ -286,8 +348,30 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         # Hook overrides
         rank    = data.get("custom_rank") or rank
         hide_credits = data.get("hide_credits", False)
+<<<<<<< Updated upstream
         credits_str = f"({credits:,})" if not hide_credits else ""
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {credits_str}".rstrip())
+=======
+        s_pts   = data.get("session_points", 0)
+
+        # Build points string based on points_order
+        if hide_credits:
+            pts_str = ""
+        elif points_order == "R":
+            pts_str = f"(R: {credits:,})"
+        elif points_order == "S":
+            pts_str = f"(S: {s_pts:,})"
+        elif points_order == "BR":
+            pts_str = f"(R: {credits:,} · S: {s_pts:,})" if s_pts else f"(R: {credits:,})"
+        elif points_order == "BS":
+            pts_str = f"(S: {s_pts:,} · R: {credits:,})" if s_pts else f"(R: {credits:,})"
+        elif points_order == "2R":
+            pts_str = f"(R: {credits:,})"
+        else:  # 2S
+            pts_str = f"(S: {s_pts:,})" if s_pts else "(S: 0)"
+
+        pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
+>>>>>>> Stashed changes
         # Punishment badge — hook_punishment overrides DB points
         if show_punishment:
             ucid = data.get("ucid")
@@ -338,7 +422,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             chunks.append("\n".join(current_chunk))
         for i, chunk in enumerate(chunks):
             embed.add_field(
-                name="\n🏆 __Pilot Leaderboard__" if i == 0 else "🎖️ __Leaderboard (cont.)__",
+                name=(_lb_title(points_order)) if i == 0 else ("📊 __Session Leaderboard (cont.)__" if points_order in ('S','BS','2S') else "🎖️ __Leaderboard (cont.)__"),
                 value=("\n" + chunk) if i == 0 else chunk,
                 inline=False
             )
@@ -360,10 +444,62 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         if remaining > 0:
             pilots_value += f"\n*+ {remaining} more pilots*"
         embed.add_field(
-            name="\n🏆 __Pilot Leaderboard__",
+            name=_lb_title(points_order),
             value=pilots_value[:1024],
             inline=False
         )
+
+    # ── 2R/2S: add second leaderboard ────────────────────────────────────────
+    if points_order in ("2R", "2S") and cs:
+        # For 2R: second table = session. For 2S: second table = rank (already sorted)
+        if points_order == "2R":
+            second_items = sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
+            second_items = [item for item in second_items if item[1].get("session_points", 0) > 0]
+            second_title = "📊 __Session Leaderboard · by Current Session__"
+            second_cont  = "📊 __Session Leaderboard (cont.)__"
+        else:  # 2S: second table = rank order
+            second_items = sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
+            second_title = "🏆 __Pilot Leaderboard · by Rank__"
+            second_cont  = "🎖️ __Leaderboard (cont.)__"
+
+        if second_items:
+            if max_pilots:
+                second_items = second_items[:max_pilots]
+            second_lines = []
+            s_medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
+            for i, (name, data) in enumerate(second_items):
+                s_credits = int(data["credits"])
+                s_rank    = data.get("custom_rank") or get_rank(s_credits)
+                s_display = strip_callsign(name) if strip_callsign_flag else name
+                s_short   = s_display.replace('`', '') if len(s_display) <= 22 else s_display[:20].replace('`', '') + '..'
+                s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
+                s_pts     = data.get("session_points", 0)
+                if points_order == "2R":
+                    line = f"{s_medal} `{s_short}` — **{s_rank}** (S: {s_pts:,})"
+                else:
+                    line = f"{s_medal} `{s_short}` — **{s_rank}** (R: {s_credits:,})"
+                second_lines.append(line)
+
+            # Split into chunks
+            FIELD_LIMIT = 1020
+            s_chunks, s_current, s_len = [], [], 0
+            for line in second_lines:
+                ll = len(line) + 1
+                if s_len + ll > FIELD_LIMIT and s_current:
+                    s_chunks.append("\n".join(s_current))
+                    s_current, s_len = [line], ll
+                else:
+                    s_current.append(line)
+                    s_len += ll
+            if s_current:
+                s_chunks.append("\n".join(s_current))
+
+            for i, chunk in enumerate(s_chunks):
+                embed.add_field(
+                    name=("\n" + second_title) if i == 0 else second_cont,
+                    value=("\n" + chunk) if i == 0 else chunk,
+                    inline=False
+                )
 
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
@@ -522,8 +658,9 @@ class FHReport(Plugin):
 
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
-            zones   = parse_zones(persistence_file)
-            players = parse_ranks(ranks_file, excluded_ucids)
+            zones          = parse_zones(persistence_file)
+            players        = parse_ranks(ranks_file, excluded_ucids)
+            campaign_stats = parse_player_stats(persistence_file)
         except Exception as e:
             self.log.error(f"FH_Report [{server_name}]: error parsing data: {e}")
             return
@@ -551,8 +688,15 @@ class FHReport(Plugin):
             slot_status       = int(cfg.get("slot_status") or 0),
             punishment_points = punishment_points,
             show_punishment   = show_punishment,
+<<<<<<< Updated upstream
             show_all_pilots   = int(cfg.get("show_all_pilots") or 0),
             strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
+=======
+            show_all_pilots     = int(cfg.get("show_all_pilots") or 0),
+            strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
+            campaign_stats      = campaign_stats,
+            points_order        = cfg.get("points_order") or "R",
+>>>>>>> Stashed changes
         )
 
         try:
