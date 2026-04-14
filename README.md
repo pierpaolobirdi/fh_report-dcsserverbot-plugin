@@ -37,14 +37,14 @@ The plugin supports **multiple server instances** — each server can have its o
 
 **`slot_status: 0`** (default) — shows zone level, always fully filled:
 ```
-Bardufoss  🔹🔹🔹
-Al Dahid   🔹🔹🔹🔹
+Alpha Base   🔹🔹🔹
+Bravo Base   🔹🔹🔹🔹
 ```
 
 **`slot_status: 1`** — shows active vs destroyed upgrade slots:
 ```
-Bardufoss  🔹🔹🔹       ← level 3, all active
-Al Dahid   🔹◇◇◇        ← level 4, only 1 active
+Alpha Base   🔹🔹🔹       ← level 3, all active
+Bravo Base   🔹◇◇◇        ← level 4, only 1 active
 ```
 
 - `🔹` = active BLUE slot · `◇` = lost BLUE slot
@@ -81,7 +81,7 @@ Tables sorted by session use `📊` in the title. Tables showing both values use
 When `strip_callsign: 1`, flight callsign prefixes are removed from pilot names:
 - `CALL 1-1 Pilot1` → `Pilot1`
 - `CALL 1-3 | Pilot2` → `Pilot2`
-- `[MA] Leka` → `[MA] Leka` (squadron tags preserved)
+- `[SQD] Pilot3` → `[SQD] Pilot3` (squadron tags preserved)
 
 ### Pilot limits
 
@@ -101,11 +101,11 @@ When the list is cut, `+ X more pilots` is shown at the bottom of the table.
 When `show_punishment: 1`, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` table and shows a badge below each sanctioned pilot:
 
 ```
-🥇 `Eskuvy` — Technical Sergeant (R: 19,765)
-🥈 `Amirus` — Staff Sergeant (R: 14,639)
-·　🔍 `Amirus` JAG's investigation 🔨🔨
-🥉 `Viper**` — Recruit (R: 2,626)
-·　⚖️ `Viper**` JAG indictment filed 🔨🔨🔨
+🥇 `Pilot1` — Technical Sergeant (R: 19,765)
+🥈 `Pilot2` — Staff Sergeant (R: 14,639)
+·　🔍 `Pilot2` JAG's investigation 🔨🔨
+🥉 `Pilot3` — Recruit (R: 2,626)
+·　⚖️ `Pilot3` JAG indictment filed 🔨🔨🔨
 ```
 
 Punishment badges are always shown on the rank table. In session-only mode (`S`) they appear on the session table. In `2S` mode they appear on the second (rank) table.
@@ -153,6 +153,10 @@ The plugin reads `foothold.status` from `saves_dir` to identify the active persi
 
 ### Fresh install
 
+1. Download the zip and extract it
+2. Run `install.bat` — it detects your DCSServerBot installation automatically
+3. Edit `config/plugins/fh_report.yaml` with your values
+4. Restart DCSServerBot
 
 ### Updating from a previous version
 
@@ -208,9 +212,9 @@ DEFAULT:
 "== Server-1 | Foothold ==":
   saves_dir: "C:\\Saved Games\\DCS_Server1\\Missions\\Saves"
   channel_id: 125536244541508
-  campaign_name: "Operation Nova314 — FootHold"
+  campaign_name: "Operation — FootHold"
   excluded_ucids:
-    - 71derf45ftgssr0f6744d99010   # Pilot to hide
+    - e435a8583ad34583b7a709f58d98a6af   # Pilot UCID to hide
 ```
 
 ---
