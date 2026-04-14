@@ -192,12 +192,12 @@ The plugin reads `foothold.status` from the `saves_dir` to identify which persis
 When `show_punishment: 1` is set, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` database table and shows a status badge indented below each sanctioned pilot in the leaderboard:
 
 ```
-🥇 Pilot1 — First Lieutenant (152,612)
-🥈 Pilot2 — Technical Sergeant (19,765)
-·　🔍 `Pilot2` JAG's investigation 🔨🔨
-🥉 Pilot3 — Staff Sergeant (14,639)
-⭐ Pilot4 — Recruit (1,034)
-·　🔒 `Pilot4` Brig time 🔨🔨🔨🔨🔨
+🥇 Pier_Paolo — First Lieutenant (152,612)
+🥈 Eskuvy — Technical Sergeant (19,765)
+·　🔍 `Eskuvy` JAG's investigation 🔨🔨
+🥉 Amirus — Staff Sergeant (14,639)
+⭐ DOLAR — Recruit (1,034)
+·　🔒 `DOLAR` Brig time 🔨🔨🔨🔨🔨
 ```
 
 ### Punishment thresholds
@@ -268,3 +268,36 @@ The migration script requires Python, which is always available in a DCSServerBo
 ## Resetting the embed
 
 To force the plugin to post a new message for a server (e.g. after moving it to a different channel), delete `plugins/fh_report/message_ids.json` and restart DCSSB. All servers will post new messages and save the new IDs.
+
+## What's new in v3.3.0
+
+### Session leaderboard (new)
+- New `points_order` option controls what points are shown and how pilots are sorted
+- `R` = rank points only · `S` = session points only · `BR` / `BS` = both in one table · `2R` / `2S` = two separate tables
+- Session points read from `zonePersistance['playerStats']['Points']` in the Foothold persistence file
+- Points labeled `R:` (rank) and `S:` (session) in the leaderboard
+- Tables ordered by session use `📊` emoji in the title
+- `BR` and `BS` show legend in title: `(R: Rank · S: Session)`
+- Cyclic mode: `points_order: R, 2R, S` rotates through modes on each update
+
+### Pilot callsign stripping (new)
+- New `strip_callsign` option removes flight callsign prefixes from pilot names
+- Handles `|`, `/`, `\`, `,` separators and `WORD N-N` patterns
+- Squadron tags like `[MA]` are preserved
+
+### Leaderboard improvements
+- `show_all_pilots: 1` splits into multiple fields with `🎖️ Leaderboard (cont.)` header
+- `+ X more pilots` shown consistently across all table modes when list is cut
+- Punishment badges shown on rank table always; session-only table (`S`) also shows them
+
+### Punishment system improvements
+- Punishment badges now include pilot name: `·　⚖️ \`Pilot\` JAG indictment filed 🔨🔨🔨`
+- 6 severity levels with escalating 🔨 indicators
+- Custom punishment icon per pilot via `fh_hook.yaml` (`punishment_icon`)
+
+### Config & migration
+- `migrate_config.py` now updates header comments on every install/update
+- All new variables auto-added with defaults on update
+- `max_pilots` now applies to single-table modes only
+- New `max_pilots_2t` controls pilot limit per table in dual-table modes (`2R`,`2S`)
+

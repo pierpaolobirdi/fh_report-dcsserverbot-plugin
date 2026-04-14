@@ -18,15 +18,17 @@
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   bar_length       - Number of squares in the progress bar        (default: 20)
-#   max_pilots       - Max pilots in leaderboard, omit = all        (default: all)
+#   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
+#                      If omitted, max_pilots applies to both tables
 #   excluded_ucids   - UCIDs to hide from leaderboard               (default: none)
 #   slot_status      - Show upgrade slot damage per zone            (default: 0)
 #                      0 = show only max level (always fully filled)
 #                      1 = show active vs lost slots (🔹🔹🔹◇◇ / 🔺🔺△△△)
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
 #                      0 = show names as-is
-#                      1 = strip callsign prefix (e.g. "UZI 1-1 Pilot" → "Pilot",
-#                          "PONTIAC 1-3 | Pilot" → "Pilot"). Squadron tags like [MA] preserved.
+#                      1 = strip callsign prefix (e.g. "CALL 1-1 Pilot1" → "Pilot1",
+#                          "CALL 1-3 | Pilot2" → "Pilot2"). Squadron tags like [MA] preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
 #                      R   = show rank points only, sort by rank
 #                      S   = show session points only, sort by session
@@ -34,6 +36,8 @@
 #                      BS  = show both (S: nnn · R: nnn), sort by session
 #                      2R  = two tables: first by rank, second by current session
 #                      2S  = two tables: first by session, second by rank
+#                      Comma-separated = cycle through modes on each update
+#                      Example: points_order: R, 2R, S
 #   show_all_pilots  - Show all pilots even if list exceeds field limit (default: 0)
 #                      0 = cut at limit, show "+ X more pilots"
 #                      1 = split into multiple fields showing all pilots
@@ -63,13 +67,11 @@ DEFAULT:
   max_zones: 15
   slot_status: 0
   strip_callsign: 0
-<<<<<<< Updated upstream:config/plugins/fh_report_.yaml
-=======
   points_order: R
->>>>>>> Stashed changes:config/plugins/fh_report.yaml
   show_all_pilots: 0
   show_punishment: 0
 #  max_pilots:
+#  max_pilots_2t:
 #  excluded_ucids:
 
 "== Server-1 | Foothold ==":
@@ -82,6 +84,7 @@ DEFAULT:
 #  bar_length: 20
 #  max_zones: 15
 #  max_pilots:
+#  max_pilots_2t:
 #  slot_status: 0
 #  strip_callsign: 0
 #  points_order: R
@@ -98,10 +101,7 @@ DEFAULT:
 #  max_pilots:
 #  slot_status: 0
 #  strip_callsign: 0
-<<<<<<< Updated upstream:config/plugins/fh_report_.yaml
-=======
 #  points_order: R
->>>>>>> Stashed changes:config/plugins/fh_report.yaml
 #  show_all_pilots: 0
 #  show_punishment: 0
 #  excluded_ucids:

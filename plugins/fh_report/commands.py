@@ -218,13 +218,17 @@ PUNISHMENT_THRESHOLDS = [
     (1,   "⚠️", "JAG's radar",            1),
 ]
 
-def get_punishment_badge(points: float, name: str = "") -> str | None:
+def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
+                         custom_label: str = "", pre_icon: str = "") -> str | None:
     """Returns indented badge line for a given punishment points total, or None."""
     for min_pts, icon, label, hammers in PUNISHMENT_THRESHOLDS:
         if points >= min_pts:
-            prefix  = f"`{name}` " if name else ""
-            gravity = "🔨" * hammers
-            return f"·　{icon} {prefix}{label} {gravity}"
+            prefix     = f"`{name}` " if name else ""
+            used_pre   = pre_icon if pre_icon else icon
+            hammer     = custom_icon if custom_icon else "🔨"
+            gravity    = hammer * hammers
+            used_label = custom_label if custom_label else label
+            return f"·　{used_pre} {prefix}{used_label} {gravity}"
     return None
 
 
@@ -242,16 +246,13 @@ def _lb_title(points_order: str) -> str:
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: int = 0,
+                max_pilots_2t: int | None = None,
                 punishment_points: dict | None = None,
                 show_punishment: int = 0,
                 show_all_pilots: int = 0,
-<<<<<<< Updated upstream
-                strip_callsign_flag: int = 0) -> discord.Embed:
-=======
                 strip_callsign_flag: int = 0,
                 campaign_stats: dict | None = None,
                 points_order: str = "T") -> discord.Embed:
->>>>>>> Stashed changes
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -333,8 +334,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     else:
         pilot_items = list(players.items())  # already sorted by total credits
 
+    total_pilots_count = len(pilot_items)
     if max_pilots:
         pilot_items = pilot_items[:max_pilots]
+    hidden_pilots = total_pilots_count - len(pilot_items)
 
     medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
     pilot_lines = []
@@ -348,10 +351,6 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         # Hook overrides
         rank    = data.get("custom_rank") or rank
         hide_credits = data.get("hide_credits", False)
-<<<<<<< Updated upstream
-        credits_str = f"({credits:,})" if not hide_credits else ""
-        pilot_lines.append(f"{medal} `{short}` — **{rank}** {credits_str}".rstrip())
-=======
         s_pts   = data.get("session_points", 0)
 
         # Build points string based on points_order
@@ -371,9 +370,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             pts_str = f"(S: {s_pts:,})" if s_pts else "(S: 0)"
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
->>>>>>> Stashed changes
-        # Punishment badge — hook_punishment overrides DB points
-        if show_punishment:
+        # Punishment badge — on rank table always; on session table only when S is the only table
+        show_punishment_here = show_punishment and points_order != "2S"
+        if show_punishment_here:
             ucid = data.get("ucid")
             if "hook_punishment" in data:
                 pts = data["hook_punishment"]
@@ -381,7 +380,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 pts = pp.get(ucid, 0)
             else:
                 pts = 0
-            badge = get_punishment_badge(pts, short)
+            badge = get_punishment_badge(pts, short, data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
             if badge:
                 pilot_lines.append(badge)
     pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
@@ -407,6 +406,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
 
     if show_all_pilots == 1:
         # ── Option B: split into multiple fields, show all pilots ─────────────
+        # Add more pilots note if max_pilots was applied
+        if hidden_pilots > 0:
+            pilot_lines.append(f"*+ {hidden_pilots} more pilots*")
+
         FIELD_LIMIT = 1020
         chunks = []
         current_chunk, current_len = [], 0
@@ -430,19 +433,21 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         # ── Option A (default): single field, cut at limit, show + X more ─────
         FIELD_LIMIT = 1020
         visible_lines, used = [], 0
-        more_label = ""
         for i, line in enumerate(pilot_lines):
             line_len = len(line) + 1
-            remaining = len(pilot_lines) - i
-            more_label = f"\n*+ {remaining} more pilots*" if remaining > 0 else ""
+            # Reserve space for more pilots label
+            lines_after = len(pilot_lines) - i - 1
+            total_hidden = hidden_pilots + lines_after
+            more_label = f"\n*+ {total_hidden} more pilots*" if total_hidden > 0 else ""
             if used + line_len + len(more_label) > FIELD_LIMIT:
                 break
             visible_lines.append(line)
             used += line_len
-        remaining = len(pilot_lines) - len(visible_lines)
+        lines_not_shown = len(pilot_lines) - len(visible_lines)
+        total_hidden_final = hidden_pilots + lines_not_shown
         pilots_value = "\n" + "\n".join(visible_lines)
-        if remaining > 0:
-            pilots_value += f"\n*+ {remaining} more pilots*"
+        if total_hidden_final > 0:
+            pilots_value += f"\n*+ {total_hidden_final} more pilots*"
         embed.add_field(
             name=_lb_title(points_order),
             value=pilots_value[:1024],
@@ -463,8 +468,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             second_cont  = "🎖️ __Leaderboard (cont.)__"
 
         if second_items:
-            if max_pilots:
-                second_items = second_items[:max_pilots]
+            # Use max_pilots_2t for second table if defined, else max_pilots
+            _limit_2t     = max_pilots_2t if max_pilots_2t else max_pilots
+            total_second  = len(second_items)
+            if _limit_2t:
+                second_items = second_items[:_limit_2t]
+            hidden_second = total_second - len(second_items)
             second_lines = []
             s_medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
             for i, (name, data) in enumerate(second_items):
@@ -473,12 +482,29 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 s_display = strip_callsign(name) if strip_callsign_flag else name
                 s_short   = s_display.replace('`', '') if len(s_display) <= 22 else s_display[:20].replace('`', '') + '..'
                 s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
-                s_pts     = data.get("session_points", 0)
-                if points_order == "2R":
+                s_pts        = data.get("session_points", 0)
+                s_hide       = data.get("hide_credits", False)
+                if s_hide:
+                    line = f"{s_medal} `{s_short}` — **{s_rank}**"
+                elif points_order == "2R":
                     line = f"{s_medal} `{s_short}` — **{s_rank}** (S: {s_pts:,})"
                 else:
                     line = f"{s_medal} `{s_short}` — **{s_rank}** (R: {s_credits:,})"
                 second_lines.append(line)
+                # Punishment badge on second table only for 2S (rank table)
+                if show_punishment and points_order == "2S":
+                    s_ucid = data.get("ucid")
+                    if "hook_punishment" in data:
+                        s_pts_p = data["hook_punishment"]
+                    elif pp and s_ucid:
+                        s_pts_p = pp.get(s_ucid, 0)
+                    else:
+                        s_pts_p = 0
+                    s_badge = get_punishment_badge(s_pts_p, s_short, data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
+                    if s_badge:
+                        second_lines.append(s_badge)
+            if hidden_second > 0:
+                second_lines.append(f"*+ {hidden_second} more pilots*")
 
             # Split into chunks
             FIELD_LIMIT = 1020
@@ -539,6 +565,7 @@ class FHReport(Plugin):
     def __init__(self, bot: DCSServerBot, eventlistener: Type[TEventListener] = None):
         super().__init__(bot, eventlistener)
         self._message_ids: dict = {}
+        self._cycle_index: dict = {}  # tracks points_order cycle position per server
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -616,6 +643,20 @@ class FHReport(Plugin):
             except Exception as e:
                 self.log.error(f"FH_Report [{server_name}]: unexpected error: {e}", exc_info=True)
 
+    def _resolve_points_order(self, server_name: str, cfg: dict) -> str:
+        """Parse points_order from config — supports comma-separated cycle list.
+        Returns the current value and advances the cycle index for next call."""
+        raw = str(cfg.get("points_order") or "R").strip()
+        # Parse comma-separated list
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        if len(items) <= 1:
+            return items[0] if items else "R"
+        # Cycle through items
+        idx = self._cycle_index.get(server_name, 0)
+        value = items[idx % len(items)]
+        self._cycle_index[server_name] = (idx + 1) % len(items)
+        return value
+
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table.
         Returns empty dict if table doesn't exist or any error occurs."""
@@ -688,15 +729,11 @@ class FHReport(Plugin):
             slot_status       = int(cfg.get("slot_status") or 0),
             punishment_points = punishment_points,
             show_punishment   = show_punishment,
-<<<<<<< Updated upstream
-            show_all_pilots   = int(cfg.get("show_all_pilots") or 0),
-            strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
-=======
             show_all_pilots     = int(cfg.get("show_all_pilots") or 0),
             strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
+            max_pilots_2t       = cfg.get("max_pilots_2t") or None,
             campaign_stats      = campaign_stats,
-            points_order        = cfg.get("points_order") or "R",
->>>>>>> Stashed changes
+            points_order        = self._resolve_points_order(server_name, cfg),
         )
 
         try:
