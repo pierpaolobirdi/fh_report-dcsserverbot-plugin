@@ -1,6 +1,6 @@
 # FH_Report Plugin for DCSServerBot
 
-Automatically posts and updates a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files on disk.
+Automatically posts and updates a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files on disk. No database required.
 
 ---
 
@@ -10,7 +10,7 @@ Every X seconds (configurable per server), the plugin reads the Foothold `.lua` 
 
 - **Progress bar** showing the balance of zone control between BLUE and RED, including neutral zones as ⬜
 - **BLUE and RED zone columns** with upgrade level indicators, sorted by level and damage state
-- **Pilot leaderboard** with each pilot's rank (based on Foothold credits) and points
+- **Pilot leaderboard** with each pilot's rank, session points, and optional punishment status
 
 The embed is always **edited in place** — it never spams new messages. Message IDs are stored in `plugins/fh_report/message_ids.json`. If that file is deleted, the plugin posts new messages and saves the new IDs.
 
@@ -18,7 +18,7 @@ The plugin supports **multiple server instances** — each server can have its o
 
 ---
 
-## Zone display behaviour
+## Zone display
 
 | Zone type | Counted in bar | Listed in column | Position |
 |---|---|---|---|
@@ -27,142 +27,105 @@ The plugin supports **multiple server instances** — each server can have its o
 | Neutral (side=0) | ✅ as ⬜ | ❌ | — |
 | Hidden (name starts with `hidden`) | ❌ | ❌ | — |
 
-**Suspended zones** are always shown as fully filled because Foothold reactivates them at full capacity. They appear at the bottom of their column to indicate they are far from the front line.
+**Suspended zones** are shown as fully filled because Foothold reactivates them at full capacity. They appear at the bottom of their column.
 
-**Neutral zones** are counted in the progress bar as ⬜ squares but not listed, since they belong to neither faction.
+**Neutral zones** are counted in the progress bar as ⬜ but not listed.
 
 ---
 
 ## Upgrade slot display (`slot_status`)
 
-Controlled by the `slot_status` config option:
-
-**`slot_status: 0`** (default) — shows only the zone level, always fully filled:
+**`slot_status: 0`** (default) — shows zone level, always fully filled:
 ```
-Tunb Island AFB 🔹🔹🔹🔹🔹
-Al Dahid        🔹🔹🔹🔹
+Bardufoss  🔹🔹🔹
+Al Dahid   🔹🔹🔹🔹
 ```
 
 **`slot_status: 1`** — shows active vs destroyed upgrade slots:
 ```
-Tunb Island AFB 🔹🔹🔹🔹🔹   ← level 5, all active
-Al Dahid        🔹◇◇◇◇       ← level 5, only 1 active
+Bardufoss  🔹🔹🔹       ← level 3, all active
+Al Dahid   🔹◇◇◇        ← level 4, only 1 active
 ```
 
-Slot indicators:
-- `🔹` = active BLUE upgrade slot — `◇` = lost/empty BLUE slot
-- `🔺` = active RED upgrade slot — `△` = lost/empty RED slot
-
-Zone ordering with `slot_status: 1`:
-1. Active zones sorted by level descending, then by active slots descending
-2. Suspended zones at the bottom sorted by level descending
+- `🔹` = active BLUE slot · `◇` = lost BLUE slot
+- `🔺` = active RED slot · `△` = lost RED slot
 
 ---
 
-## Compatibility
+## Pilot leaderboard
 
-- Works with **any Foothold map** — the plugin reads `foothold.status` in the saves directory to identify the active persistence file automatically.
-- Requires **no database** — no tables are created.
+### Points display (`points_order`)
 
----
+The leaderboard can show rank points, session points, or both, in one or two tables:
 
-## Installation
-
-1. Copy the `fh_report/` folder into your DCSServerBot `plugins/` directory:
-   ```
-   DCSServerBot/
-   └── plugins/
-       └── fh_report/
-           ├── __init__.py
-           ├── commands.py
-           ├── listener.py
-           └── version.py
-   ```
-
-2. Copy `fh_report.yaml` into `config/plugins/`:
-   ```
-   DCSServerBot/
-   └── config/
-       └── plugins/
-           └── fh_report.yaml
-   ```
-
-3. Edit `fh_report.yaml` with your values (see Configuration below).
-
-4. Add `fh_report` to your plugin list in `main.yaml`:
-   ```yaml
-   opt_plugins:
-     - fh_report
-   ```
-
-5. Restart DCSSB. The plugin will load and post the first embed automatically.
-
----
-
-## Configuration
-
-All configuration lives in `config/plugins/fh_report.yaml`.
-
-### Structure
-
-The yaml uses a `DEFAULT` section for shared settings and one named block per server instance. The name you give each server block is a **free alias** — it is only used internally by the plugin for logging and to store message IDs. It does **not** need to match any name in `servers.yaml` or anywhere else in DCSServerBot.
-
-### DEFAULT section
-
-| Key | Default | Description |
+| Value | Display | Sort |
 |---|---|---|
-| `update_interval` | `300` | Seconds between embed refreshes |
-| `max_zones` | `15` | Max zones shown per column. Remainder shown as `+ X more bases`. Omit for all |
-| `bar_length` | `20` | Number of squares in the progress bar |
-| `slot_status` | `0` | `0` = show max level only / `1` = show active vs lost slots |
-| `strip_callsign` | `0` | `0` = names as-is / `1` = strip flight callsign prefixes from pilot names (e.g. `UZI 1-1 zarpa` → `zarpa`). Squadron tags like `[MA]` are preserved |
-| `show_all_pilots` | `0` | `0` = show pilots that fit, rest shown as `+ X more pilots` / `1` = show all pilots splitting into multiple fields if needed |
-| `show_punishment` | `0` | `0` = disabled / `1` = show punishment status below sanctioned pilots |
-| `max_pilots` | all | Max pilots shown in the leaderboard |
-| `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
+| `R` | Rank points only `(R: nnn)` | By rank |
+| `S` | Session points only `(S: nnn)` | By session |
+| `BR` | Both `(R: nnn · S: nnn)` | By rank |
+| `BS` | Both `(S: nnn · R: nnn)` | By session |
+| `2R` | Two tables — first by rank, second by session | — |
+| `2S` | Two tables — first by session, second by rank | — |
 
-### Per-server section
-
-| Key | Required | Description |
-|---|---|---|
-| `saves_dir` | ✅ | Full path to the Foothold save files directory |
-| `channel_id` | ✅ | Discord channel ID where the embed will be posted |
-| `campaign_name` | ✅ | Name shown in the embed title and footer |
-| `update_interval` | optional | Overrides DEFAULT |
-| `bar_length` | optional | Overrides DEFAULT |
-| `max_zones` | optional | Overrides DEFAULT |
-| `max_pilots` | optional | Overrides DEFAULT |
-| `slot_status` | optional | Overrides DEFAULT |
-| `excluded_ucids` | optional | Overrides DEFAULT |
-
-### Example
-
+**Cyclic mode** — rotate through modes on each update by separating values with commas:
 ```yaml
-DEFAULT:
-  update_interval: 300
-  bar_length: 20
-  max_zones: 15
-  slot_status: 0
-
-"== Server-1 | Foothold ==":
-  saves_dir: "C:\\Saved Games\\DCS_Server1\\Missions\\Saves"
-  channel_id: 125536244541508
-  campaign_name: "Operation — FootHoldMap"
-  slot_status: 1        # override — show damage on this server
-  excluded_ucids:
-    - 71derf45ftgssr0f6744d99010   # User Pilot
-
-#"== Server-2 | xxxx ==":
-#  saves_dir: "C:\\Saved Games\\DCS_Server2\\Missions\\Saves"
-#  channel_id: 125536244541508
-#  campaign_name: "Operation — FootHoldMap"
+points_order: R, 2R, S
 ```
+
+**Rank points** come from `Foothold_Ranks.lua`. **Session points** come from `zonePersistance['playerStats']['Points']` in the active persistence file.
+
+Tables sorted by session use `📊` in the title. Tables showing both values use a legend: `(R: Rank · S: Session)`.
+
+### Callsign stripping (`strip_callsign`)
+
+When `strip_callsign: 1`, flight callsign prefixes are removed from pilot names:
+- `CALL 1-1 Pilot1` → `Pilot1`
+- `CALL 1-3 | Pilot2` → `Pilot2`
+- `[MA] Leka` → `[MA] Leka` (squadron tags preserved)
+
+### Pilot limits
+
+| Option | Applies to |
+|---|---|
+| `max_pilots` | Single-table modes: `R`, `S`, `BR`, `BS` |
+| `max_pilots_2t` | Each table in dual-table modes: `2R`, `2S`. Falls back to `max_pilots` if omitted |
+
+When the list is cut, `+ X more pilots` is shown at the bottom of the table.
+
+`show_all_pilots: 1` splits the leaderboard into multiple Discord fields to show all pilots, with `🎖️ Leaderboard (cont.)` on continuation fields.
 
 ---
 
-## Pilot Ranks
+## Pilot punishment status (`show_punishment`)
 
-Ranks are taken directly from the Foothold engine and assigned based on accumulated credits:
+When `show_punishment: 1`, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` table and shows a badge below each sanctioned pilot:
+
+```
+🥇 `Eskuvy` — Technical Sergeant (R: 19,765)
+🥈 `Amirus` — Staff Sergeant (R: 14,639)
+·　🔍 `Amirus` JAG's investigation 🔨🔨
+🥉 `Viper**` — Recruit (R: 2,626)
+·　⚖️ `Viper**` JAG indictment filed 🔨🔨🔨
+```
+
+Punishment badges are always shown on the rank table. In session-only mode (`S`) they appear on the session table. In `2S` mode they appear on the second (rank) table.
+
+### Punishment thresholds
+
+| Points | Icon | Status | Severity |
+|---|---|---|---|
+| 1 – 10 | ⚠️ | JAG's radar | 🔨 |
+| 11 – 25 | 🔍 | JAG's investigation | 🔨🔨 |
+| 26 – 50 | ⚖️ | JAG indictment filed | 🔨🔨🔨 |
+| 51 – 100 | ⛓️ | Confined to quarters | 🔨🔨🔨🔨 |
+| 101 – 200 | 🔒 | Brig time | 🔨🔨🔨🔨🔨 |
+| 200+ | 💀 | Dishonorably discharged | 🔨🔨🔨🔨🔨🔨 |
+
+Requires the **DCSServerBot Punishment plugin** to be installed and active. If not active or the `pu_events` table does not exist, this option does nothing silently.
+
+---
+
+## Pilot ranks
 
 | Credits | Rank |
 |---|---|
@@ -182,73 +145,73 @@ Ranks are taken directly from the Foothold engine and assigned based on accumula
 
 ## Active map detection
 
-The plugin reads `foothold.status` from the `saves_dir` to identify which persistence file is currently active. This file is written by Foothold and always points to the correct `.lua` for the running mission, regardless of which map is loaded. If `foothold.status` is not found, the plugin falls back to the most recently modified `foothold_*.lua` file.
-
-
----
-
-## Pilot punishment status (`show_punishment`)
-
-When `show_punishment: 1` is set, the plugin reads accumulated punishment points from the DCSServerBot `pu_events` database table and shows a status badge indented below each sanctioned pilot in the leaderboard:
-
-```
-🥇 Pilot1 — First Lieutenant (152,612)
-🥈 Pilot2 — Technical Sergeant (19,765)
-·　🔍 `Pilot2` JAG's investigation 🔨🔨
-🥉 Pilot3 — Staff Sergeant (14,639)
-⭐ Pilot4 — Recruit (1,034)
-·　🔒 `Pilot4` Brig time 🔨🔨🔨🔨🔨
-```
-
-### Punishment thresholds
-
-| Points | Icon | Status | Severity |
-|---|---|---|---|
-| 1 – 10 | ⚠️ | JAG's radar | 🔨 |
-| 11 – 25 | 🔍 | JAG's investigation | 🔨🔨 |
-| 26 – 50 | ⚖️ | JAG indictment filed | 🔨🔨🔨 |
-| 51 – 100 | ⛓️ | Confined to quarters | 🔨🔨🔨🔨 |
-| 101 – 200 | 🔒 | Brig time | 🔨🔨🔨🔨🔨 |
-| 200+ | 💀 | Dishonorably discharged | 🔨🔨🔨🔨🔨🔨 |
-
-### Requirements
-
-- The **DCSServerBot Punishment plugin** must be installed and active
-- If the punishment plugin is not active or the `pu_events` table does not exist, this option does nothing — no errors, no warnings
+The plugin reads `foothold.status` from `saves_dir` to identify the active persistence file. If not found, it falls back to the most recently modified `foothold_*.lua` file.
 
 ---
 
-## Updating from a previous version
+## Installation
 
-When you run `install.bat` on a system that already has FH_Report installed, it automatically detects the existing `fh_report.yaml` and runs `migrate_config.py` instead of overwriting it.
+### Fresh install
 
-### What the migration does
 
-- **Preserves** all your existing configuration — servers, channel IDs, campaign names, excluded UCIDs, and any custom values
-- **Adds** any new variables introduced in the new version to the `DEFAULT` block, with their default values
-- **Warns** if any variables in your server blocks are no longer used in the new version, so you can clean them up
+### Updating from a previous version
 
-### Example migration output
+Run `install.bat` — it detects the existing config and runs `migrate_config.py`:
+- **Preserves** all your existing configuration
+- **Adds** new variables introduced in the new version with default values
+- **Updates** header comments in your yaml with the latest documentation
+- **Warns** about variables that are no longer used
 
 ```
 Existing fh_report.yaml found. Running migration...
 Migration complete. Added 2 new variable(s) to DEFAULT:
-  + max_zones: 15
-  + slot_status: 0
+  + points_order: R
+  + strip_callsign: 0
+  Header comments updated.
 ```
 
-Or if you have obsolete variables:
+---
 
+## Configuration
+
+All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` section applies to all servers and can be overridden per server block.
+
+### Options reference
+
+| Option | Default | Description |
+|---|---|---|
+| `update_interval` | `300` | Seconds between embed refreshes |
+| `bar_length` | `20` | Number of squares in the progress bar |
+| `max_zones` | `15` | Max zones per column. Omit for all |
+| `slot_status` | `0` | `0` = max level only / `1` = active vs lost slots |
+| `strip_callsign` | `0` | `0` = names as-is / `1` = strip flight callsign prefixes |
+| `points_order` | `R` | Leaderboard display and sort. See [Points display](#points-display-points_order) |
+| `max_pilots` | all | Max pilots in single-table modes (`R`,`S`,`BR`,`BS`) |
+| `max_pilots_2t` | all | Max pilots per table in dual-table modes (`2R`,`2S`). Falls back to `max_pilots` |
+| `show_all_pilots` | `0` | `0` = cut at limit / `1` = split into multiple fields |
+| `show_punishment` | `0` | `0` = disabled / `1` = show punishment badges |
+| `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
+
+### Example config
+
+```yaml
+DEFAULT:
+  update_interval: 300
+  bar_length: 20
+  max_zones: 15
+  slot_status: 1
+  strip_callsign: 1
+  points_order: R, 2R, S
+  show_all_pilots: 0
+  show_punishment: 1
+
+"== Server-1 | Foothold ==":
+  saves_dir: "C:\\Saved Games\\DCS_Server1\\Missions\\Saves"
+  channel_id: 125536244541508
+  campaign_name: "Operation Nova314 — FootHold"
+  excluded_ucids:
+    - 71derf45ftgssr0f6744d99010   # Pilot to hide
 ```
-WARNING: The following variables were found in your server blocks
-         but are no longer used in this version of FH_Report.
-         They have no effect and can be safely removed or commented out:
-  - old_variable
-```
-
-### Requirements
-
-The migration script requires Python, which is always available in a DCSServerBot installation. The script automatically uses the DCSServerBot Python environment (`%USERPROFILE%\.dcssb\Scripts\python.exe`) or falls back to the system Python. If Python is not found, the existing config is left unchanged and a warning is shown.
 
 ---
 
@@ -256,48 +219,43 @@ The migration script requires Python, which is always available in a DCSServerBo
 
 | File | Purpose |
 |---|---|
-| `commands.py` | Main plugin logic — data parsing, embed building, Discord posting |
-| `listener.py` | Placeholder event listener (required by DCSSB plugin structure) |
+| `commands.py` | Main plugin logic |
+| `listener.py` | Placeholder event listener (required by DCSSB) |
 | `__init__.py` | Plugin registration |
 | `version.py` | Version string |
 | `fh_report.yaml` | Configuration (goes in `config/plugins/`) |
-| `message_ids.json` | Auto-generated — stores Discord message IDs per server instance |
+| `migrate_config.py` | Migration script, called by `install.bat` on updates |
+| `install.bat` | Installation and update script |
+| `message_ids.json` | Auto-generated — stores Discord message IDs per server |
 
 ---
 
 ## Resetting the embed
 
-To force the plugin to post a new message for a server (e.g. after moving it to a different channel), delete `plugins/fh_report/message_ids.json` and restart DCSSB. All servers will post new messages and save the new IDs.
+Delete `plugins/fh_report/message_ids.json` and restart DCSServerBot to force new messages to be posted.
 
-## What's new in v3.3.0
+---
 
-### Session leaderboard (new)
-- New `points_order` option controls what points are shown and how pilots are sorted
-- `R` = rank points only · `S` = session points only · `BR` / `BS` = both in one table · `2R` / `2S` = two separate tables
-- Session points read from `zonePersistance['playerStats']['Points']` in the Foothold persistence file
-- Points labeled `R:` (rank) and `S:` (session) in the leaderboard
-- Tables ordered by session use `📊` emoji in the title
-- `BR` and `BS` show legend in title: `(R: Rank · S: Session)`
-- Cyclic mode: `points_order: R, 2R, S` rotates through modes on each update
+## Changelog
 
-### Pilot callsign stripping (new)
-- New `strip_callsign` option removes flight callsign prefixes from pilot names
-- Handles `|`, `/`, `\`, `,` separators and `WORD N-N` patterns
-- Squadron tags like `[MA]` are preserved
+### v3.3.0
+- Session leaderboard: `points_order` with `R` / `S` / `BR` / `BS` / `2R` / `2S`
+- Cyclic mode: `points_order: R, 2R, S` rotates on each update interval
+- `strip_callsign` removes flight callsign prefixes from pilot names
+- `max_pilots_2t` for independent pilot limit per table in dual-table modes
+- Punishment badges include pilot name, severity icon and escalating 🔨 indicators
+- `migrate_config.py` updates header comments on every install/update
 
-### Leaderboard improvements
-- `show_all_pilots: 1` splits into multiple fields with `🎖️ Leaderboard (cont.)` header
-- `+ X more pilots` shown consistently across all table modes when list is cut
-- Punishment badges shown on rank table always; session-only table (`S`) also shows them
+### v3.2.0
+- `show_all_pilots` splits leaderboard into multiple fields when list is too long
+- `+ X more pilots` shown when list is cut
 
-### Punishment system improvements
-- Punishment badges now include pilot name: `·　⚖️ \`Pilot\` JAG indictment filed 🔨🔨🔨`
-- 6 severity levels with escalating 🔨 indicators
-- Custom punishment icon per pilot via `fh_hook.yaml` (`punishment_icon`)
+### v3.1.0
+- Pilot punishment status with `show_punishment`
+- 6 severity levels from JAG's radar to Dishonorably discharged
 
-### Config & migration
-- `migrate_config.py` now updates header comments on every install/update
-- All new variables auto-added with defaults on update
-- `max_pilots` now applies to single-table modes only
-- New `max_pilots_2t` controls pilot limit per table in dual-table modes (`2R`,`2S`)
-
+### v3.0.0
+- Multi-server support
+- `slot_status` for upgrade slot damage display
+- Neutral and suspended zone handling
+- `foothold.status` for active map detection
