@@ -104,7 +104,7 @@ When `show_punishment: 1`, the plugin reads accumulated punishment points from t
 🥇 `Pilot1` — Technical Sergeant (R: 19,765)
 🥈 `Pilot2` — Staff Sergeant (R: 14,639)
 ·　🔍 `Pilot2` JAG's investigation 🔨🔨
-🥉 `Pilot3` — Recruit (R: 2,626)
+🥉 `Pilot3` — Aviator (R: 2,626)
 ·　⚖️ `Pilot3` JAG indictment filed 🔨🔨🔨
 ```
 
@@ -237,29 +237,3 @@ DEFAULT:
 ## Resetting the embed
 
 Delete `plugins/fh_report/message_ids.json` and restart DCSServerBot to force new messages to be posted.
-
----
-
-## Changelog
-
-### v3.3.0
-- Session leaderboard: `points_order` with `R` / `S` / `BR` / `BS` / `2R` / `2S`
-- Cyclic mode: `points_order: R, 2R, S` rotates on each update interval
-- `strip_callsign` removes flight callsign prefixes from pilot names
-- `max_pilots_2t` for independent pilot limit per table in dual-table modes
-- Punishment badges include pilot name, severity icon and escalating 🔨 indicators
-- `migrate_config.py` updates header comments on every install/update
-
-### v3.2.0
-- `show_all_pilots` splits leaderboard into multiple fields when list is too long
-- `+ X more pilots` shown when list is cut
-
-### v3.1.0
-- Pilot punishment status with `show_punishment`
-- 6 severity levels from JAG's radar to Dishonorably discharged
-
-### v3.0.0
-- Multi-server support
-- `slot_status` for upgrade slot damage display
-- Neutral and suspended zone handling
-- `foothold.status` for active map detection
