@@ -229,7 +229,7 @@ DEFAULT:
 | `version.py` | Version string |
 | `fh_report.yaml` | Configuration (goes in `config/plugins/`) |
 | `migrate_config.py` | Migration script, called by `install.bat` on updates |
-| `install.bat` | Installation and update script |
+| `install.cmd` | Installation and update script |
 | `message_ids.json` | Auto-generated — stores Discord message IDs per server |
 
 ---
