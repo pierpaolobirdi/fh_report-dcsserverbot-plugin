@@ -45,7 +45,7 @@
 #                      0 = disabled
 #                      1 = enabled (requires DCSServerBot punishment plugin active)
 #                      Reads from pu_events table. Thresholds:
-#                      1pt ⚠️ JAG's radar / 11pt 🔍 JAG's investigation
+#                      1pt 🧿 JAG's watch / 11pt 🔍 JAG's investigation
 #                      26pt ⚖️ JAG indictment filed / 51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time / 200pt 💀 Dishonorably discharged
 #
@@ -86,7 +86,7 @@ DEFAULT:
 #  max_pilots:
 #  max_pilots_2t:
 #  slot_status: 0
-#  strip_callsign: 0
+##  strip_callsign: 0
 #  points_order: R
 #  show_all_pilots: 0
 #  show_punishment: 0
@@ -100,7 +100,7 @@ DEFAULT:
 #  max_zones: 15
 #  max_pilots:
 #  slot_status: 0
-#  strip_callsign: 0
+##  strip_callsign: 0
 #  points_order: R
 #  show_all_pilots: 0
 #  show_punishment: 0

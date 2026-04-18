@@ -101,18 +101,20 @@ def parse_zones(filepath: str) -> dict:
             zones["neutral"] += 1
             continue
 
-        # Count active upgrade slots from remainingUnits
+        # Count slots from remainingUnits
         ru_match = re.search(r"\['remainingUnits'\]=\{(.*?)\n  \},", block, re.DOTALL)
-        active_slots = 0
+        active_slots  = 0
+        total_ru_slots = 0
         if ru_match:
-            ru_block = ru_match.group(1)
-            # Each top-level slot is [N]={ ... } — count those with content
-            slot_matches = re.findall(r"\[(\d+)\]=\{([^}]*)\}", ru_block)
-            active_slots = sum(1 for _, slot_content in slot_matches if slot_content.strip())
-        if active_slots == 0 and not ru_match:
-            active_slots = min(level, 5)
+            top_slots = re.findall(r"\n    \[(\d+)\]=\{([^}]*)\}", ru_match.group(1), re.DOTALL)
+            total_ru_slots = len(top_slots)
+            active_slots   = sum(1 for _, sc in top_slots if sc.strip())
 
-        info = {"name": zone, "level": min(level, 5), "active_slots": active_slots, "suspended": suspended}
+        # Max slots = total slots in remainingUnits
+        max_slots = total_ru_slots if total_ru_slots > 0 else min(level, 5)
+
+        info = {"name": zone, "level": min(level, 5), "active_slots": active_slots,
+                "max_slots": max_slots, "suspended": suspended}
         if side == 2:
             zones["blue"].append(info)
         elif side == 1:
@@ -215,7 +217,7 @@ PUNISHMENT_THRESHOLDS = [
     (51,  "⛓️", "Confined to quarters",    4),
     (26,  "⚖️", "JAG indictment filed",    3),
     (11,  "🔍", "JAG's investigation",    2),
-    (1,   "⚠️", "JAG's radar",            1),
+    (1,   "🧿", "JAG's watch",             1),
 ]
 
 def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
@@ -281,8 +283,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for z in blue_sorted[:limit]:
         lvl = min(z["level"], 5)
         if slot_status == 1 and not z.get("suspended"):
-            active = min(z.get("active_slots", lvl), lvl)
-            stars  = "🔹" * active + "◇" * (lvl - active)
+            active    = z.get("active_slots", lvl)
+            max_s     = z.get("max_slots", lvl)
+            stars     = "🔹" * active + "◇" * (max_s - active)
         else:
             stars  = "🔹" * lvl
         blue_lines.append(f"`{z['name']}` {stars}")
@@ -302,8 +305,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for z in red_sorted[:limit]:
         lvl = min(z["level"], 5)
         if slot_status == 1 and not z.get("suspended"):
-            active = min(z.get("active_slots", lvl), lvl)
-            stars  = "🔺" * active + "△" * (lvl - active)
+            active    = z.get("active_slots", lvl)
+            max_s     = z.get("max_slots", lvl)
+            stars     = "🔺" * active + "△" * (max_s - active)
         else:
             stars  = "🔺" * lvl
         red_lines.append(f"`{z['name']}` {stars}")
@@ -315,7 +319,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     cs = campaign_stats or {}
 
     # Add session_points to each player
+    # Skip if hook already set session_points (hook value takes priority)
     for name, data in players.items():
+        if "session_points" in data:
+            continue  # hook already calculated this value
         s_pts = cs.get(name, 0)
         if s_pts == 0:
             for cs_name, cs_pts in cs.items():
@@ -327,16 +334,18 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     # Determine sort key and display flags from points_order
     order_by_session = points_order in ("S", "BS", "2S")
     show_rank        = points_order in ("R", "BR", "BS", "2R", "2S")
-    show_session     = points_order in ("S", "BR", "BS", "2R", "2S")
+    show_credits_session     = points_order in ("S", "BR", "BS", "2R", "2S")
 
     if order_by_session:
         pilot_items = sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
     else:
         pilot_items = list(players.items())  # already sorted by total credits
 
+    # In dual-table modes use max_pilots_2t for first table if defined
+    _limit_first = (max_pilots_2t if max_pilots_2t else max_pilots) if points_order in ("2R", "2S") else max_pilots
     total_pilots_count = len(pilot_items)
-    if max_pilots:
-        pilot_items = pilot_items[:max_pilots]
+    if _limit_first:
+        pilot_items = pilot_items[:_limit_first]
     hidden_pilots = total_pilots_count - len(pilot_items)
 
     medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
@@ -354,20 +363,41 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         s_pts   = data.get("session_points", 0)
 
         # Build points string based on points_order
-        if hide_credits:
-            pts_str = ""
-        elif points_order == "R":
-            pts_str = f"(R: {credits:,})"
+        hide_session = data.get("hide_session", False)
+
+        def _pts(r, s):
+            """Build points string respecting hide flags."""
+            show_r = not hide_credits and r is not None
+            show_s = not hide_session and s is not None
+            if show_r and show_s:
+                return f"(R: {r:,} · S: {s:,})" if s else f"(R: {r:,})"
+            elif show_r:
+                return f"(R: {r:,})"
+            elif show_s:
+                return f"(S: {s:,})"
+            return ""
+
+        if points_order == "R":
+            pts_str = "" if hide_credits else f"(R: {credits:,})"
         elif points_order == "S":
-            pts_str = f"(S: {s_pts:,})"
+            pts_str = "" if hide_session else f"(S: {s_pts:,})"
         elif points_order == "BR":
-            pts_str = f"(R: {credits:,} · S: {s_pts:,})" if s_pts else f"(R: {credits:,})"
+            pts_str = _pts(credits, s_pts if s_pts else None)
         elif points_order == "BS":
-            pts_str = f"(S: {s_pts:,} · R: {credits:,})" if s_pts else f"(R: {credits:,})"
+            show_r = not hide_credits
+            show_s = not hide_session and s_pts
+            if show_s and show_r:
+                pts_str = f"(S: {s_pts:,} · R: {credits:,})"
+            elif show_s:
+                pts_str = f"(S: {s_pts:,})"
+            elif show_r:
+                pts_str = f"(R: {credits:,})"
+            else:
+                pts_str = ""
         elif points_order == "2R":
-            pts_str = f"(R: {credits:,})"
-        else:  # 2S
-            pts_str = f"(S: {s_pts:,})" if s_pts else "(S: 0)"
+            pts_str = "" if hide_credits else f"(R: {credits:,})"
+        else:  # 2S — primary table is session
+            pts_str = "" if hide_session else (f"(S: {s_pts:,})" if s_pts else "(S: 0)")
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
         # Punishment badge — on rank table always; on session table only when S is the only table
@@ -484,12 +514,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
                 s_pts        = data.get("session_points", 0)
                 s_hide       = data.get("hide_credits", False)
-                if s_hide:
-                    line = f"{s_medal} `{s_short}` — **{s_rank}**"
-                elif points_order == "2R":
-                    line = f"{s_medal} `{s_short}` — **{s_rank}** (S: {s_pts:,})"
-                else:
-                    line = f"{s_medal} `{s_short}` — **{s_rank}** (R: {s_credits:,})"
+                s_hide_session = data.get("hide_session", False)
+                if points_order == "2R":
+                    line = f"{s_medal} `{s_short}` — **{s_rank}**" if s_hide_session else f"{s_medal} `{s_short}` — **{s_rank}** (S: {s_pts:,})"
+                else:  # 2S second table = rank
+                    line = f"{s_medal} `{s_short}` — **{s_rank}**" if s_hide else f"{s_medal} `{s_short}` — **{s_rank}** (R: {s_credits:,})"
                 second_lines.append(line)
                 # Punishment badge on second table only for 2S (rank table)
                 if show_punishment and points_order == "2S":
@@ -709,7 +738,7 @@ class FHReport(Plugin):
         # ── Optional private hook — post-processes players dict ───────────────
         if _HAS_HOOK:
             try:
-                players = _fh_hook.post_process(players, cfg, server_name)
+                players = _fh_hook.post_process(players, cfg, server_name, campaign_stats)
             except Exception:
                 pass  # Hook errors are silently ignored
 

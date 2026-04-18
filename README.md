@@ -114,7 +114,7 @@ Punishment badges are always shown on the rank table. In session-only mode (`S`)
 
 | Points | Icon | Status | Severity |
 |---|---|---|---|
-| 1 – 10 | ⚠️ | JAG's radar | 🔨 |
+| 1 – 10 | 🧿 | JAG's watch | 🔨 |
 | 11 – 25 | 🔍 | JAG's investigation | 🔨🔨 |
 | 26 – 50 | ⚖️ | JAG indictment filed | 🔨🔨🔨 |
 | 51 – 100 | ⛓️ | Confined to quarters | 🔨🔨🔨🔨 |

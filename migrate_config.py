@@ -39,8 +39,8 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      1 = show active vs lost slots (🔹🔹🔹◇◇ / 🔺🔺△△△)
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
 #                      0 = show names as-is
-#                      1 = strip callsign prefix (e.g. "UZI 1-1 zarpa" -> "zarpa",
-#                          "PONTIAC 1-3 | Asac" -> "Asac"). Squadron tags like [MA] preserved.
+#                      1 = strip callsign prefix (e.g. "CALL 1-1 Pilot1" -> "Pilot1",
+#                          "CALL 1-3 | Pilot2" -> "Pilot2"). Squadron tags like [MA] preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
 #                      R   = show rank points only, sort by rank
 #                      S   = show session points only, sort by session
@@ -57,7 +57,7 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      0 = disabled
 #                      1 = enabled (requires DCSServerBot punishment plugin active)
 #                      Reads from pu_events table. Thresholds:
-#                      1pt JAG radar / 11pt JAG investigation / 26pt JAG indictment
+#                      1pt JAG watch / 11pt JAG investigation / 26pt JAG indictment
 #                      51pt Confined to quarters / 101pt Brig time / 200pt Discharged
 #
 # ZONE DISPLAY NOTES:
@@ -176,7 +176,7 @@ def main():
     # ── 3. Update header comments ─────────────────────────────────────────────
     default_idx = content.find("\nDEFAULT:")
     if default_idx != -1:
-        content = HEADER_COMMENT + content[default_idx + 1:]
+        content = HEADER_COMMENT + "\n\nDEFAULT:" + content[default_idx + len("\nDEFAULT:"):]
 
     # ── 4. Save and report ─────────────────────────────────────────────────────
     with open(yaml_path, "w", encoding="utf-8") as f:
