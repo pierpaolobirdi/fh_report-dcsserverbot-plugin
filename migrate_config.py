@@ -34,6 +34,8 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
 #                      If omitted, max_pilots applies to both tables
 #   excluded_ucids   - UCIDs to hide from leaderboard               (default: none)
+#   zone_name_length - Max characters shown for zone names          (default: 16)
+#                      Min: 8 / Max: 24. Values outside range are clamped automatically.
 #   slot_status      - Show upgrade slot damage per zone            (default: 0)
 #                      0 = show only max level (always fully filled)
 #                      1 = show active vs lost slots (🔹🔹🔹◇◇ / 🔺🔺△△△)
@@ -78,6 +80,7 @@ KNOWN_VARS = {
     "update_interval",
     "bar_length",
     "max_zones",
+    "zone_name_length",
     "slot_status",
     "show_punishment",
     "strip_callsign",
@@ -96,6 +99,7 @@ DEFAULTS = {
     "update_interval": 300,
     "bar_length": 20,
     "max_zones": 15,
+    "zone_name_length": 16,
     "slot_status": 0,
     "show_punishment": 0,
     "strip_callsign": 0,
@@ -107,6 +111,7 @@ COMMENTS = {
     "update_interval": "# Seconds between embed refreshes",
     "bar_length":      "# Number of squares in the progress bar",
     "max_zones":       "# Max zones shown per column (omit for all)",
+    "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",
     "show_punishment":  "# 0 = disabled  |  1 = show punishment badges in leaderboard",
     "show_all_pilots":      "# 0 = cut at limit show + X more  |  1 = split into multiple fields",

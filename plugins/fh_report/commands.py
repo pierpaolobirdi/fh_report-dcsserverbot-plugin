@@ -68,19 +68,32 @@ def parse_zones(filepath: str) -> dict:
         content = f.read()
 
     zones = {"blue": [], "red": [], "neutral": 0}
-    zone_names = re.findall(r"zonePersistance\['zones'\]\['([^']+)'\]", content)
+    zone_names = [
+        a or b for a, b in
+        re.findall(
+            r'zonePersistance\[["\']zones["\']\]\[(?:"([^"]+)"|\x27([^\x27]+)\x27)\]',
+            content
+        )
+    ]
 
     for zone in zone_names:
-        pattern = rf"zonePersistance\['zones'\]\['{re.escape(zone)}'\] = \{{(.*?)(?=\nzonePersistance|\Z)"
+        ez = re.escape(zone)
+        sq = chr(39)
+        dq = chr(34)
+        pattern = (
+            rf"zonePersistance\[[{dq}\{sq}]zones[{dq}\{sq}]\]"
+            + rf"\[(?:{dq}{ez}{dq}|{sq}{ez}{sq})\] = \{{"
+            + r"(.*?)(?=\nzonePersistance|\Z)"
+        )
         match = re.search(pattern, content, re.DOTALL)
         if not match:
             continue
         block = match.group(1)
 
-        side_m      = re.search(r"\['side'\]=(\d+)", block)
-        active_m    = re.search(r"\['active'\]=(true|false)", block)
-        level_m     = re.search(r"\['level'\]=(\d+)", block)
-        suspended_m = re.search(r"\['suspended'\]=(true|false)", block)
+        side_m      = re.search('\\[(?:"side"|\'side\')\\]=(\\d+)', block)
+        active_m    = re.search('\\[(?:"active"|\'active\')\\]=(true|false)', block)
+        level_m     = re.search('\\[(?:"level"|\'level\')\\]=(\\d+)', block)
+        suspended_m = re.search('\\[(?:"suspended"|\'suspended\')\\]=(true|false)', block)
 
         if not side_m:
             continue
@@ -102,7 +115,7 @@ def parse_zones(filepath: str) -> dict:
             continue
 
         # Count slots from remainingUnits
-        ru_match = re.search(r"\['remainingUnits'\]=\{(.*?)\n  \},", block, re.DOTALL)
+        ru_match = re.search('\\[(?:"remainingUnits"|\'remainingUnits\')\\]=\\{(.*?)\\n  \\},', block, re.DOTALL)
         active_slots  = 0
         total_ru_slots = 0
         if ru_match:
@@ -130,15 +143,15 @@ def parse_player_stats(filepath: str) -> dict:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
         stats_match = re.search(
-            r"zonePersistance\['playerStats'\] = \{(.*?)^\}",
+            r"zonePersistance\[[\"']playerStats[\"']\] = \{(.*?)^\}",
             content, re.DOTALL | re.MULTILINE
         )
         if not stats_match:
             return {}
         block = stats_match.group(1)
         results = {}
-        for m in re.finditer(r"\['([^']+)'\]=\{([^}]+)\}", block, re.DOTALL):
-            pts_m = re.search(r"\['Points'\]=(\d+)", m.group(2))
+        for m in re.finditer(r"\[[\"']([^\"']+)[\"']\]=\{([^}]+)\}", block, re.DOTALL):
+            pts_m = re.search('\\[(?:"Points"|\'Points\')\\]=(\\d+)', m.group(2))
             if pts_m:
                 results[m.group(1)] = int(pts_m.group(1))
         return results
@@ -151,7 +164,6 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
     Pilots whose UCID is in excluded_ucids are omitted."""
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
-
     # Build set of excluded player names from ucidToName table
     excluded_names: set[str] = set()
     for ucid in excluded_ucids:
@@ -161,16 +173,16 @@ def parse_ranks(filepath: str, excluded_ucids: list[str]) -> dict:
 
     # Build name->ucid mapping from ucidToName table
     name_to_ucid = {}
-    ucid_pattern = r"\['([a-f0-9]{32})'\]=\"([^\"]+)\""
+    ucid_pattern = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]=[\'\"]([^\'\"]+)[\'\"]"
     for ucid_m in re.finditer(ucid_pattern, content):
         name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
 
     players = {}
-    block_pattern = r"\['([^']+)'\]=\{([^}]+)\}"
+    block_pattern = r"\[[\"']([^\"']+)[\"']\]=\{([^}]+)\}"
     for m in re.finditer(block_pattern, content):
         name  = m.group(1)
         block = m.group(2)
-        credit_m = re.search(r"\['credits'\]=([\d.]+)", block)
+        credit_m = re.search('\\[(?:"credits"|\'credits\')\\]=([\\d.]+)', block)
         if not credit_m:
             continue
         if name in excluded_names:
@@ -230,7 +242,8 @@ def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
             hammer     = custom_icon if custom_icon else "🔨"
             gravity    = hammer * hammers
             used_label = custom_label if custom_label else label
-            return f"·　{used_pre} {prefix}{used_label} {gravity}"
+            pts_str = f"({int(points)} p.p.) "
+            return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
     return None
 
 
@@ -248,6 +261,7 @@ def _lb_title(points_order: str) -> str:
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: int = 0,
+                zone_name_length: int = 16,
                 max_pilots_2t: int | None = None,
                 punishment_points: dict | None = None,
                 show_punishment: int = 0,
@@ -288,7 +302,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             stars     = "🔹" * active + "◇" * (max_s - active)
         else:
             stars  = "🔹" * lvl
-        blue_lines.append(f"`{z['name']}` {stars}")
+        blue_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
     if max_zones and len(blue_sorted) > max_zones:
         blue_lines.append(f"*+ {len(blue_sorted) - max_zones} more bases*")
     blue_lines.append(".")
@@ -310,7 +324,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             stars     = "🔺" * active + "△" * (max_s - active)
         else:
             stars  = "🔺" * lvl
-        red_lines.append(f"`{z['name']}` {stars}")
+        red_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
     if max_zones and len(red_sorted) > max_zones:
         red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
     red_text = "\n".join(red_lines) if red_lines else "—"
@@ -760,6 +774,7 @@ class FHReport(Plugin):
             show_punishment   = show_punishment,
             show_all_pilots     = int(cfg.get("show_all_pilots") or 0),
             strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
+            zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16))),
             max_pilots_2t       = cfg.get("max_pilots_2t") or None,
             campaign_stats      = campaign_stats,
             points_order        = self._resolve_points_order(server_name, cfg),
