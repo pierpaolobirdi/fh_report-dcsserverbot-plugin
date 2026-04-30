@@ -499,11 +499,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         )
 
     # ── 2R/2S: add second leaderboard ────────────────────────────────────────
-    if points_order in ("2R", "2S") and cs:
+    if points_order in ("2R", "2S"):
         # For 2R: second table = session. For 2S: second table = rank (already sorted)
         if points_order == "2R":
             second_items = sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
-            second_items = [item for item in second_items if item[1].get("session_points", 0) > 0]
             second_title = "📊 __Session Leaderboard · by Current Session__"
             second_cont  = "📊 __Session Leaderboard (cont.)__"
         else:  # 2S: second table = rank order
