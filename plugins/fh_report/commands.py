@@ -633,6 +633,27 @@ class FHReport(Plugin):
                 continue
             merged = dict(self._default_cfg)
             merged.update(srv_cfg)
+
+            # ── Resolve saves_dir from instance if not manually set ───────
+            if not merged.get("saves_dir"):
+                # Look up the DCSSB server object by instance name
+                instance_home = None
+                for server in self.bot.servers.values():
+                    try:
+                        if server.instance.name == name:
+                            instance_home = server.instance.home
+                            break
+                    except AttributeError:
+                        pass
+                if instance_home:
+                    merged["saves_dir"] = os.path.join(instance_home, "Missions", "Saves")
+                    self.log.info(f"FH_Report [{name}]: saves_dir resolved to {merged['saves_dir']}")
+                else:
+                    self.log.warning(
+                        f"FH_Report [{name}]: saves_dir not set and instance '{name}' not found in DCSSB. "
+                        f"Please set saves_dir manually in fh_report.yaml."
+                    )
+
             self._servers[name] = merged
 
         if not self._servers:
