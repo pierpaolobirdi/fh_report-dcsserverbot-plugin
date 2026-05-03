@@ -258,6 +258,57 @@ def _lb_title(points_order: str) -> str:
     return "\n🏆 __Pilot Leaderboard · by Rank__"
 
 
+
+DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
+
+
+def _embed_size(embed: discord.Embed) -> int:
+    """Calculate total character count of a Discord embed."""
+    total = 0
+    if embed.title:
+        total += len(embed.title)
+    if embed.description:
+        total += len(embed.description)
+    if embed.footer and embed.footer.text:
+        total += len(embed.footer.text)
+    for field in embed.fields:
+        total += len(field.name or "") + len(field.value or "")
+    return total
+
+
+def _trim_embed(embed: discord.Embed) -> discord.Embed:
+    """Trim embed fields to fit within Discord 6000 char limit.
+    Removes pilot lines from leaderboard fields first, then zone lines."""
+    if _embed_size(embed) <= DISCORD_EMBED_LIMIT:
+        return embed
+
+    # Identify and trim pilot fields first (fields with medal emojis)
+    for i, field in enumerate(embed.fields):
+        if _embed_size(embed) <= DISCORD_EMBED_LIMIT:
+            break
+        val = field.value or ""
+        lines = val.split("\n")
+        # Trim from the bottom until it fits
+        while len(lines) > 1 and _embed_size(embed) > DISCORD_EMBED_LIMIT:
+            lines.pop()
+            new_val = "\n".join(lines) + "\n*…trimmed*"
+            embed.set_field_at(i, name=field.name, value=new_val, inline=field.inline)
+
+    # If still too large, trim zone fields
+    for i, field in enumerate(embed.fields):
+        if _embed_size(embed) <= DISCORD_EMBED_LIMIT:
+            break
+        val = field.value or ""
+        if "🔹" in val or "🔺" in val or "◇" in val or "△" in val:
+            lines = val.split("\n")
+            while len(lines) > 1 and _embed_size(embed) > DISCORD_EMBED_LIMIT:
+                lines.pop()
+                new_val = "\n".join(lines) + "\n*…trimmed*"
+                embed.set_field_at(i, name=field.name, value=new_val, inline=field.inline)
+
+    return embed
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: int = 0,
@@ -571,6 +622,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
 
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
+
+    # Trim if embed exceeds Discord 6000 char limit
+    embed = _trim_embed(embed)
 
     return embed
 
