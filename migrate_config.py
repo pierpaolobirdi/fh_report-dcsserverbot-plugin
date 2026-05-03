@@ -13,66 +13,49 @@ import re
 HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 # Place this file in: config/plugins/fh_report.yaml
 #
-# SERVER INSTANCES:
-#   Each server is defined by a unique name of your choice (e.g. "Foothold", "Server1").
-#   This name is only used internally by the plugin — it does NOT need to match
-#   any name in servers.yaml or anywhere else in DCSServerBot.
-#   It is used to identify the server in logs and to store its Discord message ID.
+# SERVER IDENTIFICATION:
+#   Each server block key must match the DCSServerBot instance name as defined in nodes.yaml.
+#   The plugin uses this name to automatically resolve the Foothold saves directory:
+#     {instance.home}\\Missions\\Saves
+#   If Foothold saves are in a non-standard location, override with saves_dir.
 #
 # REQUIRED per server:
-#   saves_dir      - Full path to the Foothold save files directory
 #   channel_id     - Discord channel ID where the embed will be posted
 #   campaign_name  - Name displayed in the embed title and footer
 #
-# OPTIONAL — define in DEFAULT to apply to all servers,
-#             or per server to override the default value.
+# OPTIONAL per server:
+#   saves_dir      - Override Foothold saves path (default: auto-resolved from instance home)
+#
+# OPTIONAL - define in DEFAULT to apply to all servers,
+#             or override per server block.
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   bar_length       - Number of squares in the progress bar        (default: 20)
-#   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
-#                      If omitted, max_pilots applies to both tables
-#   excluded_ucids   - UCIDs to hide from leaderboard               (default: none)
-#   zone_name_length - Max characters shown for zone names          (default: 16)
-#                      Min: 8 / Max: 24. Values outside range are clamped automatically.
+#   max_zones        - Max zones shown per column, omit = all       (default: 15)
+#   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
+#                      Values outside range are clamped automatically.
 #   slot_status      - Show upgrade slot damage per zone            (default: 0)
 #                      0 = show only max level (always fully filled)
-#                      1 = show active vs lost slots (🔹🔹🔹◇◇ / 🔺🔺△△△)
+#                      1 = show active vs lost slots
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
 #                      0 = show names as-is
-#                      1 = strip callsign prefix (e.g. "CALL 1-1 Pilot1" -> "Pilot1",
-#                          "CALL 1-3 | Pilot2" -> "Pilot2"). Squadron tags like [MA] preserved.
+#                      1 = strip prefix. Squadron tags like [MA] are preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
-#                      R   = show rank points only, sort by rank
-#                      S   = show session points only, sort by session
-#                      BR  = show both (R: nnn - S: nnn), sort by rank
-#                      BS  = show both (S: nnn - R: nnn), sort by session
-#                      2R  = two tables: first by rank, second by current session
-#                      2S  = two tables: first by session, second by rank
-#                      Comma-separated = cycle through modes on each update
-#                      Example: points_order: R, 2R, S
-#   show_all_pilots  - Show all pilots even if list exceeds field limit (default: 0)
-#                      0 = cut at limit, show "+ X more pilots"
-#                      1 = split into multiple fields showing all pilots
-#   show_punishment  - Show punishment status below sanctioned pilots (default: 0)
-#                      0 = disabled
-#                      1 = enabled (requires DCSServerBot punishment plugin active)
-#                      Reads from pu_events table. Thresholds:
-#                      1pt JAG watch / 11pt JAG investigation / 26pt JAG indictment
-#                      51pt Confined to quarters / 101pt Brig time / 200pt Discharged
+#                      R, S, BR, BS, 2R, 2S or comma-separated to cycle
+#   max_pilots       - Max pilots in single-table modes (R,S,BR,BS) (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S) (default: all)
+#   show_all_pilots  - 0 = cut at limit / 1 = split into multiple fields (default: 0)
+#   show_punishment  - 0 = disabled / 1 = show punishment badges    (default: 0)
+#   excluded_ucids   - UCIDs to hide from the leaderboard           (default: none)
 #
 # ZONE DISPLAY NOTES:
-#   - Neutral zones (side=0) are counted in the progress bar as ⬜ but not listed.
-#   - Suspended zones are always shown as fully filled and listed at the bottom
-#     of each column. They suspend to save DCS resources but reactivate at full
-#     capacity, so they are treated as complete.
+#   - Neutral zones are counted in the progress bar as ⬜ but not listed.
+#   - Suspended zones are shown fully filled at the bottom of each column.
 #   - Hidden zones (name starts with "hidden") are fully ignored.
 #
 # UPGRADE SLOT INDICATORS (when slot_status: 1):
-#   🔹 = active BLUE upgrade slot    ◇ = lost/empty BLUE slot
-#   🔺 = active RED upgrade slot     △ = lost/empty RED slot
-#   Example: 🔹🔹🔹◇◇ = level 5 zone with 3 active and 2 destroyed upgrades.
+#   🔹 = active BLUE slot   ◇ = lost/empty BLUE slot
+#   🔺 = active RED slot    △ = lost/empty RED slot
 """
 
 # ── All known valid variables ──────────────────────────────────────────────────
