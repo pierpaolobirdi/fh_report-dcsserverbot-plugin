@@ -654,7 +654,7 @@ _fh_hook, _HAS_HOOK = _load_hook()
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
-class FHReport(Plugin):
+class FH_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
     Supports multiple server instances defined in fh_report.yaml."""
 
@@ -874,4 +874,4 @@ class FHReport(Plugin):
 
 
 async def setup(bot: DCSServerBot):
-    await bot.add_cog(FHReport(bot))
+    await bot.add_cog(FH_Report(bot))
