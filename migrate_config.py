@@ -30,7 +30,7 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #             or override per server block.
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   bar_length       - Number of squares in the progress bar        (default: 20)
+#   bar_length       - Number of squares in the progress bar        (default: 40)
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
@@ -80,7 +80,7 @@ KNOWN_VARS = {
 # ── Default values for DEFAULT block variables ─────────────────────────────────
 DEFAULTS = {
     "update_interval": 300,
-    "bar_length": 20,
+    "bar_length": 40,
     "max_zones": 15,
     "zone_name_length": 16,
     "slot_status": 0,

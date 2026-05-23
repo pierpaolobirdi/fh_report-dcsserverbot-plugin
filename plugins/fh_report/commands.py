@@ -342,14 +342,23 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     total         = blue_count + red_count + neutral_count
     active_total  = blue_count + red_count
 
-    # Progress bar — neutrals shown as ⬜
+    # Progress bar — ANSI colored block characters inside ```ansi block.
+    # Uses single-width chars (█) instead of double-width emoji so the line
+    # never wraps regardless of bar_length. Blue=\u001b[34m Red=\u001b[91m
+    # Neutral=\u001b[37m Reset=\u001b[0m. Works on Discord Desktop & Browser.
     pct_blue     = round(blue_count / active_total * 100) if active_total > 0 else 50
     pct_red      = 100 - pct_blue
     blue_bars    = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
     neutral_bars = round((neutral_count / total) * bar_length) if total > 0 else 0
     red_bars     = bar_length - blue_bars - neutral_bars
-    bar          = "🟦" * blue_bars + "⬜" * neutral_bars + "🟥" * red_bars
-    progress     = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
+    ESC          = "\u001b"
+    bar_ansi     = (
+        f"{ESC}[34m" + "█" * blue_bars +
+        f"{ESC}[37m" + "█" * neutral_bars +
+        f"{ESC}[31m" + "█" * red_bars +
+        f"{ESC}[0m"
+    )
+    progress     = f"```ansi\n{pct_blue}% {bar_ansi} {pct_red}%\n```"
 
     # BLUE zones — actives first sorted by level+slots, suspended last
     blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
@@ -859,7 +868,7 @@ class FH_Report(Plugin):
             campaign_name       = cfg.get("campaign_name", "Foothold Campaign"),
             max_zones           = cfg.get("max_zones") or None,
             max_pilots          = cfg.get("max_pilots") or None,
-            bar_length          = int(cfg.get("bar_length") or 20),
+            bar_length          = int(cfg.get("bar_length") or 40),
             slot_status         = int(cfg.get("slot_status") or 0),
             punishment_points   = punishment_points,
             show_punishment     = show_punishment,
