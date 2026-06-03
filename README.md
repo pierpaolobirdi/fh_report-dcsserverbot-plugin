@@ -74,6 +74,7 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `show_punishment` | `0` | `0` = disabled / `1` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
+| `persistence_file` | auto | (optional) Direct path to Foothold persistence `.lua` file. Takes priority over `saves_dir` and overrides `foothold.status` file content path (*support for virtual paths*) |
 
 ### Example config
 

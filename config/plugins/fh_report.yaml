@@ -12,7 +12,9 @@
 #   campaign_name  - Name displayed in the embed title and footer
 #
 # OPTIONAL per server:
-#   saves_dir      - Override Foothold saves path (default: auto-resolved from instance home)
+#   saves_dir        - Override Foothold saves path (default: auto-resolved from instance home)
+#   persistence_file - Direct full path to Foothold persistence .lua file. Takes priority over
+#                      saves_dir and auto-resolved feature (overrides 'foothold.status' path).
 #
 # OPTIONAL — define in DEFAULT to apply to all servers,
 #             or override per server block.
@@ -82,6 +84,7 @@ DCS_Server:                             # instance name from nodes.yaml
   channel_id: 1234567890123456789       # your Discord channel ID
   campaign_name: "Operation — FootHold"  # Foot embed
 #  saves_dir:                           # auto-resolved — override only if needed
+#  persistence_file:                    # direct path to foothold_*.lua — override only if needed
 #  update_interval: 300
 #  max_zones: 15
 #  zone_name_length: 16
@@ -100,6 +103,7 @@ DCS_Server:                             # instance name from nodes.yaml
 #  channel_id: 1234567890123456789
 #  campaign_name: "Operation — FootHold 2"
 #  saves_dir:
+#  persistence_file:
 #  update_interval: 300
 #  max_zones: 15
 #  zone_name_length: 16

@@ -543,16 +543,13 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     # the manually tuned RED value). Both headers are padded to that target.
     _blue_hdr  = f"🔵 BLUE Zones ({blue_count})"
     _red_hdr   = f"🔴 RED Zones ({red_count})"
-    _target    = max(len(_blue_hdr), len(_red_hdr)) + 39
-    _blue_name = _blue_hdr + " " * (_target - len(_blue_hdr)) + "."
-    _red_name  = _red_hdr  + " " * (_target - len(_red_hdr))  + "."
     embed.add_field(
-        name=_blue_name,
+        name=_blue_hdr,
         value=blue_text[:1024],
         inline=True
     )
     embed.add_field(
-        name=_red_name,
+        name=_red_hdr,
         value=red_text[:1024],
         inline=True
     )
@@ -678,6 +675,14 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     inline=False
                 )
 
+    # Full-width separator — placed at the bottom to fix embed width
+    # without interrupting the visual flow of the content.
+    try:
+        from core import utils as _dcssb_utils
+        _ruler_name = _dcssb_utils.print_ruler(ruler_length=34)
+    except Exception:
+        _ruler_name = "─" * 34
+    embed.add_field(name="\u200b", value=_ruler_name, inline=False)
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
 
@@ -952,12 +957,24 @@ class FH_Report(Plugin):
         """
         instance_name = server.instance.name
         node          = server.node
+
+        """ Resolve persistence file path — priority order:
+           1. persistence_file (direct path, highest priority)
+           2. find_persistence_file(saves_dir) — uses saves_dir config or auto-resolved
+        """
+        persistence_file = cfg.get("persistence_file")
+
         saves_dir     = cfg.get("saves_dir")
         if not saves_dir:
-            saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
+            # If persistence_file is set, derive saves_dir from its directory
+            if persistence_file:
+                saves_dir = os.path.dirname(os.path.normpath(persistence_file))
+            else:
+                saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
 
         # ── Load Foothold files ───────────────────────────────────────────
-        persistence_file = await find_persistence_file(saves_dir, node)
+        if not persistence_file:
+            persistence_file = await find_persistence_file(saves_dir, node)
         ranks_file       = os.path.join(saves_dir, "Foothold_Ranks.lua")
         try:
             ranks_data = (await node.read_file(ranks_file)).decode("utf-8")
@@ -1199,15 +1216,25 @@ class FH_Report(Plugin):
             self.log.warning(f"FH_Report [{instance_name}]: channel {channel_id} not found.")
             return
 
-        # Resolve saves_dir — prefer explicit config, fall back to get_missions_dir()
-        # exactly as Pretense does: os.path.join(await server.get_missions_dir(), 'Saves')
+        # Resolve persistence file path — priority order:
+        #   1. persistence_file (direct path, highest priority)
+        #   2. find_persistence_file(saves_dir) — uses saves_dir config or auto-resolved
+        persistence_file = cfg.get("persistence_file")
+
+        # Resolve saves_dir for ranks_file and other file operations
         saves_dir = cfg.get("saves_dir")
         if not saves_dir:
-            saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
+            # If persistence_file is set, derive saves_dir from its directory
+            if persistence_file:
+                saves_dir = os.path.dirname(os.path.normpath(persistence_file))
+            else:
+                # Fall back to auto-resolved path
+                saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
+
+        if not persistence_file:
+            persistence_file = await find_persistence_file(saves_dir, node)
 
         node = server.node
-
-        persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
             self.log.warning(f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir}")
             return
