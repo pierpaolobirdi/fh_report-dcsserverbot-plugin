@@ -543,16 +543,13 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     # the manually tuned RED value). Both headers are padded to that target.
     _blue_hdr  = f"🔵 BLUE Zones ({blue_count})"
     _red_hdr   = f"🔴 RED Zones ({red_count})"
-    _target    = max(len(_blue_hdr), len(_red_hdr)) + 39
-    _blue_name = _blue_hdr + " " * (_target - len(_blue_hdr)) + "."
-    _red_name  = _red_hdr  + " " * (_target - len(_red_hdr))  + "."
     embed.add_field(
-        name=_blue_name,
+        name=_blue_hdr,
         value=blue_text[:1024],
         inline=True
     )
     embed.add_field(
-        name=_red_name,
+        name=_red_hdr,
         value=red_text[:1024],
         inline=True
     )
@@ -678,6 +675,14 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     inline=False
                 )
 
+    # Full-width separator — placed at the bottom to fix embed width
+    # without interrupting the visual flow of the content.
+    try:
+        from core import utils as _dcssb_utils
+        _ruler_name = _dcssb_utils.print_ruler(ruler_length=34)
+    except Exception:
+        _ruler_name = "─" * 34
+    embed.add_field(name="\u200b", value=_ruler_name, inline=False)
     embed.set_footer(text=f"{campaign_name} • Updated automatically")
     embed.timestamp = datetime.now(timezone.utc)
 
