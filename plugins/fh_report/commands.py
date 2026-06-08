@@ -54,8 +54,12 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
     status_file = os.path.join(saves_dir, "foothold.status")
     try:
         data = await node.read_file(status_file)
-        path = data.decode("utf-8").strip()
-        path = os.path.normpath(path)
+        # Extract only the filename from the path stored in foothold.status.
+        # The full path is irrelevant — it may be a Windows absolute path that
+        # is invalid on Linux/Wine hosts. The file always lives in saves_dir.
+        raw_path = data.decode("utf-8").strip()
+        filename = os.path.basename(raw_path.replace("\\", "/"))
+        path     = os.path.join(saves_dir, filename)
         try:
             await node.read_file(path)
             return path
