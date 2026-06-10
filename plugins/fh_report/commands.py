@@ -58,7 +58,7 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
         # The full path is irrelevant — it may be a Windows absolute path that
         # is invalid on Linux/Wine hosts. The file always lives in saves_dir.
         raw_path = data.decode("utf-8").strip()
-        filename = os.path.basename(raw_path.replace("\\", "/"))
+        filename = os.path.basename(raw_path)
         path     = os.path.join(saves_dir, filename)
         try:
             await node.read_file(path)
