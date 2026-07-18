@@ -19,6 +19,10 @@
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
+#   bar_style_emoji  - Progress bar style                              (default: 0)
+#                      0 = ANSI colored blocks (desktop/browser only)
+#                      1 = emoji blocks 🟦🟥 (recommended for mobile compatibility)
+#                          Note: emoji mode uses bar_length / 2 automatically
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
@@ -66,6 +70,7 @@
 DEFAULT:
   update_interval: 300
   bar_length: 40
+  bar_style_emoji: 0
   max_zones: 15
   zone_name_length: 16
   slot_status: 0

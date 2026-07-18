@@ -31,6 +31,10 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
+#   bar_style_emoji  - Progress bar style                              (default: 0)
+#                      0 = ANSI colored blocks (desktop/browser only)
+#                      1 = emoji blocks 🟦🟥 (recommended for mobile compatibility)
+#                          Note: emoji mode uses bar_length / 2 automatically
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
@@ -62,6 +66,7 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 KNOWN_VARS = {
     "update_interval",
     "bar_length",
+    "bar_style_emoji",
     "max_zones",
     "zone_name_length",
     "slot_status",
@@ -81,6 +86,7 @@ KNOWN_VARS = {
 DEFAULTS = {
     "update_interval": 300,
     "bar_length": 40,
+    "bar_style_emoji": 0,
     "max_zones": 15,
     "zone_name_length": 16,
     "slot_status": 0,
@@ -93,6 +99,7 @@ DEFAULTS = {
 COMMENTS = {
     "update_interval": "# Seconds between embed refreshes",
     "bar_length":      "# Number of squares in the progress bar",
+    "bar_style_emoji": "# 0 = ANSI blocks (desktop only)  1 = emoji blocks (mobile compatible)",
     "max_zones":       "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",
@@ -118,34 +125,57 @@ def main():
     added   = []
     obsolete = []
 
-    # ── 1. Find DEFAULT block and add missing variables ────────────────────────
+    # ── 1. Find DEFAULT block ──────────────────────────────────────────────────
     default_match = re.search(r"^DEFAULT:\s*\n((?:[ \t]+.*\n|#.*\n|\n)*)", content, re.MULTILINE)
     if not default_match:
         print("WARNING: No DEFAULT block found in config. Skipping migration.")
         sys.exit(0)
 
-    default_block = default_match.group(0)
+    default_block = default_match.group(1)
 
-    # Insert before trailing blank lines at end of DEFAULT block
-    # so new variables appear inside the block, not after it
-    block_end = default_match.end()
-    trailing = re.search(r"(\n+)$", default_match.group(1))
-    if trailing:
-        insert_pos = block_end - len(trailing.group(1)) + 1
-    else:
-        insert_pos = block_end
+    # ── 2. Extract current user values from DEFAULT block ─────────────────────
+    user_values = {}
+    for key in DEFAULTS:
+        m = re.search(rf"^\s+{re.escape(key)}\s*:\s*(.+?)(?:\s*#.*)?$", default_block, re.MULTILINE)
+        if m:
+            user_values[key] = m.group(1).strip()
 
-    lines_to_add = []
-    for key, default_val in DEFAULTS.items():
-        pattern = rf"^\s*#?\s*{re.escape(key)}\s*:"
-        if not re.search(pattern, default_block, re.MULTILINE):
-            comment = COMMENTS.get(key, "")
-            lines_to_add.append(f"  {key}: {default_val}  {comment}\n")
+    # ── 3. Detect missing variables ────────────────────────────────────────────
+    for key in DEFAULTS:
+        if key not in user_values:
             added.append(key)
 
-    if lines_to_add:
-        insert_str = "".join(lines_to_add)
-        content = content[:insert_pos] + insert_str + content[insert_pos:]
+    # ── 4. Reconstruct DEFAULT block in canonical order ────────────────────────
+    new_default_lines = []
+    for key, default_val in DEFAULTS.items():
+        val     = user_values.get(key, default_val)
+        comment = COMMENTS.get(key, "")
+        new_default_lines.append(f"  {key}: {val}  {comment}\n")
+
+    # Preserve any extra lines (comments, excluded_ucids, etc.) that are not
+    # in DEFAULTS — keep them at the end of the DEFAULT block
+    extra_lines = []
+    for line in default_block.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            # Keep comments and blank lines only if not already in canonical
+            if not any(f"  {k}:" in line for k in DEFAULTS):
+                extra_lines.append(line)
+        else:
+            # Active line — check if it belongs to a known key
+            key_match = re.match(r"\s+(\w+)\s*:", line)
+            if key_match and key_match.group(1) not in DEFAULTS:
+                extra_lines.append(line)
+
+    new_default_block = "DEFAULT:\n" + "".join(new_default_lines)
+    if extra_lines:
+        # Strip trailing blank lines from extras
+        while extra_lines and not extra_lines[-1].strip():
+            extra_lines.pop()
+        new_default_block += "".join(extra_lines) + "\n"
+
+    # Replace old DEFAULT block with reconstructed one
+    content = content[:default_match.start()] + new_default_block + content[default_match.end():]
 
     # ── 2. Check server blocks for obsolete variables ──────────────────────────
     # Find all non-DEFAULT top-level blocks

@@ -243,12 +243,144 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+
+async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
+    """Detect and fix duplicate player entries in Foothold_Ranks.lua caused by
+    callsign changes. The entry with a UCID in ucidToName is canonical; its
+    name is cleaned via strip_callsign(). Credits and lastSeen are merged.
+    Returns True if any fix was applied and the file was rewritten."""
+
+    ranks_data = (await node.read_file(ranks_file)).decode("utf-8")
+
+    # ── ucidToName: build ucid → raw_name ────────────────────────────────
+    ucid_to_raw: dict[str, str] = {}
+    for m in re.finditer(r"\[['\"]([a-f0-9]{32})['\"]\]=['\"]([^'\"]+)['\"]", ranks_data):
+        ucid_to_raw[m.group(1)] = m.group(2)
+
+    # ── players block: parse name → {credits, lastSeen} via brace counting ─
+    players_data: dict[str, dict] = {}
+    pos = 0
+    while pos < len(ranks_data):
+        km = re.search(r"\[['\"]([^'\"]+)['\"]\]=\{", ranks_data[pos:])
+        if not km:
+            break
+        name      = km.group(1)
+        brace_pos = pos + km.end() - 1
+        depth     = 1
+        j         = brace_pos + 1
+        while j < len(ranks_data) and depth > 0:
+            if ranks_data[j] == "{":   depth += 1
+            elif ranks_data[j] == "}": depth -= 1
+            j += 1
+        block = ranks_data[brace_pos + 1:j - 1]
+        cr_m  = re.search(r'[\x27\x22]credits[\x27\x22]\]\s*=\s*([\d.]+)', block)
+        ls_m  = re.search(r'[\x27\x22]lastSeen[\x27\x22]\]\s*=\s*([\d.]+)', block)
+        if cr_m and len(name) >= 2:
+            players_data[name] = {
+                "credits":  float(cr_m.group(1)),
+                "lastSeen": float(ls_m.group(1)) if ls_m else 0.0,
+            }
+        pos = pos + km.start() + 1
+
+    # ── Group by strip_callsign base name ─────────────────────────────────
+    base_to_raws: dict[str, list] = {}
+    for raw in players_data:
+        base = strip_callsign(raw)
+        base_to_raws.setdefault(base, []).append(raw)
+
+    duplicates = {b: r for b, r in base_to_raws.items() if len(r) > 1}
+    if not duplicates:
+        return False
+
+    raw_to_ucid = {v: k for k, v in ucid_to_raw.items()}
+    modified    = False
+
+    for base_name, raw_names in duplicates.items():
+        name_with_ucid = next((n for n in raw_names if n in raw_to_ucid), None)
+        if not name_with_ucid:
+            continue
+
+        canonical     = strip_callsign(name_with_ucid)
+        ucid          = raw_to_ucid[name_with_ucid]
+        total_credits = sum(players_data[n]["credits"]  for n in raw_names)
+        max_last_seen = max(players_data[n]["lastSeen"] for n in raw_names)
+        lua_cr        = str(int(total_credits)) if total_credits == int(total_credits) else str(total_credits)
+
+        # ── Remove each raw entry using brace counting ────────────────────
+        for raw in raw_names:
+            found = False
+            for q in ('"', "'"):
+                key = f"[{q}{raw}{q}]="
+                idx = ranks_data.find(key)
+                if idx == -1:
+                    continue
+                bs = ranks_data.find("{", idx)
+                if bs == -1:
+                    continue
+                depth = 1
+                k     = bs + 1
+                while k < len(ranks_data) and depth > 0:
+                    if ranks_data[k] == "{":   depth += 1
+                    elif ranks_data[k] == "}": depth -= 1
+                    k += 1
+                # Include leading whitespace on the line
+                line_start = ranks_data.rfind("\n", 0, idx)
+                start_pos  = line_start + 1 if line_start >= 0 else idx
+                # Include trailing comma and newline
+                end_pos = k
+                while end_pos < len(ranks_data) and ranks_data[end_pos] in (",", "\r", "\n", " "):
+                    end_pos += 1
+                ranks_data = ranks_data[:start_pos] + ranks_data[end_pos:]
+                found = True
+                break
+            if not found:
+                import logging as _lg2
+                _lg2.getLogger(__name__).warning(
+                    f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove"
+                )
+
+        # ── Insert canonical entry ────────────────────────────────────────
+        new_entry  = f'  ["{canonical}"]=\n    ["credits"]={lua_cr},\n    ["lastSeen"]={max_last_seen},\n  ,\n'
+        new_entry  = '  ["' + canonical + '"]={\n    ["credits"]=' + lua_cr + ',\n    ["lastSeen"]=' + str(max_last_seen) + ',\n  },\n'
+        insert_pat = r'(RankSave\[[\'\"]players[\'\"]\]\s*=\s*\{)'
+        ranks_data = re.sub(insert_pat, r'\1\n' + new_entry, ranks_data, count=1)
+
+        # ── Update ucidToName ─────────────────────────────────────────────
+        for q in ('"', "'"):
+            old_e = f'[{q}{ucid}{q}]={q}{name_with_ucid}{q}'
+            if old_e in ranks_data:
+                ranks_data = ranks_data.replace(old_e, f'["{ucid}"]="{canonical}"', 1)
+                break
+
+        modified = True
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            f"FH_Report: merged duplicate entries {raw_names} -> '{canonical}' "
+            f"(credits: {total_credits}, lastSeen: {max_last_seen})"
+        )
+
+    if not modified:
+        return False
+
+    # Write using atomic tmp-file pattern (same as fh_control's _write_lua)
+    tmp = ranks_file + ".fhrep.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(ranks_data)
+        os.replace(tmp, ranks_file)
+    except Exception as e:
+        import logging as _lg2
+        _lg2.getLogger(__name__).error(f"FH_Report: deduplicate_ranks write failed: {e}")
+        return False
+    return True
+
+
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
-    Handles separators (|, /, backslash, ,) and callsign patterns (WORD N-N).
+    Handles separators (|, /, backslash, ,, ' - ') and callsign patterns (WORD N-N).
     Preserves squadron tags like [MA] at the start."""
     # Step 1 — split on separator, keep rightmost part
-    for sep in ['|', '/', chr(92), ',']:
+    for sep in ['|', '/', chr(92), ',', ' - ']:
         if sep in name:
             name = name.split(sep)[-1].strip()
             break
@@ -363,7 +495,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 show_all_pilots: int = 0,
                 strip_callsign_flag: int = 0,
                 campaign_stats: dict | None = None,
-                points_order: str = "T") -> discord.Embed:
+                points_order: str = "T",
+                bar_style_emoji: int = 0) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -372,23 +505,32 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     total         = blue_count + red_count + neutral_count
     active_total  = blue_count + red_count
 
-    # Progress bar — ANSI colored block characters inside ```ansi block.
-    # Uses single-width chars (█) instead of double-width emoji so the line
-    # never wraps regardless of bar_length. Blue=\u001b[34m Red=\u001b[91m
-    # Neutral=\u001b[37m Reset=\u001b[0m. Works on Discord Desktop & Browser.
     pct_blue     = round(blue_count / active_total * 100) if active_total > 0 else 50
     pct_red      = 100 - pct_blue
-    blue_bars    = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
-    neutral_bars = round((neutral_count / total) * bar_length) if total > 0 else 0
-    red_bars     = bar_length - blue_bars - neutral_bars
-    ESC          = "\u001b"
-    bar_ansi     = (
-        f"{ESC}[34m" + "█" * blue_bars +
-        f"{ESC}[37m" + "█" * neutral_bars +
-        f"{ESC}[31m" + "█" * red_bars +
-        f"{ESC}[0m"
-    )
-    progress     = f"```ansi\n{pct_blue}% {bar_ansi} {pct_red}%\n```"
+
+    if bar_style_emoji:
+        # Emoji mode — each emoji is double-width so divide bar_length by 2.
+        # Recommended for mobile Discord compatibility.
+        effective_length = max(1, bar_length // 2)
+        blue_bars    = round((blue_count / total) * effective_length) if total > 0 else effective_length // 2
+        neutral_bars = round((neutral_count / total) * effective_length) if total > 0 else 0
+        red_bars     = effective_length - blue_bars - neutral_bars
+        bar          = "🟦" * blue_bars + "⬜" * neutral_bars + "🟥" * red_bars
+        progress     = f"```\n{pct_blue}% {bar} {pct_red}%\n```"
+    else:
+        # ANSI mode (default) — single-width █ chars with color codes.
+        # Works on Discord Desktop and Browser. Not supported on mobile.
+        blue_bars    = round((blue_count / total) * bar_length) if total > 0 else bar_length // 2
+        neutral_bars = round((neutral_count / total) * bar_length) if total > 0 else 0
+        red_bars     = bar_length - blue_bars - neutral_bars
+        ESC          = "\u001b"
+        bar_ansi     = (
+            f"{ESC}[34m" + "█" * blue_bars +
+            f"{ESC}[37m" + "█" * neutral_bars +
+            f"{ESC}[31m" + "█" * red_bars +
+            f"{ESC}[0m"
+        )
+        progress     = f"```ansi\n{pct_blue}% {bar_ansi} {pct_red}%\n```"
 
     # BLUE zones — actives first sorted by level+slots, suspended last
     blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
@@ -1228,6 +1370,13 @@ class FH_Report(Plugin):
             self.log.warning(f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found in {saves_dir}")
             return
 
+        # Deduplicate player entries caused by callsign changes before parsing.
+        # Runs every cycle — fixes and writes the Lua files if duplicates found.
+        try:
+            await deduplicate_ranks(ranks_file, persistence_file, node)
+        except Exception as e:
+            self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
+
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
             zones          = await parse_zones(persistence_file, node)
@@ -1265,6 +1414,7 @@ class FH_Report(Plugin):
             max_pilots_2t       = cfg.get("max_pilots_2t") or None,
             campaign_stats      = campaign_stats,
             points_order        = self._resolve_points_order(instance_name, cfg),
+            bar_style_emoji     = int(cfg.get("bar_style_emoji") or 0),
         )
 
         try:
