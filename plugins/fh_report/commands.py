@@ -1363,24 +1363,28 @@ class FH_Report(Plugin):
             self.log.warning(f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir}")
             return
 
-        ranks_file = os.path.join(saves_dir, "Foothold_Ranks.lua")
+        ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
+        ranks_missing = False
         try:
             await node.read_file(ranks_file)
         except FileNotFoundError:
-            self.log.warning(f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found in {saves_dir}")
-            return
+            self.log.warning(
+                f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found — "
+                f"showing zone status without leaderboard."
+            )
+            ranks_missing = True
 
-        # Deduplicate player entries caused by callsign changes before parsing.
-        # Runs every cycle — fixes and writes the Lua files if duplicates found.
-        try:
-            await deduplicate_ranks(ranks_file, persistence_file, node)
-        except Exception as e:
-            self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
+        if not ranks_missing:
+            # Deduplicate player entries caused by callsign changes before parsing.
+            try:
+                await deduplicate_ranks(ranks_file, persistence_file, node)
+            except Exception as e:
+                self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
 
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
             zones          = await parse_zones(persistence_file, node)
-            players        = await parse_ranks(ranks_file, excluded_ucids, node)
+            players        = {} if ranks_missing else await parse_ranks(ranks_file, excluded_ucids, node)
             campaign_stats = await parse_player_stats(persistence_file, node)
         except Exception as e:
             self.log.error(f"FH_Report [{instance_name}]: error parsing data: {e}")
