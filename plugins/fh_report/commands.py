@@ -1368,7 +1368,7 @@ class FH_Report(Plugin):
         try:
             await node.read_file(ranks_file)
         except FileNotFoundError:
-            self.log.warning(
+            self.log.debug(
                 f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found — "
                 f"showing zone status without leaderboard."
             )
