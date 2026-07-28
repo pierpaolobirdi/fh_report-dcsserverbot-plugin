@@ -375,15 +375,37 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     return True
 
 
+def _is_numeric_segment(s: str) -> bool:
+    """Return True if a name segment is mainly numeric (≥60% digits).
+    Catches slot numbers like 307, 305A, A305, 3-07, 3-7."""
+    s = s.strip()
+    if not s:
+        return False
+    digits = sum(c.isdigit() for c in s)
+    return digits / len(s) >= 0.6
+
+
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
     Handles separators (|, /, backslash, ,, ' - ') and callsign patterns (WORD N-N).
-    Preserves squadron tags like [MA] at the start."""
-    # Step 1 — split on separator, keep rightmost part
-    for sep in ['|', '/', chr(92), ',', ' - ']:
-        if sep in name:
-            name = name.split(sep)[-1].strip()
-            break
+    Preserves squadron tags like [MA] at the start.
+    When two or more | separators are present and the last segment is mainly
+    numeric (slot number like 307, 305A), the second-to-last segment is used
+    instead — e.g. 'GUNSTAR 11 | DRCHOW | 307' → 'DRCHOW'."""
+    # Step 1 — handle pipe separators specially
+    if '|' in name:
+        parts = [p.strip() for p in name.split('|')]
+        if len(parts) >= 2 and _is_numeric_segment(parts[-1]):
+            # Last segment is a slot number — use second-to-last
+            name = parts[-2]
+        else:
+            # Normal case — use last segment
+            name = parts[-1]
+    else:
+        for sep in ['/', chr(92), ',', ' - ']:
+            if sep in name:
+                name = name.split(sep)[-1].strip()
+                break
 
     # Step 2 — remove leading callsign pattern: WORD(s) N-N
     # e.g. "UZI 1-1 zarpa" → "zarpa", but not "[MA] Leka" or "132nd Kimkiller"
