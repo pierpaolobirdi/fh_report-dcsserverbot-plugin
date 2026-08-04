@@ -45,12 +45,50 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      0 = show names as-is
 #                      1 = strip prefix. Squadron tags like [MA] are preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
-#                      R, S, BR, BS, 2R, 2S or comma-separated to cycle
-#   max_pilots       - Max pilots in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S) (default: all)
-#   show_all_pilots  - 0 = cut at limit / 1 = split into multiple fields (default: 0)
-#   show_punishment  - 0 = disabled / 1 = show punishment badges    (default: 0)
-#   excluded_ucids   - UCIDs to hide from the leaderboard           (default: none)
+#                      Single table modes:
+#                        R   = rank points only              (R: nnn)
+#                        S   = session points only           (S: nnn)
+#                        D   = daily points only             (D: nnn)
+#                      Combined single table (B = all three values):
+#                        BR  = sort by rank,    show R · S · D
+#                        BS  = sort by session, show S · R · D
+#                        BD  = sort by daily,   show D · R · S
+#                        BDS = sort by daily,   show D · S · R
+#                      Dual table (2 = two leaderboards):
+#                        2R  = 1st by rank / 2nd by session
+#                        2S  = 1st by session / 2nd by rank
+#                        2D  = 1st by daily / 2nd by rank
+#                        2DS = 1st by daily / 2nd by session
+#                      Triple table (3 = three leaderboards):
+#                        3R  = rank / session / daily
+#                        3S  = session / rank / daily
+#                        3D  = daily / rank / session
+#                        3DS = daily / session / rank
+#                      Comma-separated = cycle through modes on each update
+#                      Example: points_order: 2S, BS, R
+#                      D modes show nothing if no daily data yet (silently skipped)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour.
+#                          Days: mon, tue, wed, thu, fri, sat, sun
+#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                            daily_reset_schedule:
+#                              thu: 6
+#                              sat: 6
+#   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
+#                      Falls back to max_pilots if not set.
+#   show_all_pilots  - Show all pilots beyond the field limit       (default: 0)
+#                      0 = cut at limit, show "+ X more pilots"
+#                      1 = split into multiple fields showing all pilots
+#   show_punishment  - Show punishment badges below sanctioned pilots (default: 0)
+#                      0 = disabled
+#                      1 = enabled (requires DCSServerBot punishment plugin)
+#                      Reads from pu_events table. Thresholds:
+#                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
+#                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
+#                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
+#   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -67,6 +105,8 @@ KNOWN_VARS = {
     "update_interval",
     "bar_length",
     "bar_style_emoji",
+    "daily_reset_hour",
+    "max_pilots_3t",
     "max_zones",
     "zone_name_length",
     "slot_status",
@@ -87,6 +127,7 @@ DEFAULTS = {
     "update_interval": 300,
     "bar_length": 40,
     "bar_style_emoji": 0,
+    "daily_reset_hour": 0,
     "max_zones": 15,
     "zone_name_length": 16,
     "slot_status": 0,
@@ -100,6 +141,7 @@ COMMENTS = {
     "update_interval": "# Seconds between embed refreshes",
     "bar_length":      "# Number of squares in the progress bar",
     "bar_style_emoji": "# 0 = ANSI blocks (desktop only)  1 = emoji blocks (mobile compatible)",
+    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
     "max_zones":       "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",

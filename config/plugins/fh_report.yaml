@@ -3,8 +3,8 @@
 #
 # SERVER IDENTIFICATION:
 #   Each server block key must match the DCSServerBot instance name as defined in nodes.yaml.
-#   The plugin uses this name to automatically resolve the Foothold saves directory:
-#     {instance.home}\Missions\Saves
+#   The plugin resolves the Foothold saves directory automatically, including in multi-node
+#   cluster setups where DCS instances run on remote agent nodes.
 #   If Foothold saves are in a non-standard location, override with saves_dir.
 #
 # REQUIRED per server:
@@ -14,7 +14,7 @@
 # OPTIONAL per server:
 #   saves_dir      - Override Foothold saves path (default: auto-resolved from instance home)
 #
-# OPTIONAL — define in DEFAULT to apply to all servers,
+# OPTIONAL - define in DEFAULT to apply to all servers,
 #             or override per server block.
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
@@ -28,20 +28,41 @@
 #                      Values outside range are clamped automatically.
 #   slot_status      - Show upgrade slot damage per zone            (default: 0)
 #                      0 = show only max level (always fully filled)
-#                      1 = show active vs lost slots (🔹🔹◇ / 🔺🔺△)
+#                      1 = show active vs lost slots
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
 #                      0 = show names as-is
-#                      1 = strip prefix (e.g. "UZI 1-1 | Pilot" → "Pilot")
-#                          Squadron tags like [MA] are preserved.
+#                      1 = strip prefix. Squadron tags like [MA] are preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
-#                      R   = rank points only, sort by rank
-#                      S   = session points only, sort by session
-#                      BR  = both (R: nnn · S: nnn), sort by rank
-#                      BS  = both (S: nnn · R: nnn), sort by session
-#                      2R  = two tables: first by rank, second by session
-#                      2S  = two tables: first by session, second by rank
+#                      Single table modes:
+#                        R   = rank points only              (R: nnn)
+#                        S   = session points only           (S: nnn)
+#                        D   = daily points only             (D: nnn)
+#                      Combined single table (B = all three values):
+#                        BR  = sort by rank,    show R · S · D
+#                        BS  = sort by session, show S · R · D
+#                        BD  = sort by daily,   show D · R · S
+#                        BDS = sort by daily,   show D · S · R
+#                      Dual table (2 = two leaderboards):
+#                        2R  = 1st by rank / 2nd by session
+#                        2S  = 1st by session / 2nd by rank
+#                        2D  = 1st by daily / 2nd by rank
+#                        2DS = 1st by daily / 2nd by session
+#                      Triple table (3 = three leaderboards):
+#                        3R  = rank / session / daily
+#                        3S  = session / rank / daily
+#                        3D  = daily / rank / session
+#                        3DS = daily / session / rank
 #                      Comma-separated = cycle through modes on each update
 #                      Example: points_order: 2S, BS, R
+#                      D modes show nothing if no daily data yet (silently skipped)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour.
+#                          Days: mon, tue, wed, thu, fri, sat, sun
+#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                            daily_reset_schedule:
+#                              thu: 6
+#                              sat: 6
 #   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
 #   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
 #                      Falls back to max_pilots if not set.
@@ -65,7 +86,6 @@
 # UPGRADE SLOT INDICATORS (when slot_status: 1):
 #   🔹 = active BLUE slot   ◇ = lost/empty BLUE slot
 #   🔺 = active RED slot    △ = lost/empty RED slot
-
 
 DEFAULT:
   update_interval: 300
