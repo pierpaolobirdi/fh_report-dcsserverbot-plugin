@@ -134,20 +134,48 @@ async def parse_zones(filepath: str, node) -> dict:
             zones["neutral"] += 1
             continue
 
-        # Count slots from remainingUnits
-        ru_match = re.search('\\[(?:"remainingUnits"|\'remainingUnits\')\\]=\\{(.*?)\\n  \\},', block, re.DOTALL)
-        active_slots  = 0
-        total_ru_slots = 0
-        if ru_match:
-            top_slots = re.findall(r"\n    \[(\d+)\]=\{([^}]*)\}", ru_match.group(1), re.DOTALL)
-            total_ru_slots = len(top_slots)
-            active_slots   = sum(1 for _, sc in top_slots if sc.strip())
+        # Count active slots using Foothold's logic (mirrors IsSavedUnitSlotEmpty):
+        # A slot [N] is active if it contains at least one unit name string.
+        # We find the remainingUnits block then count non-empty slot entries.
+        active_slots = 0
+        if level > 0:
+            # Find remainingUnits block start
+            ru_key = '"remainingUnits"' if '"remainingUnits"' in block else "'remainingUnits'"
+            ru_start = block.find(f'[{ru_key}]={{')
+            if ru_start == -1:
+                ru_start = block.find("[" + ru_key + "]={")
+            if ru_start != -1:
+                # Extract remainingUnits block using brace counting
+                bs = block.find('{', ru_start)
+                depth, j = 1, bs + 1
+                while j < len(block) and depth > 0:
+                    if block[j] == '{': depth += 1
+                    elif block[j] == '}': depth -= 1
+                    j += 1
+                ru_block = block[bs + 1:j - 1]
+                # Count slots 1..level — slot active if it has unit name strings
+                # Only check the first min(level,5) slots — these are the
+                # primary upgrade slots. Higher-numbered slots serve other
+                # purposes and are excluded to avoid misleading displays.
+                display_slots = min(level, 5)
+                for idx in range(1, display_slots + 1):
+                    # Find [idx]={ using brace counting
+                    slot_key = f'[{idx}]={{'
+                    sk = ru_block.find(slot_key)
+                    if sk == -1:
+                        continue
+                    sb = sk + len(slot_key) - 1
+                    sd, sj = 1, sb + 1
+                    while sj < len(ru_block) and sd > 0:
+                        if ru_block[sj] == '{': sd += 1
+                        elif ru_block[sj] == '}': sd -= 1
+                        sj += 1
+                    slot_content = ru_block[sb + 1:sj - 1]
+                    # Active if any quoted non-empty string inside
+                    if re.search(r'["\x27][^"\x27]{1,}["\x27]', slot_content):
+                        active_slots += 1
 
-        # Max slots = total slots in remainingUnits
-        max_slots = total_ru_slots if total_ru_slots > 0 else min(level, 5)
-
-        info = {"name": zone, "level": min(level, 5), "active_slots": active_slots,
-                "max_slots": max_slots, "suspended": suspended}
+        info = {"name": zone, "level": level, "active_slots": active_slots, "suspended": suspended}
         if side == 2:
             zones["blue"].append(info)
         elif side == 1:
@@ -521,17 +549,17 @@ def _trim_embed(embed: discord.Embed) -> discord.Embed:
 
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
-                bar_length: int, slot_status: int = 0,
+                bar_length: int, slot_status: bool = False,
                 zone_name_length: int = 16,
                 max_pilots_2t: int | None = None,
                 max_pilots_3t: int | None = None,
                 punishment_points: dict | None = None,
-                show_punishment: int = 0,
-                show_all_pilots: int = 0,
-                strip_callsign_flag: int = 0,
+                show_punishment: bool = False,
+                show_all_pilots: bool = False,
+                strip_callsign_flag: bool = False,
                 campaign_stats: dict | None = None,
                 points_order: str = "T",
-                bar_style_emoji: int = 0,
+                bar_style_emoji: bool = False,
                 daily_points: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -578,10 +606,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     blue_lines     = []
     for z in blue_sorted[:limit]:
         lvl = min(z["level"], 5)
-        if slot_status == 1 and not z.get("suspended"):
-            active    = z.get("active_slots", lvl)
-            max_s     = z.get("max_slots", lvl)
-            stars     = "🔹" * active + "◇" * (max_s - active)
+        if slot_status and not z.get("suspended"):
+            display_lvl    = min(z["level"], 5)
+            display_active = min(z.get("active_slots", display_lvl), display_lvl)
+            stars = "🔹" * display_active + "◇" * (display_lvl - display_active)
         else:
             stars  = "🔹" * lvl
         blue_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
@@ -600,10 +628,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     red_lines     = []
     for z in red_sorted[:limit]:
         lvl = min(z["level"], 5)
-        if slot_status == 1 and not z.get("suspended"):
-            active    = z.get("active_slots", lvl)
-            max_s     = z.get("max_slots", lvl)
-            stars     = "🔺" * active + "△" * (max_s - active)
+        if slot_status and not z.get("suspended"):
+            display_lvl    = min(z["level"], 5)
+            display_active = min(z.get("active_slots", display_lvl), display_lvl)
+            stars = "🔺" * display_active + "△" * (display_lvl - display_active)
         else:
             stars  = "🔺" * lvl
         red_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
@@ -768,7 +796,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     _is_compound = points_order in ("2R", "2S", "2D", "2DS", "3R", "3S", "3D", "3DS")
     if _is_compound and not pilot_lines:
         pass  # skip first table — no data
-    elif show_all_pilots == 1:
+    elif show_all_pilots:
         # ── Option B: split into multiple fields, show all pilots ─────────────
         # Add more pilots note if max_pilots was applied
         if hidden_pilots > 0:
@@ -1085,6 +1113,19 @@ def _load_hook():
         return None, False
 
 _fh_hook, _HAS_HOOK = _load_hook()
+
+def _bool_cfg(value) -> bool:
+    """Read a boolean config value with backward compatibility.
+    Accepts: true/false (YAML bool), 1/0 (legacy int), "true"/"false" (string).
+    Returns True/False."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return False
+
 
 # ── Rank thresholds (for penalty step calculation) ────────────────────────────
 # Must match RANK_THRESHOLDS defined earlier.
@@ -1743,7 +1784,7 @@ class FH_Report(Plugin):
             except Exception:
                 pass
 
-        show_punishment   = int(cfg.get("show_punishment") or 0)
+        show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
         if show_punishment:
             punishment_points = await self._fetch_punishment_points()
@@ -1783,16 +1824,16 @@ class FH_Report(Plugin):
             max_zones           = cfg.get("max_zones") or None,
             max_pilots          = cfg.get("max_pilots") or None,
             bar_length          = int(cfg.get("bar_length") or 40),
-            slot_status         = int(cfg.get("slot_status") or 0),
+            slot_status         = _bool_cfg(cfg.get("slot_status")),
             punishment_points   = punishment_points,
             show_punishment     = show_punishment,
-            show_all_pilots     = int(cfg.get("show_all_pilots") or 0),
-            strip_callsign_flag = int(cfg.get("strip_callsign") or 0),
+            show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots")),
+            strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign")),
             zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16))),
             max_pilots_2t       = cfg.get("max_pilots_2t") or None,
             campaign_stats      = campaign_stats,
             points_order        = current_order,
-            bar_style_emoji     = int(cfg.get("bar_style_emoji") or 0),
+            bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
             daily_points        = daily_pts,
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
         )

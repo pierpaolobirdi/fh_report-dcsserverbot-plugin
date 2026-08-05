@@ -19,19 +19,23 @@
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
-#   bar_style_emoji  - Progress bar style                              (default: 0)
-#                      0 = ANSI colored blocks (desktop/browser only)
-#                      1 = emoji blocks 🟦🟥 (recommended for mobile compatibility)
+#   bar_style_emoji  - Progress bar style                              (default: false)
+#                      false = ANSI colored blocks (desktop/browser only)
+#                      true  = emoji blocks 🟦🟥 (recommended for mobile compatibility)
 #                          Note: emoji mode uses bar_length / 2 automatically
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
-#   slot_status      - Show upgrade slot damage per zone            (default: 0)
-#                      0 = show only max level (always fully filled)
-#                      1 = show active vs lost slots
-#   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
-#                      0 = show names as-is
-#                      1 = strip prefix. Squadron tags like [MA] are preserved.
+#   slot_status      - Show upgrade slot damage per zone            (default: false)
+#                      false = show max level slots, all filled
+#                      true  = show active vs destroyed slots per zone
+#                              Only the first 5 upgrade slots are shown (primary slots).
+#                              Higher-numbered slots serve other purposes and are excluded.
+#                              🔹/🔺 = slot with active units
+#                              ◇/△  = slot destroyed (units eliminated)
+#   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
+#                      false = show names as-is
+#                      true  = strip prefix. Squadron tags like [MA] are preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
 #                      Single table modes:
 #                        R   = rank points only              (R: nnn)
@@ -55,7 +59,7 @@
 #                      Comma-separated = cycle through modes on each update
 #                      Example: points_order: 2S, BS, R
 #                      D modes show nothing if no daily data yet (silently skipped)
-#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: false)
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
 #                          Days: mon, tue, wed, thu, fri, sat, sun
@@ -64,14 +68,16 @@
 #                              thu: 6
 #                              sat: 6
 #   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S,2D,2DS) (default: all)
 #                      Falls back to max_pilots if not set.
-#   show_all_pilots  - Show all pilots beyond the field limit       (default: 0)
-#                      0 = cut at limit, show "+ X more pilots"
-#                      1 = split into multiple fields showing all pilots
-#   show_punishment  - Show punishment badges below sanctioned pilots (default: 0)
-#                      0 = disabled
-#                      1 = enabled (requires DCSServerBot punishment plugin)
+#   max_pilots_3t    - Max pilots per table in triple-table modes (3R,3S,3D,3DS) (default: 6)
+#                      Falls back to max_pilots_2t then max_pilots if not set.
+#   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
+#                      false = cut at limit, show "+ X more pilots"
+#                      true  = split into multiple fields showing all pilots
+#   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
+#                      false = disabled
+#                      true  = enabled (requires DCSServerBot punishment plugin)
 #                      Reads from pu_events table. Thresholds:
 #                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
@@ -83,23 +89,28 @@
 #   - Suspended zones are shown fully filled at the bottom of each column.
 #   - Hidden zones (name starts with "hidden") are fully ignored.
 #
-# UPGRADE SLOT INDICATORS (when slot_status: 1):
-#   🔹 = active BLUE slot   ◇ = lost/empty BLUE slot
-#   🔺 = active RED slot    △ = lost/empty RED slot
+# UPGRADE SLOT INDICATORS (when slot_status: true):
+#   🔹 = active BLUE slot   ◇ = destroyed BLUE slot
+#   🔺 = active RED slot    △ = destroyed RED slot
 
 DEFAULT:
   update_interval: 300
   bar_length: 40
-  bar_style_emoji: 0
+  bar_style_emoji: false
   max_zones: 15
   zone_name_length: 16
-  slot_status: 0
-  strip_callsign: 0
+  slot_status: false
+  strip_callsign: false
   points_order: R
-  show_all_pilots: 0
-  show_punishment: 0
-#  max_pilots:
-#  max_pilots_2t:
+  show_all_pilots: false
+  show_punishment: false
+#  max_pilots: 20
+#  max_pilots_2t: 8
+#  max_pilots_3t: 6
+  daily_reset_hour: 0
+#  daily_reset_schedule:
+#    sat: 6
+#    sun: 6
 #  excluded_ucids:
 
 
@@ -108,15 +119,21 @@ DCS_Server:                             # instance name from nodes.yaml
   campaign_name: "Operation — FootHold"  # Foot embed
 #  saves_dir:                           # auto-resolved — override only if needed
 #  update_interval: 300
+#  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
-#  slot_status: 0
-#  strip_callsign: 0
+#  slot_status: false
+#  strip_callsign: false
 #  points_order: R
-#  max_pilots:
-#  max_pilots_2t:
-#  show_all_pilots: 0
-#  show_punishment: 0
+#  max_pilots: 20
+#  max_pilots_2t: 8
+#  max_pilots_3t: 6
+#  show_all_pilots: false
+#  show_punishment: false
+#  daily_reset_hour: 0
+#  daily_reset_schedule:
+#    sat: 6
+#    sun: 6
 #  excluded_ucids:
 #    - abcdef1234567890abcdef1234567890   # UCID to hide
 
@@ -126,13 +143,19 @@ DCS_Server:                             # instance name from nodes.yaml
 #  campaign_name: "Operation — FootHold 2"
 #  saves_dir:
 #  update_interval: 300
+#  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
-#  slot_status: 0
-#  strip_callsign: 0
+#  slot_status: false
+#  strip_callsign: false
 #  points_order: R
-#  max_pilots:
-#  max_pilots_2t:
-#  show_all_pilots: 0
-#  show_punishment: 0
+#  max_pilots: 20
+#  max_pilots_2t: 8
+#  max_pilots_3t: 6
+#  show_all_pilots: false
+#  show_punishment: false
+#  daily_reset_hour: 0
+#  daily_reset_schedule:
+#    sat: 6
+#    sun: 6
 #  excluded_ucids:
