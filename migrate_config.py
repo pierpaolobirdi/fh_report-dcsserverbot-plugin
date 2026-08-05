@@ -31,35 +31,76 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
-#   bar_style_emoji  - Progress bar style                              (default: 0)
-#                      0 = ANSI colored blocks (desktop/browser only)
-#                      1 = emoji blocks 🟦🟥 (recommended for mobile compatibility)
-#                          Note: emoji mode uses bar_length / 2 automatically
+#   bar_style_emoji  - Progress bar style                              (default: false)
+#                      false = ANSI colored blocks (desktop/browser only)
+#                      true  = emoji blocks 🟦🟥 (recommended for mobile compatibility)
+#                              Note: emoji mode uses bar_length / 2 automatically
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
-#   slot_status      - Show upgrade slot damage per zone            (default: 0)
-#                      0 = show only max level (always fully filled)
-#                      1 = show active vs lost slots
-#   strip_callsign   - Remove flight callsign prefix from pilot names (default: 0)
-#                      0 = show names as-is
-#                      1 = strip prefix. Squadron tags like [MA] are preserved.
+#   slot_status      - Show upgrade slot damage per zone            (default: false)
+#                      false = show max level slots, all filled
+#                      true  = show active vs destroyed status per zone
+#                              Only the first 5 upgrade slots are shown (primary slots).
+#                              Higher-numbered slots serve other purposes and are excluded.
+#                              🔹/🔺 = active unit slot  ◇/△ = destroyed slot
+#   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
+#                      false = show names as-is
+#                      true  = strip prefix. Squadron tags like [MA] are preserved.
 #   points_order     - Controls leaderboard display and sort order  (default: R)
-#                      R, S, BR, BS, 2R, 2S or comma-separated to cycle
-#   max_pilots       - Max pilots in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S) (default: all)
-#   show_all_pilots  - 0 = cut at limit / 1 = split into multiple fields (default: 0)
-#   show_punishment  - 0 = disabled / 1 = show punishment badges    (default: 0)
-#   excluded_ucids   - UCIDs to hide from the leaderboard           (default: none)
+#                      Single table modes:
+#                        R   = rank points only              (R: nnn)
+#                        S   = session points only           (S: nnn)
+#                        D   = daily points only             (D: nnn)
+#                      Combined single table (B = all three values):
+#                        BR  = sort by rank,    show R · S · D
+#                        BS  = sort by session, show S · R · D
+#                        BD  = sort by daily,   show D · R · S
+#                        BDS = sort by daily,   show D · S · R
+#                      Dual table (2 = two leaderboards):
+#                        2R  = 1st by rank / 2nd by session
+#                        2S  = 1st by session / 2nd by rank
+#                        2D  = 1st by daily / 2nd by rank
+#                        2DS = 1st by daily / 2nd by session
+#                      Triple table (3 = three leaderboards):
+#                        3R  = rank / session / daily
+#                        3S  = session / rank / daily
+#                        3D  = daily / rank / session
+#                        3DS = daily / session / rank
+#                      Comma-separated = cycle through modes on each update
+#                      Example: points_order: 2S, BS, R
+#                      D modes show nothing if no daily data yet (silently skipped)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour.
+#                          Days: mon, tue, wed, thu, fri, sat, sun
+#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                            daily_reset_schedule:
+#                              thu: 6
+#                              sat: 6
+#   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
+#                      Falls back to max_pilots if not set.
+#   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
+#                      false = cut at limit, show "+ X more pilots"
+#                      true  = split into multiple fields showing all pilots
+#   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
+#                      false = disabled
+#                      true  = enabled (requires DCSServerBot punishment plugin)
+#                      Reads from pu_events table. Thresholds:
+#                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
+#                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
+#                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
+#   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
 #   - Suspended zones are shown fully filled at the bottom of each column.
 #   - Hidden zones (name starts with "hidden") are fully ignored.
 #
-# UPGRADE SLOT INDICATORS (when slot_status: 1):
-#   🔹 = active BLUE slot   ◇ = lost/empty BLUE slot
-#   🔺 = active RED slot    △ = lost/empty RED slot
+# UPGRADE SLOT INDICATORS (when slot_status: true):
+#   🔹 = active BLUE slot   ◇ = destroyed BLUE slot
+#   🔺 = active RED slot    △ = destroyed RED slot
 """
 
 # ── All known valid variables ──────────────────────────────────────────────────
@@ -67,6 +108,8 @@ KNOWN_VARS = {
     "update_interval",
     "bar_length",
     "bar_style_emoji",
+    "daily_reset_hour",
+    "max_pilots_3t",
     "max_zones",
     "zone_name_length",
     "slot_status",
@@ -84,27 +127,31 @@ KNOWN_VARS = {
 
 # ── Default values for DEFAULT block variables ─────────────────────────────────
 DEFAULTS = {
-    "update_interval": 300,
-    "bar_length": 40,
-    "bar_style_emoji": 0,
-    "max_zones": 15,
+    "update_interval":  300,
+    "bar_length":       40,
+    "bar_style_emoji":  False,
+    "daily_reset_hour": 0,
+    "max_zones":        15,
     "zone_name_length": 16,
-    "slot_status": 0,
-    "show_punishment": 0,
-    "strip_callsign": 0,
-    "points_order": "R",
-    "show_all_pilots": 0,
+    "slot_status":      False,
+    "show_punishment":  False,
+    "strip_callsign":   False,
+    "points_order":     "R",
+    "show_all_pilots":  False,
 }
 
 COMMENTS = {
-    "update_interval": "# Seconds between embed refreshes",
-    "bar_length":      "# Number of squares in the progress bar",
-    "bar_style_emoji": "# 0 = ANSI blocks (desktop only)  1 = emoji blocks (mobile compatible)",
-    "max_zones":       "# Max zones shown per column (omit for all)",
+    "update_interval":  "# Seconds between embed refreshes",
+    "bar_length":       "# Number of squares in the progress bar",
+    "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
+    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
+    "max_zones":        "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
-    "slot_status":     "# 0 = max level only  |  1 = show active vs lost slots",
-    "show_punishment":  "# 0 = disabled  |  1 = show punishment badges in leaderboard",
-    "show_all_pilots":      "# 0 = cut at limit show + X more  |  1 = split into multiple fields",
+    "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
+    "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
+    "strip_callsign":   "",
+    "points_order":     "",
+    "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
 }
 
 
@@ -122,10 +169,26 @@ def main():
     with open(yaml_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    added   = []
+    added    = []
     obsolete = []
 
-    # ── 1. Find DEFAULT block ──────────────────────────────────────────────────
+    # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
+    BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
+                 "show_all_pilots", "show_punishment"}
+    bool_converted = []
+    for bvar in BOOL_VARS:
+        pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
+        def _replacer(m, bvar=bvar):
+            val = "true" if m.group(2) == "1" else "false"
+            bool_converted.append(f"  {bvar}: {m.group(2)} → {val}")
+            return m.group(1) + val + m.group(3)
+        content = re.sub(pattern, _replacer, content, flags=re.MULTILINE)
+    if bool_converted:
+        print("  Converted legacy 0/1 values to true/false:")
+        for item in bool_converted:
+            print(f"    {item}")
+
+    # ── 2. Find DEFAULT block (after bool conversion) ──────────────────────────
     default_match = re.search(r"^DEFAULT:\s*\n((?:[ \t]+.*\n|#.*\n|\n)*)", content, re.MULTILINE)
     if not default_match:
         print("WARNING: No DEFAULT block found in config. Skipping migration.")
@@ -133,51 +196,57 @@ def main():
 
     default_block = default_match.group(1)
 
-    # ── 2. Extract current user values from DEFAULT block ─────────────────────
+    # ── 3. Extract current user values from DEFAULT block ─────────────────────
     user_values = {}
     for key in DEFAULTS:
         m = re.search(rf"^\s+{re.escape(key)}\s*:\s*(.+?)(?:\s*#.*)?$", default_block, re.MULTILINE)
         if m:
             user_values[key] = m.group(1).strip()
 
-    # ── 3. Detect missing variables ────────────────────────────────────────────
+    # ── 4. Detect missing variables ────────────────────────────────────────────
     for key in DEFAULTS:
         if key not in user_values:
             added.append(key)
 
-    # ── 4. Reconstruct DEFAULT block in canonical order ────────────────────────
+    # ── 5. Reconstruct DEFAULT block in canonical order ────────────────────────
     new_default_lines = []
     for key, default_val in DEFAULTS.items():
         val     = user_values.get(key, default_val)
         comment = COMMENTS.get(key, "")
+        # Format bool values as YAML true/false (lowercase)
+        if isinstance(val, bool):
+            val = "true" if val else "false"
+        elif isinstance(default_val, bool) and str(val) in ("0", "1", "true", "false", "True", "False"):
+            val = "true" if str(val) in ("1", "true", "True") else "false"
         new_default_lines.append(f"  {key}: {val}  {comment}\n")
 
-    # Preserve any extra lines (comments, excluded_ucids, etc.) that are not
-    # in DEFAULTS — keep them at the end of the DEFAULT block
+    # Preserve extra lines (comments, etc.) not in DEFAULTS
     extra_lines = []
     for line in default_block.splitlines(keepends=True):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
-            # Keep comments and blank lines only if not already in canonical
             if not any(f"  {k}:" in line for k in DEFAULTS):
                 extra_lines.append(line)
         else:
-            # Active line — check if it belongs to a known key
             key_match = re.match(r"\s+(\w+)\s*:", line)
             if key_match and key_match.group(1) not in DEFAULTS:
+                key_name = key_match.group(1)
+                rest     = line.split(":", 1)[1].strip()
+                # Skip empty excluded_ucids (no value after colon)
+                if key_name == "excluded_ucids" and (not rest or rest.startswith("#")):
+                    continue
                 extra_lines.append(line)
 
     new_default_block = "DEFAULT:\n" + "".join(new_default_lines)
     if extra_lines:
-        # Strip trailing blank lines from extras
         while extra_lines and not extra_lines[-1].strip():
             extra_lines.pop()
         new_default_block += "".join(extra_lines) + "\n"
 
-    # Replace old DEFAULT block with reconstructed one
+    # Replace old DEFAULT block (use positions from CURRENT content after bool conversion)
     content = content[:default_match.start()] + new_default_block + content[default_match.end():]
 
-    # ── 2. Check server blocks for obsolete variables ──────────────────────────
+    # ── 6. Check server blocks for obsolete variables ──────────────────────────
     # Find all non-DEFAULT top-level blocks
     server_blocks = re.finditer(
         r'^"[^"]+"\s*:\s*\n((?:[ \t]+[^\n]*\n)*)',
