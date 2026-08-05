@@ -10,9 +10,9 @@ Works on standalone single-node setups and on multi-node cluster setups (Master 
 
 On a configurable interval the plugin reads the Foothold `.lua` save files and updates a single Discord embed in a configured channel with:
 
-- **Progress bar** showing the balance of zone control between BLUE and RED, including neutral zones as ⬜
+- **Progress bar** showing the balance of zone control between BLUE and RED
 - **BLUE and RED zone columns** with zone levels and optional upgrade slot indicators, sorted by level and damage state
-- **Pilot leaderboard** with each pilot's rank, session points, and optional punishment status
+- **Pilot leaderboard** with rank, session, daily points, and optional punishment status
 
 The embed is always **edited in place** — it never spams new messages. Message IDs are stored in `plugins/fh_report/message_ids.json`. If that file is deleted, the plugin posts fresh messages.
 
@@ -20,12 +20,14 @@ Multiple server instances are supported — each can have its own channel, campa
 
 ---
 
+## Requirements
+
+- [DCSServerBot](https://github.com/Special-K-s-Flightsim-Bots/DCSServerBot) v3.x or later (by Special K)
+- Foothold campaign (by Leka) active on at least one DCS instance
+
+---
+
 ## Installation
-
-### Requirements
-
-- [DCSServerBot](https://github.com/Special-K-s-Flightsim-Bots/DCSServerBot) v3.x or later
-- Foothold campaign active on at least one DCS instance
 
 ### Fresh install
 
@@ -38,18 +40,10 @@ Multiple server instances are supported — each can have its own channel, campa
 
 ### Updating from a previous version
 
-Run `install.cmd` — it detects the existing config and runs `migrate_config.py` automatically:
+Run `install.cmd` — it detects the existing config and migrates it automatically:
 - Preserves all your existing values
 - Adds new variables with their defaults
 - Updates header comments
-
-```
-Existing fh_report.yaml found. Running migration...
-Migration complete. Added 2 new variable(s) to DEFAULT:
-  + zone_name_length: 16
-  + slot_status: 0
-  Header comments updated.
-```
 
 ---
 
@@ -62,16 +56,20 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | Option | Default | Description |
 |---|---|---|
 | `update_interval` | `300` | Seconds between embed refreshes |
-| `bar_length` | `20` | Number of squares in the progress bar |
+| `bar_length` | `40` | Number of squares in the progress bar |
+| `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
 | `max_zones` | `15` | Max zones per column. Omit for all |
 | `zone_name_length` | `16` | Max characters for zone names (8–24, clamped) |
-| `slot_status` | `0` | `0` = max level only / `1` = active vs lost slots |
-| `strip_callsign` | `0` | `0` = names as-is / `1` = strip flight callsign prefix |
-| `points_order` | `R` | Leaderboard mode. See [Leaderboard](#leaderboard) |
+| `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
+| `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
+| `points_order` | `R` | Leaderboard mode — see [Leaderboard](#leaderboard) |
+| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
+| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
 | `max_pilots` | all | Max pilots in single-table modes |
 | `max_pilots_2t` | all | Max pilots per table in dual-table modes. Falls back to `max_pilots` |
-| `show_all_pilots` | `0` | `0` = cut at limit / `1` = split into multiple fields |
-| `show_punishment` | `0` | `0` = disabled / `1` = show punishment badges |
+| `max_pilots_3t` | `6` | Max pilots per table in triple-table modes. Falls back to `max_pilots_2t` |
+| `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
+| `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
 
@@ -80,14 +78,10 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 ```yaml
 DEFAULT:
   update_interval: 300
-  bar_length: 20
-  max_zones: 15
-  zone_name_length: 16
-  slot_status: 1
-  strip_callsign: 1
-  points_order: 2S, BS, R
-  show_all_pilots: 0
-  show_punishment: 1
+  bar_length: 40
+  strip_callsign: true
+  points_order: 3DS, BS, BR
+  show_punishment: true
 
 DCS_Server:                           # instance name from nodes.yaml
   channel_id: 1458145804685541508
@@ -108,29 +102,31 @@ DCS_Server_2:
 |---|---|---|
 | Active BLUE / RED | ✅ | ✅ Top, sorted by level and damage |
 | Suspended BLUE / RED | ✅ | ✅ Bottom, shown as fully filled |
-| Neutral (`side=0`) | ✅ as ⬜ | ❌ |
+| Neutral (`side=0`) | ✅ | ❌ |
 | Hidden (name starts with `hidden`) | ❌ | ❌ |
 
-Suspended zones appear at the bottom of their column shown as fully filled — Foothold reactivates them at full capacity. Neutral zones are counted in the progress bar but not listed.
+Neutral zones are counted in the progress bar but not listed. Suspended zones appear at the bottom shown as fully filled.
 
 ---
 
 ## Upgrade slot display (`slot_status`)
 
-**`slot_status: 0`** (default) — shows zone level as fully filled:
+**`slot_status: false`** (default) — shows zone level as fully filled:
 ```
 Bardufoss    🔹🔹🔹
 Kalixfors    🔹🔹🔹🔹
 ```
 
-**`slot_status: 1`** — shows active vs destroyed upgrade slots:
+**`slot_status: true`** — shows active vs destroyed upgrade slots (first 5 slots only):
 ```
-Bardufoss    🔹◇◇     ← 3 slots total, only 1 active
+Bardufoss    🔹◇◇     ← 3 slots, only 1 active
 Kalixfors    🔹🔹🔹🔹  ← 4 slots, all active
 ```
 
-- `🔹` = active BLUE slot · `◇` = lost BLUE slot
-- `🔺` = active RED slot · `△` = lost RED slot
+- `🔹` = active BLUE slot · `◇` = destroyed BLUE slot
+- `🔺` = active RED slot · `△` = destroyed RED slot
+
+Only the first 5 upgrade slots are shown. Higher-numbered slots serve other purposes and are excluded.
 
 ---
 
@@ -138,25 +134,34 @@ Kalixfors    🔹🔹🔹🔹  ← 4 slots, all active
 
 ### Points display (`points_order`)
 
-| Value | Display | Sort |
-|---|---|---|
-| `R` | Rank points `(R: nnn)` | By rank |
-| `S` | Session points `(S: nnn)` | By session |
-| `BR` | Both `(R: nnn · S: nnn)` | By rank |
-| `BS` | Both `(S: nnn · R: nnn)` | By session |
-| `2R` | Two tables — rank / session | — |
-| `2S` | Two tables — session / rank | — |
+Comma-separated values cycle through modes on each update: `points_order: 3DS, BS, BR`
 
-Comma-separated values cycle through modes on each update:
-```yaml
-points_order: 2S, BS, R
-```
+Modes with Daily (`D`) are skipped when no daily data exists yet. Session modes are skipped when no session data exists.
 
-### Callsign stripping (`strip_callsign: 1`)
+| Mode | Tables | Sorted by | Shows |
+|---|---|---|---|
+| `R` | 1 | Rank | `(R: nnn)` |
+| `S` | 1 | Session | `(S: nnn)` |
+| `D` | 1 | Daily | `(D: nnn)` |
+| `BR` | 1 | Rank | `(R · S · D)` |
+| `BS` | 1 | Session | `(S · R · D)` |
+| `BD` | 1 | Daily | `(D · R · S)` |
+| `BDS` | 1 | Daily | `(D · S · R)` |
+| `2R` | 2 | Rank / Session | — |
+| `2S` | 2 | Session / Rank | — |
+| `2D` | 2 | Daily / Rank | — |
+| `2DS` | 2 | Daily / Session | — |
+| `3R` | 3 | Rank / Session / Daily | — |
+| `3S` | 3 | Session / Rank / Daily | — |
+| `3D` | 3 | Daily / Rank / Session | — |
+| `3DS` | 3 | Daily / Session / Rank | — |
+
+### Callsign stripping (`strip_callsign: true`)
 
 - `UZI 1-1 | Pilot1` → `Pilot1`
-- `CALL 1-3 Pilot2` → `Pilot2`
-- `[SQD] Pilot3` → `[SQD] Pilot3` ← squadron tags preserved
+- `GUNSTAR 11 | Pilot2 | 307` → `Pilot2` ← numeric trailing segment discarded
+- `Ford 1 - Pilot3` → `Pilot3`
+- `[SQD] Pilot4` → `[SQD] Pilot4` ← squadron tags preserved
 
 ### Pilot ranks
 
@@ -176,7 +181,7 @@ points_order: 2S, BS, R
 
 ---
 
-## Punishment badges (`show_punishment: 1`)
+## Punishment badges (`show_punishment: true`)
 
 Reads accumulated punishment points from the DCSServerBot Punishment plugin and shows a badge below each sanctioned pilot in the leaderboard:
 
@@ -197,7 +202,7 @@ Reads accumulated punishment points from the DCSServerBot Punishment plugin and 
 | 101 – 200 | 🔒 | Brig time | 🔨🔨🔨🔨🔨 |
 | 200+ | 💀 | Dishonorably discharged | 🔨🔨🔨🔨🔨🔨 |
 
-Requires the DCSServerBot Punishment plugin. If not present or the `pu_events` table does not exist, the option does nothing silently.
+Requires the DCSServerBot Punishment plugin. If not present, the option is silently ignored.
 
 ---
 
@@ -212,10 +217,9 @@ Requires the DCSServerBot Punishment plugin. If not present or the `pu_events` t
 | `fh_report.yaml` | Configuration template (goes in `config/plugins/`) |
 | `migrate_config.py` | Migration script, called automatically by `install.cmd` on updates |
 | `install.cmd` | Installation and update script |
-| `message_ids.json` | Auto-generated — stores Discord message IDs per server |
 
 ---
 
-## Resetting the embed
+## Changelog
 
-Delete `plugins/fh_report/message_ids.json` and restart DCSServerBot to force new messages to be posted.
+See [Releases](https://github.com/pierpaolobirdi/fh_report-dcsserverbot-plugin/releases) for full release notes.
