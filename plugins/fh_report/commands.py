@@ -250,18 +250,43 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
         name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
 
     players = {}
-    block_pattern = r"\[[\"']([^\"']+)[\"']\]=\{([^}]+)\}"
-    for m in re.finditer(block_pattern, content):
-        name  = m.group(1)
-        block = m.group(2)
-        credit_m = re.search('\\[(?:"credits"|\'credits\')\\]=([\\d.]+)', block)
+
+    # Find the players block first using brace counting
+    players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
+    if not players_start:
+        return {}
+    bs = content.find('{', players_start.end() - 1)
+    depth, j = 1, bs + 1
+    while j < len(content) and depth > 0:
+        if content[j] == '{': depth += 1
+        elif content[j] == '}': depth -= 1
+        j += 1
+    players_block = content[bs + 1:j - 1]
+
+    # Extract each player using brace counting — handles nested sub-tables
+    # introduced in Foothold v4.5 (career, aircraft fields)
+    pos = 0
+    while pos < len(players_block):
+        km = re.search(r'\[["\']([^"\']+)["\']\]=\{', players_block[pos:])
+        if not km:
+            break
+        name = km.group(1)
+        brace_pos = pos + km.end() - 1
+        depth2, k = 1, brace_pos + 1
+        while k < len(players_block) and depth2 > 0:
+            if players_block[k] == '{': depth2 += 1
+            elif players_block[k] == '}': depth2 -= 1
+            k += 1
+        block = players_block[brace_pos + 1:k - 1]
+        pos = pos + km.start() + 1
+
+        credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
         if not credit_m:
             continue
-        if name in excluded_names:
-            continue
-        # Skip invalid or empty names
         clean_name = name.strip()
         if not clean_name or len(clean_name) < 2:
+            continue
+        if clean_name in excluded_names:
             continue
         players[clean_name] = {
             "credits": float(credit_m.group(1)),
