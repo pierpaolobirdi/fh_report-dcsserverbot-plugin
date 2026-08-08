@@ -59,6 +59,9 @@
 #                      Comma-separated = cycle through modes on each update
 #                      Example: points_order: 2S, BS, R
 #                      D modes show nothing if no daily data yet (silently skipped)
+#   compact_points   - In multi-table modes (2x, 3x), show only the primary data  (default: false)
+#                      false = each table shows all data (R · S · D)
+#                      true  = each table shows only its own sorted value (R, S, or D)
 #   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: false)
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
@@ -112,6 +115,7 @@ DEFAULT:
   slot_status: false
   strip_callsign: false
   points_order: R
+  compact_points: false
   show_all_pilots: false
   show_pilot_card: false
   pilot_card_icon: 🔸
@@ -140,7 +144,8 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots: 20
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
-#  show_all_pilots: false
+#  compact_points: false
+  show_all_pilots: false
 #  show_pilot_card: false
   pilot_card_icon: 🔸
   show_punishment: false
@@ -166,7 +171,8 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots: 20
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
-#  show_all_pilots: false
+#  compact_points: false
+  show_all_pilots: false
 #  show_pilot_card: false
   pilot_card_icon: 🔸
   show_punishment: false
