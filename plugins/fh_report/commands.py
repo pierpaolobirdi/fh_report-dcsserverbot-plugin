@@ -614,17 +614,29 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
       10=TotalKills    21=PilotDeaths       30=FuelReceivedLbs
     Data sourced from Foothold_Ranks.lua — historical career totals only.
     Returns None if all values are zero."""
-    total_h  = int(career.get(1, 0)) // 3600
-    helo_h   = int(career.get(3, 0)) // 3600
-    fixed_h  = total_h - helo_h
+    total_s  = int(career.get(1, 0))
+    helo_s   = int(career.get(3, 0))
+    fixed_s  = total_s - helo_s
     kills    = int(career.get(10, 0))
     traps    = int(career.get(8, 0))
     refuels  = int(career.get(30, 0)) // 10000
     deaths   = int(career.get(21, 0))
 
+    def _fmt_time(seconds: int) -> str | None:
+        """Format seconds as hours (>=1h) or minutes (<1h). None if zero."""
+        if seconds <= 0:
+            return None
+        hours = seconds // 3600
+        if hours >= 1:
+            return f"{hours}h"
+        minutes = max(1, seconds // 60)  # at least 1m if there's any time
+        return f"{minutes}m"
+
     parts = []
-    if fixed_h > 0:  parts.append(f"{fixed_h}h fixed")
-    if helo_h > 0:   parts.append(f"{helo_h}h helo")
+    fixed_str = _fmt_time(fixed_s)
+    if fixed_str: parts.append(f"{fixed_str} fixed")
+    helo_str  = _fmt_time(helo_s)
+    if helo_str:  parts.append(f"{helo_str} helo")
     if kills > 0:    parts.append(f"{kills} kills")
     if traps > 0:    parts.append(f"{traps} traps")
     if refuels > 0:  parts.append(f"{refuels} refuels")
