@@ -1110,8 +1110,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 continue
             tbl_title, tbl_cont = _title(tbl_key)
             total_tbl = len(tbl_items)
-            if _lim_3:
-                _lim_3_eff = _lim_3 + _surplus if _lim_3 else None
+            _lim_3_eff = (_lim_3 + _surplus) if _lim_3 else None
             if _lim_3_eff:
                 tbl_items = tbl_items[:_lim_3_eff]
             _surplus   = max(0, _lim_3_eff - len(tbl_items)) if _lim_3_eff else 0
