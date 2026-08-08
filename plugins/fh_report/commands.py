@@ -25,12 +25,16 @@ from .version import __version__
 log = logging.getLogger(__name__)
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
-RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000, 90000]
+RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
+                   90000, 120000, 155000, 195000, 240000, 290000, 345000, 405000, 470000, 540000]
 RANK_NAMES = [
     "Recruit", "Aviator", "Airman", "Senior Airman",
     "Staff Sergeant", "Technical Sergeant", "Master Sergeant",
     "Senior Master Sergeant", "Chief Master Sergeant",
-    "Second Lieutenant", "First Lieutenant"
+    "Second Lieutenant", "First Lieutenant",
+    "Captain", "Major", "Lieutenant Colonel", "Colonel",
+    "Brigadier General", "Major General", "Lieutenant General",
+    "General", "General of the Air Force"
 ]
 
 
@@ -288,9 +292,40 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
             continue
         if clean_name in excluded_names:
             continue
+
+        # Extract career stats (Foothold v4.5+)
+        # CAREER_STAT IDs: FlightSeconds=1, HelicopterSeconds=3,
+        # TotalKills=10, ConventionalCarrierTraps=8,
+        # FuelReceivedLbs=30, PilotDeaths=21
+        career: dict = {}
+        career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
+        if career_m:
+            cb = block.find('{', career_m.end() - 1)
+            cd, cj = 1, cb + 1
+            while cj < len(block) and cd > 0:
+                if block[cj] == '{': cd += 1
+                elif block[cj] == '}': cd -= 1
+                cj += 1
+            career_block = block[cb + 1:cj - 1]
+            for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+                career[int(cm.group(1))] = float(cm.group(2))
+
+        # Extract aircraft stats — sum flight seconds across all aircraft types
+        aircraft_helo_seconds = 0.0
+        aircraft_m = re.search(r'\[(?:"aircraft"|\'aircraft\')\]\s*=\s*\{', block)
+        if aircraft_m:
+            ab = block.find('{', aircraft_m.end() - 1)
+            ad, aj = 1, ab + 1
+            while aj < len(block) and ad > 0:
+                if block[aj] == '{': ad += 1
+                elif block[aj] == '}': ad -= 1
+                aj += 1
+            # We don't parse individual aircraft here — helo time comes from career[3]
+
         players[clean_name] = {
             "credits": float(credit_m.group(1)),
             "ucid":    name_to_ucid.get(clean_name),
+            "career":  career,
         }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
@@ -572,6 +607,34 @@ def _trim_embed(embed: discord.Embed) -> discord.Embed:
     return embed
 
 
+def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
+    """Build a one-line pilot career card from career stats dict.
+    CAREER_STAT IDs (Foothold v4.5):
+      1=FlightSeconds  3=HelicopterSeconds  8=ConventionalCarrierTraps
+      10=TotalKills    21=PilotDeaths       30=FuelReceivedLbs
+    Data sourced from Foothold_Ranks.lua — historical career totals only.
+    Returns None if all values are zero."""
+    total_h  = int(career.get(1, 0)) // 3600
+    helo_h   = int(career.get(3, 0)) // 3600
+    fixed_h  = total_h - helo_h
+    kills    = int(career.get(10, 0))
+    traps    = int(career.get(8, 0))
+    refuels  = int(career.get(30, 0)) // 10000
+    deaths   = int(career.get(21, 0))
+
+    parts = []
+    if fixed_h > 0:  parts.append(f"{fixed_h}h fixed")
+    if helo_h > 0:   parts.append(f"{helo_h}h helo")
+    if kills > 0:    parts.append(f"{kills} kills")
+    if traps > 0:    parts.append(f"{traps} traps")
+    if refuels > 0:  parts.append(f"{refuels} refuels")
+    if deaths > 0:   parts.append(f"{deaths} deaths")
+
+    if not parts:
+        return None
+    return f"·　{icon} " + " · ".join(parts)
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: bool = False,
@@ -585,7 +648,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 campaign_stats: dict | None = None,
                 points_order: str = "T",
                 bar_style_emoji: bool = False,
-                daily_points: dict | None = None) -> discord.Embed:
+                daily_points: dict | None = None,
+                show_pilot_card: bool = False,
+                pilot_card_icon: str = "🔸") -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -771,6 +836,14 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             pts_str = _tri(_s(), _r(), _d()) if s_pts else "(S: 0)"
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
+        # Pilot career card — shown only when this table is sorted by rank.
+        # Data sourced from Foothold_Ranks.lua (historical career totals).
+        # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
+        _this_table_is_rank = points_order in ("R", "BR", "2R", "3R")
+        if show_pilot_card and _this_table_is_rank:
+            card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+            if card:
+                pilot_lines.append(card)
         # Punishment badge — on rank table always; on session table only when S is the only table
         # Badge goes on the table with highest priority R>S>D
         # For single/B modes: always on this (only) table
@@ -933,6 +1006,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     pts_part = _s_tri(_ss(), _sr(), _sd())
                 line = f"{s_medal} `{s_short}` — **{s_rank}** {pts_part}".rstrip()
                 second_lines.append(line)
+                # Pilot career card on second table when second table is rank-ordered
+                _2nd_is_rank = points_order in ("2S", "2D")  # 2nd table = R for these modes
+                if show_pilot_card and _2nd_is_rank:
+                    s_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                    if s_card:
+                        second_lines.append(s_card)
                 # Punishment badge on second table only for 2S (rank table)
                 # Badge on second table when second table has higher priority than first
                 # 2S: 2nd=R (R>S) ✓  |  2D: 2nd=R (R>D) ✓  |  2DS: 2nd=S (S>D) ✓  |  2R: 2nd=S (R already on 1st) ✗
@@ -1060,6 +1139,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
                 tbl_lines.append(f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip())
+                # Pilot career card on third table when this table is rank-ordered
+                if show_pilot_card and tbl_key == "R":
+                    t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                    if t_card:
+                        tbl_lines.append(t_card)
                 # Badge on this table if its key has highest priority among remaining tables
                 # In 3x: badge goes on R if exists, else S, else D
                 _order_keys_3x = {
@@ -1861,6 +1945,8 @@ class FH_Report(Plugin):
             bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
             daily_points        = daily_pts,
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
+            show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
+            pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
         )
 
         try:
