@@ -25,7 +25,7 @@ Multiple server instances are supported — each can have its own channel, campa
 - [DCSServerBot](https://github.com/Special-K-s-Flightsim-Bots/DCSServerBot) v3.x or later (by Special K)
 - Foothold campaign (by Leka) active on at least one DCS instance
 
----
+----
 
 ## Installation
 
