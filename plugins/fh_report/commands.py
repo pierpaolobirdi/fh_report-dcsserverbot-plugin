@@ -650,7 +650,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 bar_style_emoji: bool = False,
                 daily_points: dict | None = None,
                 show_pilot_card: bool = False,
-                pilot_card_icon: str = "🔸") -> discord.Embed:
+                pilot_card_icon: str = "🔸",
+                compact_points: bool = False) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -819,21 +820,21 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         elif points_order == "BDS":
             pts_str = _tri(_d(), _s(), _r())
         elif points_order == "2R":
-            pts_str = _tri(_r(), _s(), _d())
+            pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
         elif points_order == "2D":
-            pts_str = _tri(_d(), _r(), _s())
+            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _r(), _s()) if not compact_points else "")
         elif points_order == "2DS":
-            pts_str = _tri(_d(), _s(), _r())
+            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _s(), _r()) if not compact_points else "")
         elif points_order == "3R":
-            pts_str = _tri(_r(), _s(), _d())
+            pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
         elif points_order == "3S":
-            pts_str = _tri(_s(), _r(), _d())
+            pts_str = f"(S: {s_pts:,})" if (compact_points and not hide_session and s_pts) else (_tri(_s(), _r(), _d()) if not compact_points else "")
         elif points_order == "3D":
-            pts_str = _tri(_d(), _r(), _s())
+            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _r(), _s()) if not compact_points else "")
         elif points_order == "3DS":
-            pts_str = _tri(_d(), _s(), _r())
+            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _s(), _r()) if not compact_points else "")
         else:  # 2S — primary table is session
-            pts_str = _tri(_s(), _r(), _d()) if s_pts else "(S: 0)"
+            pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
         # Pilot career card — shown only when this table is sorted by rank.
@@ -996,7 +997,13 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 def _s_tri(a, b, c):
                     parts = [p for p in [a, b, c] if p]
                     return f"({'  ·  '.join(parts)})" if parts else ""
-                if points_order == "2R":
+                if compact_points:
+                    # Show only this table's own data
+                    if points_order == "2R":   pts_part = f"(S: {s_pts:,})" if (not s_hide_session and s_pts) else ""
+                    elif points_order == "2S": pts_part = f"(R: {s_credits:,})" if not s_hide else ""
+                    elif points_order == "2D": pts_part = f"(R: {s_credits:,})" if not s_hide else ""
+                    else:                      pts_part = f"(S: {s_pts:,})" if (not s_hide_session and s_pts) else ""
+                elif points_order == "2R":
                     pts_part = _s_tri(_ss(), _sr(), _sd())
                 elif points_order == "2S":
                     pts_part = _s_tri(_sr(), _ss(), _sd())
@@ -1134,7 +1141,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 def _t_tri(a, b, c):
                     parts = [p for p in [a, b, c] if p]
                     return f"({'  ·  '.join(parts)})" if parts else ""
-                if tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
+                if compact_points:
+                    if tbl_key == "R":   t_pts_part = f"(R: {t_credits:,})" if not t_hide else ""
+                    elif tbl_key == "S": t_pts_part = f"(S: {t_pts:,})" if (not t_hide_s and t_pts) else ""
+                    else:                t_pts_part = f"(D: {t_d_pts:,})" if t_show_d else ""
+                elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
                 tbl_lines.append(f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip())
@@ -1946,6 +1957,7 @@ class FH_Report(Plugin):
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
             show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
             pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
+            compact_points      = _bool_cfg(cfg.get("compact_points")),
         )
 
         try:

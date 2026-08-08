@@ -70,6 +70,9 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      Comma-separated = cycle through modes on each update
 #                      Example: points_order: 2S, BS, R
 #                      D modes show nothing if no daily data yet (silently skipped)
+#   compact_points   - In multi-table modes (2x, 3x), show only the primary data  (default: false)
+#                      false = each table shows all data (R · S · D)
+#                      true  = each table shows only its own sorted value (R, S, or D)
 #   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
@@ -128,6 +131,7 @@ KNOWN_VARS = {
     "show_punishment",
     "strip_callsign",
     "points_order",
+    "compact_points",
     "show_all_pilots",
     "max_pilots",
     "max_pilots_2t",
@@ -151,6 +155,7 @@ DEFAULTS = {
     "show_punishment":  False,
     "strip_callsign":   False,
     "points_order":     "R",
+    "compact_points":   False,
     "show_all_pilots":  False,
 }
 
@@ -190,7 +195,8 @@ def main():
 
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
-                 "show_all_pilots", "show_punishment", "show_pilot_card"}
+                 "compact_points",
+    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
