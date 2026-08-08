@@ -75,6 +75,14 @@
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
+#   show_pilot_card  - Show pilot career card below each pilot in the rank leaderboard
+#                      (default: false). Requires Foothold v4.5 or later.
+#                      Displays: ✈️ flight hrs  🚁 helo hrs  🎯 kills  🚢 traps  ⛽ refuels  💀 deaths
+#                      Values of zero are omitted. If all values are zero the card is not shown.
+#                      Only the first 5 upgrade slots are shown (primary slots).
+#                      Example output:
+#                        🥇 `Pilot1` — Colonel (R: 241,500)
+#                        ·  ✈️ 142 hrs  🎯 47 kills  🚢 23 traps  ⛽ 12 refuels
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
@@ -103,6 +111,7 @@ DEFAULT:
   strip_callsign: false
   points_order: R
   show_all_pilots: false
+  show_pilot_card: false
   show_punishment: false
 #  max_pilots: 20
 #  max_pilots_2t: 8
@@ -129,7 +138,8 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
 #  show_all_pilots: false
-#  show_punishment: false
+#  show_pilot_card: false
+  show_punishment: false
 #  daily_reset_hour: 0
 #  daily_reset_schedule:
 #    sat: 6
@@ -153,7 +163,8 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
 #  show_all_pilots: false
-#  show_punishment: false
+#  show_pilot_card: false
+  show_punishment: false
 #  daily_reset_hour: 0
 #  daily_reset_schedule:
 #    sat: 6

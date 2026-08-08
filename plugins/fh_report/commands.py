@@ -25,12 +25,16 @@ from .version import __version__
 log = logging.getLogger(__name__)
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
-RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000, 90000]
+RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
+                   90000, 120000, 155000, 195000, 240000, 290000, 345000, 405000, 470000, 540000]
 RANK_NAMES = [
     "Recruit", "Aviator", "Airman", "Senior Airman",
     "Staff Sergeant", "Technical Sergeant", "Master Sergeant",
     "Senior Master Sergeant", "Chief Master Sergeant",
-    "Second Lieutenant", "First Lieutenant"
+    "Second Lieutenant", "First Lieutenant",
+    "Captain", "Major", "Lieutenant Colonel", "Colonel",
+    "Brigadier General", "Major General", "Lieutenant General",
+    "General", "General of the Air Force"
 ]
 
 
@@ -288,9 +292,40 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
             continue
         if clean_name in excluded_names:
             continue
+
+        # Extract career stats (Foothold v4.5+)
+        # CAREER_STAT IDs: FlightSeconds=1, HelicopterSeconds=3,
+        # TotalKills=10, ConventionalCarrierTraps=8,
+        # FuelReceivedLbs=30, PilotDeaths=21
+        career: dict = {}
+        career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
+        if career_m:
+            cb = block.find('{', career_m.end() - 1)
+            cd, cj = 1, cb + 1
+            while cj < len(block) and cd > 0:
+                if block[cj] == '{': cd += 1
+                elif block[cj] == '}': cd -= 1
+                cj += 1
+            career_block = block[cb + 1:cj - 1]
+            for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+                career[int(cm.group(1))] = float(cm.group(2))
+
+        # Extract aircraft stats — sum flight seconds across all aircraft types
+        aircraft_helo_seconds = 0.0
+        aircraft_m = re.search(r'\[(?:"aircraft"|\'aircraft\')\]\s*=\s*\{', block)
+        if aircraft_m:
+            ab = block.find('{', aircraft_m.end() - 1)
+            ad, aj = 1, ab + 1
+            while aj < len(block) and ad > 0:
+                if block[aj] == '{': ad += 1
+                elif block[aj] == '}': ad -= 1
+                aj += 1
+            # We don't parse individual aircraft here — helo time comes from career[3]
+
         players[clean_name] = {
             "credits": float(credit_m.group(1)),
             "ucid":    name_to_ucid.get(clean_name),
+            "career":  career,
         }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
@@ -572,6 +607,39 @@ def _trim_embed(embed: discord.Embed) -> discord.Embed:
     return embed
 
 
+def _build_pilot_card(career: dict) -> str | None:
+    """Build a one-line pilot career card from career stats dict.
+    CAREER_STAT IDs (Foothold v4.5):
+      1=FlightSeconds  3=HelicopterSeconds  8=ConventionalCarrierTraps
+      10=TotalKills    21=PilotDeaths       30=FuelReceivedLbs
+    Returns None if all values are zero."""
+    flight_h  = int(career.get(1, 0)) // 3600
+    helo_h    = int(career.get(3, 0)) // 3600
+    kills     = int(career.get(10, 0))
+    traps     = int(career.get(8, 0))
+    refuels   = int(career.get(30, 0)) // 10000  # rough conversion lbs→events
+    deaths    = int(career.get(21, 0))
+
+    parts = []
+    if flight_h > 0:
+        parts.append(f"✈️ {flight_h} hrs")
+    # Show helo time only if > 0 and different from total flight time
+    if helo_h > 0 and helo_h != flight_h:
+        parts.append(f"🚁 {helo_h} hrs")
+    if kills > 0:
+        parts.append(f"🎯 {kills} kills")
+    if traps > 0:
+        parts.append(f"🚢 {traps} traps")
+    if refuels > 0:
+        parts.append(f"⛽ {refuels} refuels")
+    if deaths > 0:
+        parts.append(f"💀 {deaths} deaths")
+
+    if not parts:
+        return None
+    return "·  " + "  ".join(parts)
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: bool = False,
@@ -585,7 +653,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 campaign_stats: dict | None = None,
                 points_order: str = "T",
                 bar_style_emoji: bool = False,
-                daily_points: dict | None = None) -> discord.Embed:
+                daily_points: dict | None = None,
+                show_pilot_card: bool = False) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -771,6 +840,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             pts_str = _tri(_s(), _r(), _d()) if s_pts else "(S: 0)"
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
+        # Pilot career card (show_pilot_card) — always shown when rank table is present
+        if show_pilot_card:
+            card = _build_pilot_card(data.get("career") or {})
+            if card:
+                pilot_lines.append(card)
         # Punishment badge — on rank table always; on session table only when S is the only table
         # Badge goes on the table with highest priority R>S>D
         # For single/B modes: always on this (only) table
@@ -1861,6 +1935,7 @@ class FH_Report(Plugin):
             bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
             daily_points        = daily_pts,
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
+            show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
         )
 
         try:

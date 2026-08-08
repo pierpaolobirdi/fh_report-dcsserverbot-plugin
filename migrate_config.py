@@ -84,6 +84,13 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
+#   show_pilot_card  - Show pilot career card below each pilot in the rank leaderboard
+#                      (default: false). Requires Foothold v4.5 or later.
+#                      Displays: ✈️ flight hrs  🚁 helo hrs  🎯 kills  🚢 traps  ⛽ refuels  💀 deaths
+#                      Values of zero are omitted. If all values are zero the card is not shown.
+#                      Example output:
+#                        🥇 `Pilot1` — Colonel (R: 241,500)
+#                        ·  ✈️ 142 hrs  🎯 47 kills  🚢 23 traps  ⛽ 12 refuels
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
@@ -113,6 +120,7 @@ KNOWN_VARS = {
     "max_zones",
     "zone_name_length",
     "slot_status",
+    "show_pilot_card",
     "show_punishment",
     "strip_callsign",
     "points_order",
@@ -134,6 +142,7 @@ DEFAULTS = {
     "max_zones":        15,
     "zone_name_length": 16,
     "slot_status":      False,
+    "show_pilot_card":  False,
     "show_punishment":  False,
     "strip_callsign":   False,
     "points_order":     "R",
@@ -148,6 +157,7 @@ COMMENTS = {
     "max_zones":        "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
+    "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
     "strip_callsign":   "",
     "points_order":     "",
@@ -174,7 +184,7 @@ def main():
 
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
-                 "show_all_pilots", "show_punishment"}
+                 "show_all_pilots", "show_punishment", "show_pilot_card"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
