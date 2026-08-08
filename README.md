@@ -12,9 +12,9 @@ On a configurable interval the plugin reads the Foothold `.lua` save files and u
 
 - **Progress bar** showing the balance of zone control between BLUE and RED
 - **BLUE and RED zone columns** with zone levels and optional upgrade slot indicators, sorted by level and damage state
-- **Pilot leaderboard** with rank, session, daily points, and optional punishment status
+- **Pilot leaderboard** with rank, session, daily points, optional career card, and optional punishment status
 
-The embed is always **edited in place** — it never spams new messages. Message IDs are stored in `plugins/fh_report/message_ids.json`. If that file is deleted, the plugin posts fresh messages.
+The embed is always **edited in place** — it never spams new messages.
 
 Multiple server instances are supported — each can have its own channel, campaign name, and display settings.
 
@@ -69,6 +69,8 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `max_pilots_2t` | all | Max pilots per table in dual-table modes. Falls back to `max_pilots` |
 | `max_pilots_3t` | `6` | Max pilots per table in triple-table modes. Falls back to `max_pilots_2t` |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
+| `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
+| `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
@@ -81,6 +83,7 @@ DEFAULT:
   bar_length: 40
   strip_callsign: true
   points_order: 3DS, BS, BR
+  show_pilot_card: true
   show_punishment: true
 
 DCS_Server:                           # instance name from nodes.yaml
@@ -88,10 +91,6 @@ DCS_Server:                           # instance name from nodes.yaml
   campaign_name: "Operation — FootHold"
   excluded_ucids:
     - e435a8583ad34583b7a709f58d98a6af
-
-DCS_Server_2:
-  channel_id: 1234567890123456789
-  campaign_name: "Operation — FootHold 2"
 ```
 
 ---
@@ -178,6 +177,37 @@ Modes with Daily (`D`) are skipped when no daily data exists yet. Session modes 
 | 45,000 | Chief Master Sergeant |
 | 65,000 | Second Lieutenant |
 | 90,000 | First Lieutenant |
+| 120,000 | Captain |
+| 155,000 | Major |
+| 195,000 | Lieutenant Colonel |
+| 240,000 | Colonel |
+| 290,000 | Brigadier General |
+| 345,000 | Major General |
+| 405,000 | Lieutenant General |
+| 470,000 | General |
+| 540,000 | General of the Air Force |
+
+### Pilot career card (`show_pilot_card: true`)
+
+Requires Foothold v4.5 or later. Shows a career stats line below each pilot in rank-ordered tables only. Data sourced from Foothold_Ranks.lua — historical career totals, not session or daily stats. Values of zero are omitted. If all values are zero the card is not shown.
+
+The icon preceding the card line is configurable via `pilot_card_icon` (default: 🔸).
+
+```
+🥇 `Pilot1` — Colonel (R: 241,500)
+·　🔸 129h fixed · 13h helo · 47 kills · 23 traps · 12 refuels · 3 deaths
+🥈 `Pilot2` — Lieutenant Colonel (R: 198,320)
+·　🔸 89h fixed · 31 kills
+·　⚖️ `Pilot2` JAG indictment filed (32 p.p.) 🔨🔨🔨
+```
+
+Stats shown:
+- Fixed-wing flight hours (total minus helicopter)
+- Helicopter hours (only if > 0)
+- Total kills
+- Carrier traps
+- In-flight refuels received
+- Pilot deaths
 
 ---
 

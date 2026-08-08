@@ -607,37 +607,32 @@ def _trim_embed(embed: discord.Embed) -> discord.Embed:
     return embed
 
 
-def _build_pilot_card(career: dict) -> str | None:
+def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     """Build a one-line pilot career card from career stats dict.
     CAREER_STAT IDs (Foothold v4.5):
       1=FlightSeconds  3=HelicopterSeconds  8=ConventionalCarrierTraps
       10=TotalKills    21=PilotDeaths       30=FuelReceivedLbs
+    Data sourced from Foothold_Ranks.lua — historical career totals only.
     Returns None if all values are zero."""
-    flight_h  = int(career.get(1, 0)) // 3600
-    helo_h    = int(career.get(3, 0)) // 3600
-    kills     = int(career.get(10, 0))
-    traps     = int(career.get(8, 0))
-    refuels   = int(career.get(30, 0)) // 10000  # rough conversion lbs→events
-    deaths    = int(career.get(21, 0))
+    total_h  = int(career.get(1, 0)) // 3600
+    helo_h   = int(career.get(3, 0)) // 3600
+    fixed_h  = total_h - helo_h
+    kills    = int(career.get(10, 0))
+    traps    = int(career.get(8, 0))
+    refuels  = int(career.get(30, 0)) // 10000
+    deaths   = int(career.get(21, 0))
 
     parts = []
-    if flight_h > 0:
-        parts.append(f"✈️ {flight_h} hrs")
-    # Show helo time only if > 0 and different from total flight time
-    if helo_h > 0 and helo_h != flight_h:
-        parts.append(f"🚁 {helo_h} hrs")
-    if kills > 0:
-        parts.append(f"🎯 {kills} kills")
-    if traps > 0:
-        parts.append(f"🚢 {traps} traps")
-    if refuels > 0:
-        parts.append(f"⛽ {refuels} refuels")
-    if deaths > 0:
-        parts.append(f"💀 {deaths} deaths")
+    if fixed_h > 0:  parts.append(f"{fixed_h}h fixed")
+    if helo_h > 0:   parts.append(f"{helo_h}h helo")
+    if kills > 0:    parts.append(f"{kills} kills")
+    if traps > 0:    parts.append(f"{traps} traps")
+    if refuels > 0:  parts.append(f"{refuels} refuels")
+    if deaths > 0:   parts.append(f"{deaths} deaths")
 
     if not parts:
         return None
-    return "·  " + "  ".join(parts)
+    return f"·　{icon} " + " · ".join(parts)
 
 
 def build_embed(zones: dict, players: dict, campaign_name: str,
@@ -654,7 +649,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 points_order: str = "T",
                 bar_style_emoji: bool = False,
                 daily_points: dict | None = None,
-                show_pilot_card: bool = False) -> discord.Embed:
+                show_pilot_card: bool = False,
+                pilot_card_icon: str = "🔸") -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -840,9 +836,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             pts_str = _tri(_s(), _r(), _d()) if s_pts else "(S: 0)"
 
         pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
-        # Pilot career card (show_pilot_card) — always shown when rank table is present
-        if show_pilot_card:
-            card = _build_pilot_card(data.get("career") or {})
+        # Pilot career card — shown only when this table is sorted by rank.
+        # Data sourced from Foothold_Ranks.lua (historical career totals).
+        # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
+        _this_table_is_rank = points_order in ("R", "BR", "2R", "3R")
+        if show_pilot_card and _this_table_is_rank:
+            card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
             if card:
                 pilot_lines.append(card)
         # Punishment badge — on rank table always; on session table only when S is the only table
@@ -1007,6 +1006,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     pts_part = _s_tri(_ss(), _sr(), _sd())
                 line = f"{s_medal} `{s_short}` — **{s_rank}** {pts_part}".rstrip()
                 second_lines.append(line)
+                # Pilot career card on second table when second table is rank-ordered
+                _2nd_is_rank = points_order in ("2S", "2D")  # 2nd table = R for these modes
+                if show_pilot_card and _2nd_is_rank:
+                    s_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                    if s_card:
+                        second_lines.append(s_card)
                 # Punishment badge on second table only for 2S (rank table)
                 # Badge on second table when second table has higher priority than first
                 # 2S: 2nd=R (R>S) ✓  |  2D: 2nd=R (R>D) ✓  |  2DS: 2nd=S (S>D) ✓  |  2R: 2nd=S (R already on 1st) ✗
@@ -1134,6 +1139,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
                 tbl_lines.append(f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip())
+                # Pilot career card on third table when this table is rank-ordered
+                if show_pilot_card and tbl_key == "R":
+                    t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                    if t_card:
+                        tbl_lines.append(t_card)
                 # Badge on this table if its key has highest priority among remaining tables
                 # In 3x: badge goes on R if exists, else S, else D
                 _order_keys_3x = {
@@ -1936,6 +1946,7 @@ class FH_Report(Plugin):
             daily_points        = daily_pts,
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
             show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
+            pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
         )
 
         try:
