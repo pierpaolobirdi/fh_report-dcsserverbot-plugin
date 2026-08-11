@@ -23,9 +23,9 @@ Multiple server instances are supported — each can have its own channel, campa
 ## Requirements
 
 - [DCSServerBot](https://github.com/Special-K-s-Flightsim-Bots/DCSServerBot) v3.x or later (by Special K)
-- Foothold campaign (by Leka) active on at least one DCS instance
+- [Foothold campaign](https://github.com/leka1986/Lekas-Foothold) (by Leka) active on at least one DCS instance
 
-----
+---
 
 ## Installation
 
@@ -71,6 +71,10 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
+| `show_session_card` | `false` | `true` = show session combat stats card per pilot |
+| `session_card_icon` | `🔸` | Emoji shown at the start of the session stats card line |
+| `show_daily_card` | `false` | `true` = show daily combat stats card per pilot |
+| `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
@@ -208,6 +212,21 @@ Stats shown:
 - Carrier traps
 - In-flight refuels received
 - Pilot deaths
+
+### Session and daily stats cards (`show_session_card` / `show_daily_card`)
+
+Similar cards showing combat stats for the current session or the current day, shown only on session-ordered or daily-ordered tables respectively. Data comes from the campaign save file (playerStats), not from career totals.
+
+```
+🥇 `Pilot1` — Staff Sergeant (S: 11,357)
+·　🔸 5 missions · 5 air · 3 helo · 4 SAM · 27 ground · 1 death
+```
+
+Shows up to 6 fields, in priority order: missions completed (any stat key containing the word "mission"), air kills, helo kills, SAM kills, ground kills, structure kills, infantry kills, deaths. Lowest-priority fields are dropped first if there are more than 6 with data. Deaths is always shown if greater than zero. Values of zero are omitted; if everything is zero the card is not shown.
+
+The daily card uses the same daily reset mechanism as daily leaderboard points (see `daily_reset_hour` above). Icons are configurable independently via `session_card_icon` and `daily_card_icon` (default: 🔸 for both).
+
+**Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/daily_snapshot.json` — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
 
 ---
 
