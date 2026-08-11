@@ -41,8 +41,10 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   slot_status      - Show upgrade slot damage per zone            (default: false)
 #                      false = show max level slots, all filled
 #                      true  = show active vs destroyed status per zone
-#                              Only the first 5 upgrade slots are shown (primary slots).
-#                              Higher-numbered slots serve other purposes and are excluded.
+#                              Checks all upgrade slots and shows up to 5 symbols,
+#                              prioritizing active slots over their position — so a
+#                              zone with active slots beyond position 5 still shows
+#                              them as active rather than appearing fully destroyed.
 #                              🔹/🔺 = active unit slot  ◇/△ = destroyed slot
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
@@ -74,6 +76,13 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      false = each table shows all data (R · S · D)
 #                      true  = each table shows only its own sorted value (R, S, or D)
 #   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#                          Manual reset (no commands in this plugin): delete
+#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
+#                          restarts cleanly at 0, it never retroactively counts
+#                          everything accumulated up to that point.
+#                          Campaign restart is also detected automatically: if both
+#                          total points and total kills drop for common players,
+#                          the daily snapshot resets on its own — no action needed.
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
 #                          Days: mon, tue, wed, thu, fri, sat, sun
@@ -97,6 +106,30 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      Example output:
 #                        🥇 `Pilot1` — Colonel (R: 241,500)
 #                        ·　🔸 129h fixed · 13h helo · 47 kills · 23 traps · 12 refuels · 3 deaths
+#   show_session_card - Show session stats card below each pilot in the session leaderboard
+#                      (default: false). Shown only on session-ordered tables.
+#                      Data sourced from the campaign save file (playerStats) — current
+#                      session kills and missions only, not career totals.
+#                      "missions" counts only keys containing the word "mission"
+#                      (CAP mission, SEAD mission, CAS mission, etc.)
+#                      Displays up to 6 fields, priority order: missions, air, helo,
+#                      SAM, ground, structure, infantry, deaths. Lowest-priority
+#                      fields are dropped first if there are more than 6 with data.
+#                      Deaths is always shown if > 0. Values of zero are omitted.
+#                      If all values are zero the card is not shown.
+#   session_card_icon - Emoji shown at the start of the session stats card line (default: 🔸)
+#                      Example output:
+#                        🥇 `Pilot1` — Staff Sergeant (S: 11,357)
+#                        ·　🔸 5 missions · 5 air · 3 helo · 4 SAM · 27 ground · 1 death
+#   show_daily_card  - Show daily stats card below each pilot in the daily leaderboard
+#                      (default: false). Shown only on daily-ordered tables.
+#                      Same data and rules as show_session_card, but computed as the
+#                      delta since the daily reset (daily_reset_hour / daily_reset_schedule)
+#                      instead of full session totals.
+#   daily_card_icon  - Emoji shown at the start of the daily stats card line (default: 🔸)
+#                      Example output:
+#                        🥇 `Pilot1` — Staff Sergeant (D: 890)
+#                        ·　🔸 2 missions · 3 air · 1 SAM · 5 ground
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
@@ -128,6 +161,10 @@ KNOWN_VARS = {
     "slot_status",
     "show_pilot_card",
     "pilot_card_icon",
+    "show_session_card",
+    "session_card_icon",
+    "show_daily_card",
+    "daily_card_icon",
     "show_punishment",
     "strip_callsign",
     "points_order",
@@ -152,6 +189,10 @@ DEFAULTS = {
     "slot_status":      False,
     "show_pilot_card":  False,
     "pilot_card_icon":  "🔸",
+    "show_session_card": False,
+    "session_card_icon": "🔸",
+    "show_daily_card":  False,
+    "daily_card_icon":  "🔸",
     "show_punishment":  False,
     "strip_callsign":   False,
     "points_order":     "R",
@@ -169,6 +210,10 @@ COMMENTS = {
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
     "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "pilot_card_icon":  "# Emoji at the start of the pilot career card line (default: 🔸)",
+    "show_session_card": "# false = disabled  |  true = show session stats card per pilot",
+    "session_card_icon": "# Emoji at the start of the session stats card line (default: 🔸)",
+    "show_daily_card":  "# false = disabled  |  true = show daily stats card per pilot",
+    "daily_card_icon":  "# Emoji at the start of the daily stats card line (default: 🔸)",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
     "strip_callsign":   "",
     "points_order":     "",
@@ -196,7 +241,7 @@ def main():
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
                  "compact_points",
-    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points"}
+    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points", "show_session_card", "show_daily_card"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"

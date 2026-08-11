@@ -157,12 +157,13 @@ async def parse_zones(filepath: str, node) -> dict:
                     elif block[j] == '}': depth -= 1
                     j += 1
                 ru_block = block[bs + 1:j - 1]
-                # Count slots 1..level — slot active if it has unit name strings
-                # Only check the first min(level,5) slots — these are the
-                # primary upgrade slots. Higher-numbered slots serve other
-                # purposes and are excluded to avoid misleading displays.
-                display_slots = min(level, 5)
-                for idx in range(1, display_slots + 1):
+                # Count active slots across ALL slots (1..level), not just the
+                # first 5. This ensures zones with active slots beyond position 5
+                # (e.g. a base with damaged early slots but live late slots) are
+                # correctly shown as still having active defenses.
+                # Display is capped at 5 symbols — showing "how many remain active"
+                # up to that cap, prioritizing active slots over slot position.
+                for idx in range(1, level + 1):
                     # Find [idx]={ using brace counting
                     slot_key = f'[{idx}]={{'
                     sk = ru_block.find(slot_key)
@@ -188,9 +189,13 @@ async def parse_zones(filepath: str, node) -> dict:
     return zones
 
 
-async def parse_player_stats(filepath: str, node) -> dict:
+async def parse_player_stats(filepath: str, node) -> tuple[dict, dict]:
     """Parse playerStats from Foothold persistence file.
-    Returns dict {player_name: campaign_points}."""
+    Returns (campaign_stats, session_stats_raw):
+      campaign_stats    = {player_name: points}  (unchanged contract)
+      session_stats_raw = {player_name: {stat_key: value}} — used for the
+                           session card (show_session_card). Excludes
+                           Points/Points spent."""
     try:
         data = await node.read_file(filepath)
         content = data.decode("utf-8")
@@ -199,7 +204,7 @@ async def parse_player_stats(filepath: str, node) -> dict:
             content
         )
         if not stats_match:
-            return {}
+            return {}, {}
         # Use brace counting to extract the full playerStats block robustly,
         # regardless of inconsistent indentation in the Lua file.
         start  = stats_match.end()
@@ -213,6 +218,7 @@ async def parse_player_stats(filepath: str, node) -> dict:
             pos += 1
         block   = content[start:pos - 1]
         results = {}
+        raw_all = {}
         # Find each player entry by name key
         for m in re.finditer(r"\[[\"']([^\"']+)[\"']\]\s*=\s*\{", block):
             name      = m.group(1)
@@ -228,11 +234,20 @@ async def parse_player_stats(filepath: str, node) -> dict:
                 i += 1
             player_block = block[blk_start:i - 1]
             pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', player_block)
-            if pts_m:
-                results[name] = int(pts_m.group(1))
-        return results
+            if not pts_m:
+                continue
+            results[name] = int(pts_m.group(1))
+            # Extract all raw key/value stat pairs (excluding Points/Points spent)
+            raw_stats = {}
+            for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', player_block):
+                key, val = sm.group(1), sm.group(2)
+                if key in ("Points", "Points spent"):
+                    continue
+                raw_stats[key] = float(val) if "." in val else int(val)
+            raw_all[name] = raw_stats
+        return results, raw_all
     except Exception:
-        return {}
+        return {}, {}
 
 
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
@@ -647,6 +662,58 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     return f"·　{icon} " + " · ".join(parts)
 
 
+def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
+    """Build a one-line session stats card from raw playerStats keys.
+    Known combat categories: Air, Helo, SAM, Ground Units, Structure, Infantry, Deaths.
+    'missions' sums only keys whose name contains the word "mission" (case-insensitive) —
+    e.g. CAP mission, SEAD mission, CAS mission. Other unrecognized keys are ignored.
+    Priority order (highest to lowest): missions, air, helo, SAM, ground, structure,
+    infantry, deaths. Capped at 6 fields — lowest-priority fields are dropped first
+    if there are more than 6 with a non-zero value. Deaths is always shown if > 0.
+    Values of zero are omitted. Returns None if all values are zero."""
+    if not raw_stats:
+        return None
+
+    air       = int(raw_stats.get("Air", 0))
+    helo      = int(raw_stats.get("Helo", 0))
+    sam       = int(raw_stats.get("SAM", 0))
+    ground    = int(raw_stats.get("Ground Units", 0))
+    structure = int(raw_stats.get("Structure", 0))
+    infantry  = int(raw_stats.get("Infantry", 0))
+    deaths    = int(raw_stats.get("Deaths", 0))
+    missions  = sum(
+        int(v) for k, v in raw_stats.items()
+        if "mission" in k.lower() and isinstance(v, (int, float)) and v > 0
+    )
+
+    # (priority_rank, label_text) — lower rank = higher priority, always kept first
+    candidates = [
+        (0, f"{missions} missions") if missions > 0 else None,
+        (1, f"{air} air") if air > 0 else None,
+        (2, f"{helo} helo") if helo > 0 else None,
+        (3, f"{sam} SAM") if sam > 0 else None,
+        (4, f"{ground} ground") if ground > 0 else None,
+        (5, f"{structure} structure") if structure > 0 else None,
+        (6, f"{infantry} infantry") if infantry > 0 else None,
+        (7, f"{deaths} death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
+    ]
+    candidates = [c for c in candidates if c is not None]
+
+    # Cap at 6 fields — drop lowest-priority fields first, but always keep deaths
+    if len(candidates) > 6:
+        deaths_entry = next((c for c in candidates if c[0] == 7), None)
+        others       = [c for c in candidates if c[0] != 7]
+        keep_count   = 5 if deaths_entry else 6
+        others       = sorted(others, key=lambda c: c[0])[:keep_count]
+        candidates   = sorted(others + ([deaths_entry] if deaths_entry else []), key=lambda c: c[0])
+
+    parts = [label for _, label in candidates]
+
+    if not parts:
+        return None
+    return f"·　{icon} " + " · ".join(parts)
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: bool = False,
@@ -663,7 +730,13 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 daily_points: dict | None = None,
                 show_pilot_card: bool = False,
                 pilot_card_icon: str = "🔸",
-                compact_points: bool = False) -> discord.Embed:
+                compact_points: bool = False,
+                show_session_card: bool = False,
+                session_card_icon: str = "🔸",
+                session_stats_raw: dict | None = None,
+                show_daily_card: bool = False,
+                daily_card_icon: str = "🔸",
+                daily_stats_raw: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -743,20 +816,39 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     red_text = "\n".join(red_lines) if red_lines else "—"
 
     # Pilot leaderboard — apply session stats and ordering
-    cs = campaign_stats or {}
+    cs   = campaign_stats or {}
+    srs  = session_stats_raw or {}
+    drs  = daily_stats_raw or {}
 
     # Add session_points to each player
     # Skip if hook already set session_points (hook value takes priority)
     for name, data in players.items():
-        if "session_points" in data:
-            continue  # hook already calculated this value
-        s_pts = cs.get(name, 0)
-        if s_pts == 0:
-            for cs_name, cs_pts in cs.items():
-                if strip_callsign(cs_name) == strip_callsign(name):
-                    s_pts = cs_pts
-                    break
-        data["session_points"] = s_pts
+        if "session_points" not in data:
+            s_pts = cs.get(name, 0)
+            if s_pts == 0:
+                for cs_name, cs_pts in cs.items():
+                    if strip_callsign(cs_name) == strip_callsign(name):
+                        s_pts = cs_pts
+                        break
+            data["session_points"] = s_pts
+        # Attach raw session stats (kills/missions) for the session card
+        if "session_stats" not in data:
+            raw = srs.get(name)
+            if raw is None:
+                for srs_name, srs_val in srs.items():
+                    if strip_callsign(srs_name) == strip_callsign(name):
+                        raw = srs_val
+                        break
+            data["session_stats"] = raw or {}
+        # Attach raw daily stats (kills/missions delta) for the daily card
+        if "daily_stats" not in data:
+            draw = drs.get(name)
+            if draw is None:
+                for drs_name, drs_val in drs.items():
+                    if strip_callsign(drs_name) == strip_callsign(name):
+                        draw = drs_val
+                        break
+            data["daily_stats"] = draw or {}
 
     # Determine sort key and display flags from points_order
     dp          = daily_points or {}  # {name: daily_pts}
@@ -857,6 +949,20 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
             if card:
                 pilot_lines.append(card)
+        # Session stats card — shown only when this table is sorted by session.
+        # Session-primary modes: S, BS, 2S, 3S (session is the first/only table key)
+        _this_table_is_session = points_order in ("S", "BS", "2S", "3S")
+        if show_session_card and _this_table_is_session:
+            s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+            if s_card:
+                pilot_lines.append(s_card)
+        # Daily stats card — shown only when this table is sorted by daily points.
+        # Daily-primary modes: D, BD, BDS, 2D, 3D, 3DS (daily is the first/only table key)
+        _this_table_is_daily = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS")
+        if show_daily_card and _this_table_is_daily:
+            d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
+            if d_card:
+                pilot_lines.append(d_card)
         # Punishment badge — on rank table always; on session table only when S is the only table
         # Badge goes on the table with highest priority R>S>D
         # For single/B modes: always on this (only) table
@@ -1031,6 +1137,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     s_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
                     if s_card:
                         second_lines.append(s_card)
+                # Session stats card on second table when second table is session-ordered
+                _2nd_is_session = points_order in ("2R", "2DS")  # 2nd table = S for these modes
+                if show_session_card and _2nd_is_session:
+                    s_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+                    if s_sess_card:
+                        second_lines.append(s_sess_card)
                 # Punishment badge on second table only for 2S (rank table)
                 # Badge on second table when second table has higher priority than first
                 # 2S: 2nd=R (R>S) ✓  |  2D: 2nd=R (R>D) ✓  |  2DS: 2nd=S (S>D) ✓  |  2R: 2nd=S (R already on 1st) ✗
@@ -1166,6 +1278,16 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
                     if t_card:
                         tbl_lines.append(t_card)
+                # Session stats card on third table when this table is session-ordered
+                if show_session_card and tbl_key == "S":
+                    t_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+                    if t_sess_card:
+                        tbl_lines.append(t_sess_card)
+                # Daily stats card on third table when this table is daily-ordered
+                if show_daily_card and tbl_key == "D":
+                    t_daily_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
+                    if t_daily_card:
+                        tbl_lines.append(t_daily_card)
                 # Badge on this table if its key has highest priority among remaining tables
                 # In 3x: badge goes on R if exists, else S, else D
                 _order_keys_3x = {
@@ -1765,12 +1887,12 @@ class FH_Report(Plugin):
         return "R"
 
     def _get_daily_file(self, saves_dir: str) -> str:
-        """Return path to daily_points.json snapshot file."""
-        return os.path.join(saves_dir, ".fhc", "daily_points.json")
+        """Return path to daily_snapshot.json cache file."""
+        return os.path.join(saves_dir, ".fhc", "daily_snapshot.json")
 
     def _load_daily_snapshot(self, saves_dir: str) -> dict:
         """Load daily snapshot from disk. Returns dict with keys:
-        'date' (YYYY-MM-DD), 'snapshot' {name: pts}, 'daily' {name: daily_pts}."""
+        'date' (YYYY-MM-DD), 'snapshot' {name: pts}, 'stats_snapshot' {name: {stat: val}}."""
         path = self._get_daily_file(saves_dir)
         if os.path.exists(path):
             try:
@@ -1781,48 +1903,105 @@ class FH_Report(Plugin):
         return {}
 
     def _save_daily_snapshot(self, saves_dir: str, data: dict) -> None:
-        """Save daily snapshot to disk."""
+        """Save daily snapshot to disk atomically (write to .tmp then replace)
+        to avoid a corrupted/partial JSON if the process is interrupted mid-write."""
         path = self._get_daily_file(saves_dir)
+        tmp  = path + ".tmp"
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp, path)
         except OSError as e:
             self.log.error(f"FH_Report: failed to write daily snapshot: {e}")
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
-                              reset_hour: int) -> dict:
-        """Compute today's points for each player by comparing current campaign
-        Points against the snapshot taken at reset_hour UTC.
-        Returns dict {name: daily_pts} — only players with daily_pts > 0."""
+                              session_stats_raw: dict, reset_hour: int) -> tuple[dict, dict]:
+        """Compute today's points and today's combat stats for each player by
+        comparing current campaign values against the snapshot taken at reset_hour UTC.
+        Returns (daily_pts, daily_stats):
+          daily_pts   = {name: daily_points}      — only players with daily_pts > 0
+          daily_stats = {name: {stat_key: delta}} — used for the daily card (show_daily_card)
+
+        Manual reset: this plugin has no commands. To manually reset the daily
+        counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
+        is always treated as a fresh baseline (current values), so the daily
+        counter restarts at 0 rather than retroactively counting everything
+        accumulated up to that point.
+
+        Campaign restart detection: if both total points and total kills for
+        players common to the snapshot and current data have dropped, a
+        campaign restart is assumed and the snapshot is reset automatically.
+        """
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
 
-        snap      = self._load_daily_snapshot(saves_dir)
-        snap_date = snap.get("date", "")
-        snapshot  = snap.get("snapshot", {})
+        snap           = self._load_daily_snapshot(saves_dir)
+        snap_date      = snap.get("date", "")
+        snapshot       = snap.get("snapshot", {})
+        stats_snapshot = snap.get("stats_snapshot", {})
+
+        # ── Campaign restart detection ──────────────────────────────────────
+        # Points and kill counts only ever increase during a normal campaign.
+        # If both the total points AND total kills (Air + Ground Units) for
+        # players common to both the snapshot and current data have dropped
+        # significantly, the campaign has almost certainly been reset (new
+        # map, manual admin reset, etc.) rather than this being a normal
+        # daily fluctuation. Both signals must agree to avoid false positives
+        # from an isolated credit penalty or similar single-player anomaly.
+        campaign_restarted = False
+        common_names = set(snapshot) & set(campaign_stats)
+        if common_names:
+            snap_pts_sum = sum(snapshot.get(n, 0) for n in common_names)
+            cur_pts_sum  = sum(campaign_stats.get(n, 0) for n in common_names)
+            points_dropped = snap_pts_sum > 0 and cur_pts_sum < snap_pts_sum * 0.5
+
+            def _kill_sum(stats_dict, names):
+                total = 0
+                for n in names:
+                    s = stats_dict.get(n, {})
+                    total += s.get("Air", 0) + s.get("Ground Units", 0)
+                return total
+
+            snap_kills_sum = _kill_sum(stats_snapshot, common_names)
+            cur_kills_sum  = _kill_sum(session_stats_raw, common_names)
+            kills_dropped  = snap_kills_sum > 0 and cur_kills_sum < snap_kills_sum
+
+            campaign_restarted = points_dropped and kills_dropped
 
         # Reset if:
-        # - No snapshot exists yet (first run ever)
+        # - No snapshot exists yet (first run ever, or admin manually deleted
+        #   the snapshot file to force a reset — same handling for both cases)
         # - Date changed and we're past reset_hour
+        # - A campaign restart was detected (see above)
         reset_time  = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
         first_run   = not snap_date
-        needs_reset = first_run or (snap_date != today_str and now_utc >= reset_time)
+        needs_reset = first_run or (snap_date != today_str and now_utc >= reset_time) or campaign_restarted
 
         if needs_reset:
-            if first_run:
-                # First ever run — save empty snapshot so all current Points
-                # count as daily from the start (baseline = 0 for everyone)
-                snapshot = {}
-            else:
-                # Daily reset — save current Points as new baseline
-                snapshot = dict(campaign_stats)
+            if campaign_restarted:
+                self.log.info(
+                    "FH_Report: campaign restart detected (points and kills both "
+                    "dropped) — daily snapshot reset automatically."
+                )
+            # Baseline = current values in every case. This means a missing
+            # snapshot file (first install, or an admin manually deleting it
+            # to force a reset) always starts the daily counter at 0 rather
+            # than retroactively counting everything accumulated so far.
+            snapshot       = dict(campaign_stats)
+            stats_snapshot = {name: dict(stats) for name, stats in session_stats_raw.items()}
             self._save_daily_snapshot(saves_dir, {
-                "date":     today_str,
-                "snapshot": snapshot,
+                "date":           today_str,
+                "snapshot":       snapshot,
+                "stats_snapshot": stats_snapshot,
             })
 
-        # Calculate daily delta for each player
+        # Calculate daily point delta for each player
         # New players not in snapshot get baseline=0 so all their Points count as daily
         daily = {}
         for name, current_pts in campaign_stats.items():
@@ -1831,7 +2010,20 @@ class FH_Report(Plugin):
             if delta > 0:
                 daily[name] = delta
 
-        return daily
+        # Calculate daily combat stats delta for each player (for the daily card)
+        daily_stats = {}
+        for name, current_stats in session_stats_raw.items():
+            baseline_stats = stats_snapshot.get(name, {})
+            delta_stats = {}
+            for key, current_val in current_stats.items():
+                base_val = baseline_stats.get(key, 0)
+                d = current_val - base_val
+                if d > 0:
+                    delta_stats[key] = d
+            if delta_stats:
+                daily_stats[name] = delta_stats
+
+        return daily, daily_stats
 
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table."""
@@ -1903,7 +2095,7 @@ class FH_Report(Plugin):
             excluded_ucids = cfg.get("excluded_ucids") or []
             zones          = await parse_zones(persistence_file, node)
             players        = {} if ranks_missing else await parse_ranks(ranks_file, excluded_ucids, node)
-            campaign_stats = await parse_player_stats(persistence_file, node)
+            campaign_stats, session_stats_raw = await parse_player_stats(persistence_file, node)
         except Exception as e:
             self.log.error(f"FH_Report [{instance_name}]: error parsing data: {e}")
             return
@@ -1926,6 +2118,7 @@ class FH_Report(Plugin):
         daily_modes = {"D", "BD", "BDS", "2D", "2DS", "BR", "BS", "2R", "2S", "3R", "3S", "3D", "3DS"}
         needs_daily = any(m.strip() in daily_modes for m in raw_order.split(","))
         daily_pts: dict = {}
+        daily_stats: dict = {}
         if needs_daily and campaign_stats:
             reset_hour    = int(cfg.get("daily_reset_hour") or 0)
             # Override with day-specific hour if daily_reset_schedule is defined
@@ -1935,7 +2128,7 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts  = self._compute_daily_points(saves_dir, campaign_stats, reset_hour)
+            daily_pts, daily_stats = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -1970,6 +2163,12 @@ class FH_Report(Plugin):
             show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
             pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
             compact_points      = _bool_cfg(cfg.get("compact_points")),
+            show_session_card   = _bool_cfg(cfg.get("show_session_card")),
+            session_card_icon   = str(cfg.get("session_card_icon") or "🔸"),
+            session_stats_raw   = session_stats_raw,
+            show_daily_card     = _bool_cfg(cfg.get("show_daily_card")),
+            daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
+            daily_stats_raw     = daily_stats,
         )
 
         try:

@@ -62,7 +62,14 @@
 #   compact_points   - In multi-table modes (2x, 3x), show only the primary data  (default: false)
 #                      false = each table shows all data (R · S · D)
 #                      true  = each table shows only its own sorted value (R, S, or D)
-#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: false)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#                          Manual reset (no commands in this plugin): delete
+#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
+#                          restarts cleanly at 0, it never retroactively counts
+#                          everything accumulated up to that point.
+#                          Campaign restart is also detected automatically: if both
+#                          total points and total kills drop for common players,
+#                          the daily snapshot resets on its own — no action needed.
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
 #                          Days: mon, tue, wed, thu, fri, sat, sun
@@ -88,6 +95,30 @@
 #                      Example output:
 #                        🥇 `Pilot1` — Colonel (R: 241,500)
 #                        ·　🔸 129h fixed · 13h helo · 47 kills · 23 traps · 12 refuels · 3 deaths
+#   show_session_card - Show session stats card below each pilot in the session leaderboard
+#                      (default: false). Shown only on session-ordered tables.
+#                      Data sourced from the campaign save file (playerStats) — current
+#                      session kills and missions only, not career totals.
+#                      "missions" counts only keys containing the word "mission"
+#                      (CAP mission, SEAD mission, CAS mission, etc.)
+#                      Displays up to 6 fields, priority order: missions, air, helo,
+#                      SAM, ground, structure, infantry, deaths. Lowest-priority
+#                      fields are dropped first if there are more than 6 with data.
+#                      Deaths is always shown if > 0. Values of zero are omitted.
+#                      If all values are zero the card is not shown.
+#   session_card_icon - Emoji shown at the start of the session stats card line (default: 🔸)
+#                      Example output:
+#                        🥇 `Pilot1` — Staff Sergeant (S: 11,357)
+#                        ·　🔸 5 missions · 5 air · 3 helo · 4 SAM · 27 ground · 1 death
+#   show_daily_card  - Show daily stats card below each pilot in the daily leaderboard
+#                      (default: false). Shown only on daily-ordered tables.
+#                      Same data and rules as show_session_card, but computed as the
+#                      delta since the daily reset (daily_reset_hour / daily_reset_schedule)
+#                      instead of full session totals.
+#   daily_card_icon  - Emoji shown at the start of the daily stats card line (default: 🔸)
+#                      Example output:
+#                        🥇 `Pilot1` — Staff Sergeant (D: 890)
+#                        ·　🔸 2 missions · 3 air · 1 SAM · 5 ground
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
