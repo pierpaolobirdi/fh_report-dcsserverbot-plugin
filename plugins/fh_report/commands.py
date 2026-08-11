@@ -852,7 +852,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
 
     # Determine sort key and display flags from points_order
     dp          = daily_points or {}  # {name: daily_pts}
-    has_daily   = bool(dp)
+    drs_check   = daily_stats_raw or {}
+    has_daily   = bool(dp) or any(drs_check.values())
 
     order_by_session = points_order in ("S", "BS", "2S", "3S")
     order_by_daily   = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS")
@@ -862,7 +863,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                        if d.get("session_points", 0) > 0]
     elif order_by_daily:
         pilot_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: dp.get(x[0], 0), reverse=True)
-                       if dp.get(n, 0) > 0]
+                       if dp.get(n, 0) > 0 or d.get("daily_stats")]
     else:
         pilot_items = [(n, d) for n, d in players.items() if d.get("credits", 0) > 0]
 
@@ -1236,7 +1237,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             elif tbl_key == "S":
                 tbl_items = [(n, d) for n, d in tbl_items if d.get("session_points", 0) > 0]
             else:  # D
-                tbl_items = [(n, d) for n, d in tbl_items if dp.get(n, 0) > 0]
+                tbl_items = [(n, d) for n, d in tbl_items if dp.get(n, 0) > 0 or d.get("daily_stats")]
             if not tbl_items:
                 continue
             tbl_title, tbl_cont = _title(tbl_key)
@@ -2137,7 +2138,7 @@ class FH_Report(Plugin):
         # advancing to the next valid mode in the cycle instead of substituting
         current_order = self._resolve_points_order(
             instance_name, cfg,
-            has_daily   = bool(daily_pts),
+            has_daily   = bool(daily_pts) or any(daily_stats.values()),
             has_session = has_session,
         )
 
