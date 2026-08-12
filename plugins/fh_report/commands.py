@@ -663,39 +663,54 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
 
 
 def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
-    """Build a one-line session stats card from raw playerStats keys.
-    Known combat categories: Air, Helo, SAM, Ground Units, Structure, Infantry, Deaths.
-    'missions' sums only keys whose name contains the word "mission" (case-insensitive) —
-    e.g. CAP mission, SEAD mission, CAS mission. Other unrecognized keys are ignored.
-    Priority order (highest to lowest): missions, air, helo, SAM, ground, structure,
-    infantry, deaths. Capped at 6 fields — lowest-priority fields are dropped first
-    if there are more than 6 with a non-zero value. Deaths is always shown if > 0.
+    """Build a one-line session/daily stats card from raw playerStats keys,
+    using the confirmed correlation between playerStats (session) and
+    CAREER_STAT (career) fields in Foothold's source. Kills are grouped into
+    four categories:
+      Air     = Air + Helo (aircraft kills)
+      SAM     = SAM (air defense kills)
+      Ground  = Ground Units + Structure + Infantry
+      Ship    = Ship (naval kills)
+    'Missions' sums only keys whose name contains the word "mission"
+    (case-insensitive) — e.g. CAP mission, SEAD mission, CAS mission.
+    Plus Rescues (Pilot Rescue), Refuels (Refueling event count), and Deaths.
+    Priority order (highest to lowest): Missions, Air, SAM, Ground, Ship,
+    Rescues, Refuels, Deaths. Capped at 6 fields — lowest-priority fields are
+    dropped first if there are more than 6 with a non-zero value. Deaths is
+    always shown if > 0.
+    Note: 'Flight time' is intentionally excluded — Foothold only records it
+    for a specific aircraft whitelist (mostly helicopters/transports, see
+    LogisticCommander.AllowedFlightTimeReward), so it reads 0/absent for
+    conventional fixed-wing combat aircraft even after long flights. Showing
+    it would be misleading for the majority of players. Career's FlightSeconds/
+    HelicopterSeconds (used in the pilot card) does not have this limitation.
     Values of zero are omitted. Returns None if all values are zero."""
     if not raw_stats:
         return None
 
-    air       = int(raw_stats.get("Air", 0))
-    helo      = int(raw_stats.get("Helo", 0))
-    sam       = int(raw_stats.get("SAM", 0))
-    ground    = int(raw_stats.get("Ground Units", 0))
-    structure = int(raw_stats.get("Structure", 0))
-    infantry  = int(raw_stats.get("Infantry", 0))
-    deaths    = int(raw_stats.get("Deaths", 0))
-    missions  = sum(
+    missions = sum(
         int(v) for k, v in raw_stats.items()
         if "mission" in k.lower() and isinstance(v, (int, float)) and v > 0
     )
+    air    = int(raw_stats.get("Air", 0)) + int(raw_stats.get("Helo", 0))
+    sam    = int(raw_stats.get("SAM", 0))
+    ground = (int(raw_stats.get("Ground Units", 0)) + int(raw_stats.get("Structure", 0))
+              + int(raw_stats.get("Infantry", 0)))
+    ship    = int(raw_stats.get("Ship", 0))
+    rescues = int(raw_stats.get("Pilot Rescue", 0))
+    refuels = int(raw_stats.get("Refueling", 0))
+    deaths  = int(raw_stats.get("Deaths", 0))
 
     # (priority_rank, label_text) — lower rank = higher priority, always kept first
     candidates = [
-        (0, f"{missions} missions") if missions > 0 else None,
-        (1, f"{air} air") if air > 0 else None,
-        (2, f"{helo} helo") if helo > 0 else None,
-        (3, f"{sam} SAM") if sam > 0 else None,
-        (4, f"{ground} ground") if ground > 0 else None,
-        (5, f"{structure} structure") if structure > 0 else None,
-        (6, f"{infantry} infantry") if infantry > 0 else None,
-        (7, f"{deaths} death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
+        (0, f"{missions} Missions") if missions > 0 else None,
+        (1, f"{air} Air") if air > 0 else None,
+        (2, f"{sam} SAM") if sam > 0 else None,
+        (3, f"{ground} Ground") if ground > 0 else None,
+        (4, f"{ship} Ship") if ship > 0 else None,
+        (5, f"{rescues} Rescue" + ("s" if rescues != 1 else "")) if rescues > 0 else None,
+        (6, f"{refuels} Refuels") if refuels > 0 else None,
+        (7, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
 
