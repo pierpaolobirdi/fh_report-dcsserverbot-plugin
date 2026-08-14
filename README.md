@@ -77,6 +77,9 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
+| `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
+| `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
+| `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
 
 ### Example config
@@ -227,6 +230,41 @@ Shows up to 6 fields, in priority order: missions completed (any stat key contai
 The daily card uses the same daily reset mechanism as daily leaderboard points (see `daily_reset_hour` above). Icons are configurable independently via `session_card_icon` and `daily_card_icon` (default: 🔸 for both).
 
 **Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/daily_snapshot.json` — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
+
+---
+
+## `/fh_report player` — personal stats command
+
+A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.
+
+```
+/fh_report player
+/fh_report player player_name:Pilot1
+```
+
+- Run it in the channel where FH_Report posts the campaign embed — the server is detected automatically from that channel, no need to specify it.
+- **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
+- **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
+
+The embed shows, in order: UCID, Rank/Session/Daily Points, Last seen, Daily Stats (full detail, only non-zero fields, delta since the last reset), Session Stats (full detail for the current session), Career Stats (from `Foothold_Ranks.lua`), and current mission status.
+
+### Who can look up other players (`admin`)
+
+```yaml
+admin: Admin, SomeSpecificUser
+```
+
+Comma-separated list — each entry can be a Discord **role name** (as defined in your server) or a specific **username**. Defaults to `Admin` if not set. Anyone not on this list can only ever see their own stats.
+
+### Footer reminder (`show_player_cmd_hint`)
+
+By default, the main campaign embed's footer includes a short reminder pointing players to the command:
+
+```
+Type /fh_report player to see your own stats.
+```
+
+Disable with `show_player_cmd_hint: false`, or customize the wording with `player_cmd_hint_text`.
 
 ---
 

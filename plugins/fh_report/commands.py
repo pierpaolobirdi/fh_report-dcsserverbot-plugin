@@ -15,8 +15,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Type
 
 import discord
+from discord import app_commands
 from discord.ext import tasks
-from core import Plugin, TEventListener, utils
+from core import Plugin, TEventListener, utils, Status, Group
 from services.bot import DCSServerBot
 
 
@@ -37,8 +38,41 @@ RANK_NAMES = [
     "General", "General of the Air Force"
 ]
 
+# ── CAREER_STAT IDs confirmed from Foothold's zoneCommander.lua source ───────
+CAREER_FLIGHT_SECONDS = 1
+CAREER_HELO_SECONDS   = 3
+CAREER_TRAPS          = 8
+CAREER_KILLS          = 10
+CAREER_DEATHS         = 21
+CAREER_FUEL_LBS       = 30
+
+HOT_STATES = {Status.RUNNING, Status.PAUSED}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _do_script(server, lua: str) -> None:
+    await server.send_to_dcs({"command": "do_script", "script": lua})
+
+
+async def _force_save(server) -> None:
+    """Force Foothold to flush memory to .lua files before we read them."""
+    await _do_script(server, "bc:saveToDisk()")
+    import asyncio as _asyncio
+    await _asyncio.sleep(1.5)
+
+
+def _fmt_career_time(seconds: float) -> str:
+    """Format seconds as 'Xh Ym' for display (report command uses full form)."""
+    total_min = int(seconds) // 60
+    h, m = divmod(total_min, 60)
+    if h > 0:
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{m}m"
+
+
+def _fmt_num(v: float) -> str:
+    return f"{int(v):,}" if float(v) == int(v) else f"{v:,.2f}"
 
 def get_rank(credits: float) -> str:
     rank_idx = 0
@@ -634,7 +668,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     fixed_s  = total_s - helo_s
     kills    = int(career.get(10, 0))
     traps    = int(career.get(8, 0))
-    refuels  = int(career.get(30, 0)) // 10000
+    refuel_lbs = int(career.get(30, 0))
     deaths   = int(career.get(21, 0))
 
     def _fmt_time(seconds: int) -> str | None:
@@ -647,15 +681,27 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
         minutes = max(1, seconds // 60)  # at least 1m if there's any time
         return f"{minutes}m"
 
+    def _fmt_compact(n: int) -> str:
+        """Format a number compactly: <1000 exact, 1k-999k with 1 decimal
+        (stripped if .0), >=1M in millions likewise. Used to keep long values
+        (e.g. fuel in lbs) from making the line too wide."""
+        if n < 1000:
+            return str(n)
+        if n < 1_000_000:
+            s = f"{n / 1000:.1f}".rstrip("0").rstrip(".")
+            return f"{s}k"
+        s = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{s}M"
+
     parts = []
     fixed_str = _fmt_time(fixed_s)
     if fixed_str: parts.append(f"{fixed_str} fixed")
     helo_str  = _fmt_time(helo_s)
     if helo_str:  parts.append(f"{helo_str} helo")
-    if kills > 0:    parts.append(f"{kills} kills")
-    if traps > 0:    parts.append(f"{traps} traps")
-    if refuels > 0:  parts.append(f"{refuels} refuels")
-    if deaths > 0:   parts.append(f"{deaths} deaths")
+    if kills > 0:      parts.append(f"{kills} kills")
+    if traps > 0:      parts.append(f"{traps} traps")
+    if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
+    if deaths > 0:     parts.append(f"{deaths} deaths")
 
     if not parts:
         return None
@@ -729,6 +775,103 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
     return f"·　{icon} " + " · ".join(parts)
 
 
+def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
+                               last_seen, session_points: float,
+                               daily_points: float, session_stats: dict,
+                               mission_status: str,
+                               daily_stats: dict | None = None) -> discord.Embed:
+    """Build a read-only, info-only player embed for /fh_report player.
+    No buttons, no editing — mirrors FH_Control's player embed sections
+    (UCID, points, session stats, career stats, mission) in display-only form.
+    """
+    credits = float(data.get("credits", 0))
+    embed = discord.Embed(
+        title=f"👤 Player — {player_name}",
+        color=0x3498DB, timestamp=datetime.now(timezone.utc)
+    )
+
+    # ── UCID ────────────────────────────────────────────────────────────
+    if ucid:
+        embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
+
+    # ── Rank / Session / Daily Points ──────────────────────────────────
+    points_lines = [f"- **Rank Points:** {_fmt_num(credits)} 🏅 — *{get_rank(credits)}*"]
+    if session_points > 0:
+        points_lines.append(f"- **Session Points:** {_fmt_num(session_points)} 📊")
+    if daily_points > 0:
+        points_lines.append(f"- **Daily Points:** {_fmt_num(daily_points)} 📅")
+    embed.add_field(name="\u200b", value="\n".join(points_lines), inline=False)
+
+    # ── Last seen ───────────────────────────────────────────────────────
+    embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    if last_seen is not None:
+        import calendar as _cal
+        ts = int(_cal.timegm(last_seen.timetuple()))
+        activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
+    else:
+        activity_line = "- **Last seen:** —"
+    embed.add_field(name="📅 __Activity__", value=activity_line, inline=False)
+
+    # ── Daily Stats (full, unfiltered — same level of detail as Session Stats) ─
+    # Only non-zero fields are shown; if everything is zero the section is
+    # omitted entirely (not even a placeholder), per the original spec.
+    if daily_stats:
+        daily_nonzero = {k: v for k, v in sorted(daily_stats.items()) if k != "Points" and v}
+        if daily_nonzero:
+            daily_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in daily_nonzero.items())
+            embed.add_field(name="\u200b", value="─" * 32, inline=False)
+            embed.add_field(name="📅 __Daily Stats__", value=daily_lines, inline=False)
+
+    # ── Session Stats (full, unfiltered) ───────────────────────────────
+    embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    if session_stats:
+        other_stats = {k: v for k, v in sorted(session_stats.items()) if k != "Points"}
+        if other_stats:
+            stat_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in other_stats.items())
+            embed.add_field(name="📊 __Session Stats__", value=stat_lines, inline=False)
+        else:
+            embed.add_field(name="📊 __Session Stats__",
+                            value="_No stats yet — will appear after first flight._", inline=False)
+    else:
+        embed.add_field(name="📊 __Session Stats__",
+                        value="_No stats yet — will appear after first flight._", inline=False)
+
+    # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
+    career = data.get("career") or {}
+    career_lines = []
+    flight_s = career.get(CAREER_FLIGHT_SECONDS, 0)
+    helo_s   = career.get(CAREER_HELO_SECONDS, 0)
+    fixed_s  = max(0.0, flight_s - helo_s)
+    if fixed_s > 0:
+        career_lines.append(f"- **Flight Hours (fixed):** {_fmt_career_time(fixed_s)}")
+    if helo_s > 0:
+        career_lines.append(f"- **Flight Hours (helo):** {_fmt_career_time(helo_s)}")
+    if career.get(CAREER_KILLS, 0) > 0:
+        career_lines.append(f"- **Kills:** {int(career[CAREER_KILLS])}")
+    if career.get(CAREER_TRAPS, 0) > 0:
+        career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
+    if career.get(CAREER_FUEL_LBS, 0) > 0:
+        fuel_lbs = int(career[CAREER_FUEL_LBS])
+        from math import trunc as _trunc
+        _fuel_str = str(fuel_lbs) if fuel_lbs < 1000 else (
+            f"{fuel_lbs/1000:.1f}".rstrip("0").rstrip(".") + "k" if fuel_lbs < 1_000_000 else
+            f"{fuel_lbs/1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+        )
+        career_lines.append(f"- **Fuel Received:** {_fuel_str} lbs")
+    if career.get(CAREER_DEATHS, 0) > 0:
+        career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
+    if career_lines:
+        embed.add_field(name="\u200b", value="─" * 32, inline=False)
+        embed.add_field(name="✈️ __Career Stats__", value="\n".join(career_lines), inline=False)
+
+    # ── Mission ─────────────────────────────────────────────────────────
+    embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
+
+    embed.set_footer(text="FH_Report · Read-only player report")
+    return embed
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: bool = False,
@@ -751,7 +894,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 session_stats_raw: dict | None = None,
                 show_daily_card: bool = False,
                 daily_card_icon: str = "🔸",
-                daily_stats_raw: dict | None = None) -> discord.Embed:
+                daily_stats_raw: dict | None = None,
+                player_cmd_hint: str | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -1354,7 +1498,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    embed.set_footer(text=f"{campaign_name} • Updated automatically")
+    footer_text = f"{campaign_name} • Updated automatically"
+    if player_cmd_hint:
+        footer_text += f"\n{player_cmd_hint}"
+    embed.set_footer(text=footer_text)
     embed.timestamp = datetime.now(timezone.utc)
 
     # Trim if embed exceeds Discord 6000 char limit
@@ -2157,6 +2304,17 @@ class FH_Report(Plugin):
             has_session = has_session,
         )
 
+        # Player command hint — plain-text reminder of /fh_report player,
+        # shown as a second line in the footer. Active by default (migrate
+        # inserts it explicitly into DEFAULT) so users discover the command
+        # without the admin having to opt in.
+        player_cmd_hint = None
+        raw_hint_flag   = cfg.get("show_player_cmd_hint")
+        show_hint       = _bool_cfg(raw_hint_flag) if raw_hint_flag is not None else True
+        if show_hint:
+            player_cmd_hint = str(cfg.get("player_cmd_hint_text")
+                                  or "Type /fh_report player to see your own stats.")
+
         embed = build_embed(
             zones               = zones,
             players             = players,
@@ -2185,6 +2343,7 @@ class FH_Report(Plugin):
             show_daily_card     = _bool_cfg(cfg.get("show_daily_card")),
             daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
             daily_stats_raw     = daily_stats,
+            player_cmd_hint     = player_cmd_hint,
         )
 
         try:
@@ -2204,5 +2363,266 @@ class FH_Report(Plugin):
 
         except discord.HTTPException as e:
             self.log.error(f"FH_Report [{instance_name}]: Discord error: {e}")
+
+    # ── /fh_report player ────────────────────────────────────────────────
+
+    def _configured_instances(self) -> list[str]:
+        """Return instance-name keys configured in fh_report.yaml (excludes DEFAULT)."""
+        raw = self.locals or {}
+        return [k for k in raw.keys() if k != "DEFAULT"]
+
+    def _get_server_by_instance(self, instance_name: str):
+        """Find the DCSSB Server object matching a configured instance name."""
+        for server in self.bot.servers.values():
+            if server.instance.name == instance_name:
+                return server
+        return None
+
+    def _merged_cfg(self, instance_name: str) -> dict:
+        raw = self.locals or {}
+        cfg = dict(raw.get("DEFAULT") or {})
+        cfg.update(raw.get(instance_name) or {})
+        return cfg
+
+    def _resolve_server_from_channel(self, interaction: discord.Interaction) -> str | None:
+        """Auto-detect which configured instance owns the channel the command
+        was invoked in, by matching interaction.channel_id against each
+        instance's configured channel_id. Falls back to the single configured
+        instance if there's only one. Returns None if ambiguous/not found."""
+        configured = self._configured_instances()
+        for instance_name in configured:
+            cfg = self._merged_cfg(instance_name)
+            if str(cfg.get("channel_id") or "") == str(interaction.channel_id):
+                return instance_name
+        if len(configured) == 1:
+            return configured[0]
+        return None
+
+    def _is_admin(self, interaction: discord.Interaction, server_name: str) -> bool:
+        """True if the calling user matches any entry in the 'admin' config —
+        a comma-separated string where each entry may be a Discord role name
+        (as defined in DCSSB) or a specific username. Defaults to 'Admin' if
+        not configured. Kept tolerant of a legacy list value (old yaml files
+        from before admin became a comma-separated string)."""
+        cfg       = self._merged_cfg(server_name)
+        admin_raw = cfg.get("admin") or "Admin"
+        if isinstance(admin_raw, list):
+            admin_list = [str(x).strip() for x in admin_raw if str(x).strip()]
+        else:
+            admin_list = [x.strip() for x in str(admin_raw).split(",") if x.strip()]
+        user_role_names = [r.name for r in interaction.user.roles] if hasattr(interaction.user, "roles") else []
+        user_names = {interaction.user.name, getattr(interaction.user, "display_name", None),
+                      getattr(interaction.user, "global_name", None)}
+        user_names.discard(None)
+        for entry in admin_list:
+            if entry in user_role_names or entry in user_names:
+                return True
+        return False
+
+    async def _autocomplete_report_player(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        server_name = self._resolve_server_from_channel(interaction)
+        if not server_name:
+            return []
+        # Non-admins never get name suggestions — they can only query themselves,
+        # which doesn't need the player_name parameter at all.
+        if not self._is_admin(interaction, server_name):
+            return []
+        srv = self._get_server_by_instance(server_name)
+        if srv is None:
+            return []
+        cfg       = self._merged_cfg(server_name)
+        saves_dir = cfg.get("saves_dir")
+        if not saves_dir:
+            try:
+                saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
+            except Exception:
+                return []
+        try:
+            excluded_ucids = cfg.get("excluded_ucids") or []
+            ranks_file     = os.path.join(saves_dir, "Foothold_Ranks.lua")
+            players        = await parse_ranks(ranks_file, excluded_ucids, srv.node)
+        except Exception:
+            return []
+        names    = sorted(players.keys())
+        filtered = [n for n in names if current.lower() in n.lower()]
+        return [app_commands.Choice(name=n, value=n) for n in filtered][:25]
+
+    fh_report = Group(
+        name="fh_report",
+        description="Read-only Foothold campaign reports.",
+        guild_only=True
+    )
+
+    @fh_report.command(name="player", description="Show a player's rank, session and career stats (read-only).")
+    @app_commands.describe(
+        player_name="Player name — admin only. Leave empty to see your own stats."
+    )
+    @app_commands.autocomplete(player_name=_autocomplete_report_player)
+    async def player(self, interaction: discord.Interaction,
+                     player_name: str | None = None):
+        ephemeral = utils.get_ephemeral(interaction)
+        await interaction.response.defer(ephemeral=ephemeral)
+
+        # Auto-detect the server from the channel this command was run in —
+        # each configured instance posts its embed to a specific channel_id.
+        server = self._resolve_server_from_channel(interaction)
+        if not server:
+            await interaction.followup.send(
+                "❌ Couldn't determine which server this channel belongs to. "
+                "Run this command in the channel where FH_Report posts the campaign embed.",
+                ephemeral=True)
+            return
+
+        srv = self._get_server_by_instance(server)
+        if srv is None:
+            await interaction.followup.send(
+                f"❌ Server **`{server}`** not found among configured DCSServerBot instances.",
+                ephemeral=True)
+            return
+
+        is_admin = self._is_admin(interaction, server)
+        if player_name and not is_admin:
+            await interaction.followup.send(
+                "❌ You can only view your own stats. Leave the `player_name` field empty.",
+                ephemeral=True)
+            return
+
+        cfg       = self._merged_cfg(server)
+        saves_dir = cfg.get("saves_dir")
+        if not saves_dir:
+            saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
+        node = srv.node
+
+        try:
+            if srv.status in HOT_STATES:
+                await _force_save(srv)
+            persistence_file = await find_persistence_file(saves_dir, node)
+            if not persistence_file:
+                await interaction.followup.send(
+                    f"❌ No Foothold save file found for **`{server}`**.", ephemeral=True)
+                return
+            excluded_ucids = cfg.get("excluded_ucids") or []
+            ranks_file     = os.path.join(saves_dir, "Foothold_Ranks.lua")
+            players        = await parse_ranks(ranks_file, excluded_ucids, node)
+            campaign_stats, session_stats_raw = await parse_player_stats(persistence_file, node)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
+            return
+
+        if player_name:
+            # Admin path — look up the requested player by name
+            match = next((n for n in players if n.lower() == player_name.lower()), None)
+            if match is None:
+                match = next(
+                    (n for n in players if strip_callsign(n).lower() == strip_callsign(player_name).lower()),
+                    None
+                )
+            if match is None:
+                await interaction.followup.send(
+                    f"❌ Player **`{player_name}`** not found in **`{server}`**.\n"
+                    f"Check the exact name (case-sensitive autocomplete is available).",
+                    ephemeral=True)
+                return
+        else:
+            # Self-lookup path — resolve the caller's own UCID via DCSSB's
+            # players table (same linking used by /linkme), then match it
+            # against the parsed Foothold roster.
+            own_ucid = None
+            try:
+                async with self.apool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT ucid FROM players WHERE discord_id = %s LIMIT 1",
+                            (interaction.user.id,)
+                        )
+                        row = await cur.fetchone()
+                        own_ucid = row[0] if row else None
+            except Exception as e:
+                await interaction.followup.send(f"❌ Error looking up your account:\n```{e}```", ephemeral=True)
+                return
+            if not own_ucid:
+                await interaction.followup.send(
+                    "❌ Your Discord account isn't linked to a DCS UCID yet. Use `/linkme` first.",
+                    ephemeral=True)
+                return
+            match = next((n for n, d in players.items() if d.get("ucid") == own_ucid), None)
+            if match is None:
+                await interaction.followup.send(
+                    f"❌ No campaign stats found for you on **`{server}`** yet — "
+                    f"fly a mission first, then try again.",
+                    ephemeral=True)
+                return
+
+        data = players[match]
+
+        # Session points (with callsign-stripped fallback, mirrors build_embed)
+        s_pts = campaign_stats.get(match, 0)
+        if s_pts == 0:
+            for cs_name, cs_val in campaign_stats.items():
+                if strip_callsign(cs_name) == strip_callsign(match):
+                    s_pts = cs_val
+                    break
+
+        # Session stats raw (with callsign-stripped fallback)
+        s_stats = session_stats_raw.get(match)
+        if s_stats is None:
+            for srs_name, srs_val in session_stats_raw.items():
+                if strip_callsign(srs_name) == strip_callsign(match):
+                    s_stats = srs_val
+                    break
+        s_stats = s_stats or {}
+
+        # Daily points — reuse the same snapshot-based computation as the embed
+        reset_hour = int(cfg.get("daily_reset_hour") or 0)
+        schedule   = cfg.get("daily_reset_schedule") or {}
+        if schedule:
+            day_keys  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+            today_key = day_keys[datetime.now(timezone.utc).weekday()]
+            if today_key in schedule:
+                reset_hour = int(schedule[today_key])
+        daily_pts_all, daily_stats_all = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
+        d_pts     = daily_pts_all.get(match, 0)
+        d_stats   = daily_stats_all.get(match)
+        if d_stats is None:
+            for ds_name, ds_val in daily_stats_all.items():
+                if strip_callsign(ds_name) == strip_callsign(match):
+                    d_stats = ds_val
+                    break
+        d_stats = d_stats or {}
+
+        # UCID + last_seen from DCSServerBot core tables
+        ucid      = data.get("ucid")
+        last_seen = None
+        if ucid:
+            try:
+                async with self.apool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT MAX(hop_off) FROM statistics WHERE player_ucid = %s",
+                            (ucid,)
+                        )
+                        row = await cur.fetchone()
+                        last_seen = row[0] if row else None
+            except Exception:
+                pass
+
+        # Mission status — read-only wording (no "changes applied")
+        if srv.status == Status.RUNNING:
+            mission_status = f"🟢 **{server}** Mission running."
+        elif srv.status == Status.PAUSED:
+            mission_status = f"⏸️ **{server}** Mission paused."
+        else:
+            mission_status = f"⏹️ **{server}** Mission not running."
+
+        embed = _build_player_report_embed(
+            player_name=match, data=data, ucid=ucid, last_seen=last_seen,
+            session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
+            mission_status=mission_status, daily_stats=d_stats
+        )
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+
+
 async def setup(bot: DCSServerBot):
     await bot.add_cog(FH_Report(bot))
