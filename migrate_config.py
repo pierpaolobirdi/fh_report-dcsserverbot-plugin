@@ -29,6 +29,14 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 # OPTIONAL - define in DEFAULT to apply to all servers,
 #             or override per server block.
 #
+#   admin            - Who can query other players' stats with /fh_report player
+#                      (default: "Admin"). Comma-separated list where each
+#                      entry can be a Discord role name (as defined in DCSSB)
+#                      or a specific username.
+#                      Anyone not listed here can only view their own stats
+#                      (Discord account must be linked via /linkme).
+#                      Example:
+#                        admin: Admin, SomeSpecificUser
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
@@ -143,6 +151,13 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
+#   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
+#                      footer                                        (default: true)
+#                      false = disabled
+#                      true  = adds a second line to the footer reminding
+#                              players they can check their own stats.
+#   player_cmd_hint_text - Customize the footer reminder text        (default:
+#                      "Type /fh_report player to see your own stats.")
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -181,10 +196,14 @@ KNOWN_VARS = {
     "saves_dir",
     "channel_id",
     "campaign_name",
+    "admin",
+    "show_player_cmd_hint",
+    "player_cmd_hint_text",
 }
 
 # ── Default values for DEFAULT block variables ─────────────────────────────────
 DEFAULTS = {
+    "admin":            "Admin",
     "update_interval":  300,
     "bar_length":       40,
     "bar_style_emoji":  False,
@@ -203,9 +222,12 @@ DEFAULTS = {
     "points_order":     "R",
     "compact_points":   False,
     "show_all_pilots":  False,
+    "show_player_cmd_hint":  True,
+    "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
 }
 
 COMMENTS = {
+    "admin":            "# Comma-separated Discord role name(s) and/or username(s)",
     "update_interval":  "# Seconds between embed refreshes",
     "bar_length":       "# Number of squares in the progress bar",
     "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
@@ -223,6 +245,8 @@ COMMENTS = {
     "strip_callsign":   "",
     "points_order":     "",
     "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
+    "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
+    "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
 }
 
 
@@ -246,7 +270,8 @@ def main():
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
                  "compact_points",
-    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points", "show_session_card", "show_daily_card"}
+    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points",
+    "show_session_card", "show_daily_card", "show_player_cmd_hint"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
@@ -292,22 +317,87 @@ def main():
             val = "true" if str(val) in ("1", "true", "True") else "false"
         new_default_lines.append(f"  {key}: {val}  {comment}\n")
 
-    # Preserve extra lines (comments, etc.) not in DEFAULTS
+    # Preserve extra lines (comments, and any non-DEFAULTS key blocks — including
+    # multi-line YAML lists like 'excluded_ucids:' with '- item' lines
+    # underneath). Each such block is captured as the key line plus every
+    # following line indented deeper than it, so list items are never dropped.
     extra_lines = []
-    for line in default_block.splitlines(keepends=True):
+    _lines = default_block.splitlines(keepends=True)
+    _i, _n = 0, len(_lines)
+    while _i < _n:
+        line = _lines[_i]
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             if not any(f"  {k}:" in line for k in DEFAULTS):
                 extra_lines.append(line)
+            _i += 1
+            continue
+        key_match = re.match(r"(\s*)(\w+)\s*:", line)
+        if not key_match:
+            # Orphan line (e.g. a list item under an already-consumed key) —
+            # skip defensively rather than risk duplicating it.
+            _i += 1
+            continue
+        indent   = len(key_match.group(1))
+        key_name = key_match.group(2)
+        if key_name in DEFAULTS:
+            _i += 1
+            continue
+        # Collect this key line plus any deeper-indented continuation lines
+        block_lines = [line]
+        _j = _i + 1
+        while _j < _n:
+            nxt = _lines[_j]
+            if not nxt.strip():
+                break
+            nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+            if nxt_indent > indent:
+                block_lines.append(nxt)
+                _j += 1
+            else:
+                break
+        rest = line.split(":", 1)[1].strip()
+        # Skip truly empty excluded_ucids (no items on this line or below)
+        if key_name == "excluded_ucids" and len(block_lines) == 1 and (not rest or rest.startswith("#")):
+            _i = _j
+            continue
+        extra_lines.extend(block_lines)
+        _i = _j
+
+    # ── 5c. Reposition 'daily_reset_schedule' right after 'daily_reset_hour' ───
+    # It's a nested-dict value (per-day hour overrides) so it can't live in the
+    # scalar DEFAULTS mechanism above — but it belongs visually right beneath
+    # daily_reset_hour, not wherever extra_lines would otherwise place it.
+    schedule_start = None
+    for idx, l in enumerate(extra_lines):
+        if re.match(r"^[ \t]*daily_reset_schedule\s*:", l):
+            schedule_start = idx
+            break
+    if schedule_start is not None:
+        base_indent  = len(extra_lines[schedule_start]) - len(extra_lines[schedule_start].lstrip(" "))
+        schedule_end = schedule_start + 1
+        while schedule_end < len(extra_lines):
+            nxt = extra_lines[schedule_end]
+            if not nxt.strip():
+                break
+            nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+            if nxt_indent > base_indent:
+                schedule_end += 1
+            else:
+                break
+        schedule_block = extra_lines[schedule_start:schedule_end]
+        del extra_lines[schedule_start:schedule_end]
+        insert_at = None
+        for idx, l in enumerate(new_default_lines):
+            if l.strip().startswith("daily_reset_hour:"):
+                insert_at = idx + 1
+                break
+        if insert_at is not None:
+            new_default_lines[insert_at:insert_at] = schedule_block
         else:
-            key_match = re.match(r"\s+(\w+)\s*:", line)
-            if key_match and key_match.group(1) not in DEFAULTS:
-                key_name = key_match.group(1)
-                rest     = line.split(":", 1)[1].strip()
-                # Skip empty excluded_ucids (no value after colon)
-                if key_name == "excluded_ucids" and (not rest or rest.startswith("#")):
-                    continue
-                extra_lines.append(line)
+            # daily_reset_hour should always be in DEFAULTS, but fall back
+            # to the original position rather than lose the block.
+            extra_lines[schedule_start:schedule_start] = schedule_block
 
     new_default_block = "DEFAULT:\n" + "".join(new_default_lines)
     if extra_lines:

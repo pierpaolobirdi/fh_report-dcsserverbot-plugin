@@ -17,22 +17,31 @@
 # OPTIONAL - define in DEFAULT to apply to all servers,
 #             or override per server block.
 #
+#   admin            - Who can query other players' stats with /fh_report player
+#                      (default: "Admin"). Comma-separated list where each
+#                      entry can be a Discord role name (as defined in DCSSB)
+#                      or a specific username.
+#                      Anyone not listed here can only view their own stats
+#                      (Discord account must be linked via /linkme).
+#                      Example:
+#                        admin: Admin, SomeSpecificUser
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
 #                      true  = emoji blocks 🟦🟥 (recommended for mobile compatibility)
-#                          Note: emoji mode uses bar_length / 2 automatically
+#                              Note: emoji mode uses bar_length / 2 automatically
 #   max_zones        - Max zones shown per column, omit = all       (default: 15)
 #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
 #                      Values outside range are clamped automatically.
 #   slot_status      - Show upgrade slot damage per zone            (default: false)
 #                      false = show max level slots, all filled
-#                      true  = show active vs destroyed slots per zone
-#                              Only the first 5 upgrade slots are shown (primary slots).
-#                              Higher-numbered slots serve other purposes and are excluded.
-#                              🔹/🔺 = slot with active units
-#                              ◇/△  = slot destroyed (units eliminated)
+#                      true  = show active vs destroyed status per zone
+#                              Checks all upgrade slots and shows up to 5 symbols,
+#                              prioritizing active slots over their position — so a
+#                              zone with active slots beyond position 5 still shows
+#                              them as active rather than appearing fully destroyed.
+#                              🔹/🔺 = active unit slot  ◇/△ = destroyed slot
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
@@ -78,10 +87,8 @@
 #                              thu: 6
 #                              sat: 6
 #   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S,2D,2DS) (default: all)
+#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
 #                      Falls back to max_pilots if not set.
-#   max_pilots_3t    - Max pilots per table in triple-table modes (3R,3S,3D,3DS) (default: 6)
-#                      Falls back to max_pilots_2t then max_pilots if not set.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -132,6 +139,13 @@
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
+#   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
+#                      footer                                        (default: true)
+#                      false = disabled
+#                      true  = adds a second line to the footer reminding
+#                              players they can check their own stats.
+#   player_cmd_hint_text - Customize the footer reminder text        (default:
+#                      "Type /fh_report player to see your own stats.")
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -142,7 +156,9 @@
 #   🔹 = active BLUE slot   ◇ = destroyed BLUE slot
 #   🔺 = active RED slot    △ = destroyed RED slot
 
+
 DEFAULT:
+  admin: Admin
   update_interval: 300
   bar_length: 40
   bar_style_emoji: false
@@ -155,6 +171,10 @@ DEFAULT:
   show_all_pilots: false
   show_pilot_card: false
   pilot_card_icon: 🔸
+  show_session_card: false
+  session_card_icon: 🔸
+  show_daily_card: false
+  daily_card_icon: 🔸
   show_punishment: false
 #  max_pilots: 20
 #  max_pilots_2t: 8
@@ -164,11 +184,14 @@ DEFAULT:
 #    sat: 6
 #    sun: 6
 #  excluded_ucids:
+  show_player_cmd_hint: true
+  player_cmd_hint_text: "Type /fh_report player to see your own stats."
 
 
 DCS_Server:                             # instance name from nodes.yaml
   channel_id: 1234567890123456789       # your Discord channel ID
   campaign_name: "Operation — FootHold"  # Foot embed
+#  admin: Admin, SomeSpecificUser        # default: "Admin" if omitted
 #  saves_dir:                           # auto-resolved — override only if needed
 #  update_interval: 300
 #  bar_style_emoji: false
@@ -184,6 +207,10 @@ DCS_Server:                             # instance name from nodes.yaml
   show_all_pilots: false
 #  show_pilot_card: false
   pilot_card_icon: 🔸
+#  show_session_card: false
+  session_card_icon: 🔸
+#  show_daily_card: false
+  daily_card_icon: 🔸
   show_punishment: false
 #  daily_reset_hour: 0
 #  daily_reset_schedule:
@@ -191,11 +218,14 @@ DCS_Server:                             # instance name from nodes.yaml
 #    sun: 6
 #  excluded_ucids:
 #    - abcdef1234567890abcdef1234567890   # UCID to hide
+#  show_player_cmd_hint: true
+#  player_cmd_hint_text: "Type /fh_report player to see your own stats."
 
 
 #DCS_Server_2:                          # second instance (if applicable)
 #  channel_id: 1234567890123456789
 #  campaign_name: "Operation — FootHold 2"
+#  admin: Admin, SomeSpecificUser
 #  saves_dir:
 #  update_interval: 300
 #  bar_style_emoji: false
@@ -217,3 +247,5 @@ DCS_Server:                             # instance name from nodes.yaml
 #    sat: 6
 #    sun: 6
 #  excluded_ucids:
+#  show_player_cmd_hint: true
+#  player_cmd_hint_text: "Type /fh_report player to see your own stats."
