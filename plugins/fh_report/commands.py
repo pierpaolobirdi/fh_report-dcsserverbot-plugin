@@ -719,11 +719,17 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
       Ship    = Ship (naval kills)
     'Missions' sums only keys whose name contains the word "mission"
     (case-insensitive) — e.g. CAP mission, SEAD mission, CAS mission.
+    'Achievement' is Foothold's own milestone-unlock counter (playerStats key
+    'Achievement', confirmed via zoneCommander.lua's STATS_LABEL_ACHIEVEMENT) —
+    a progression/summary stat rather than raw combat action, so it's ranked
+    right after Missions and ahead of the combat kill categories.
     Plus Rescues (Pilot Rescue), Refuels (Refueling event count), and Deaths.
-    Priority order (highest to lowest): Missions, Air, SAM, Ground, Ship,
-    Rescues, Refuels, Deaths. Capped at 6 fields — lowest-priority fields are
-    dropped first if there are more than 6 with a non-zero value. Deaths is
-    always shown if > 0.
+    Displayed as 'Msn', 'Ach' and 'Resc' respectively (abbreviated to keep the
+    line short enough to avoid Discord's mobile-width wraparound).
+    Priority order (highest to lowest): Missions, Achievement, Air, SAM,
+    Ground, Ship, Rescues, Refuels, Deaths. Capped at 7 fields — lowest-
+    priority fields are dropped first if there are more than 7 with a
+    non-zero value. Deaths is always shown if > 0.
     Note: 'Flight time' is intentionally excluded — Foothold only records it
     for a specific aircraft whitelist (mostly helicopters/transports, see
     LogisticCommander.AllowedFlightTimeReward), so it reads 0/absent for
@@ -738,6 +744,7 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
         int(v) for k, v in raw_stats.items()
         if "mission" in k.lower() and isinstance(v, (int, float)) and v > 0
     )
+    achievement = int(raw_stats.get("Achievement", 0))
     air    = int(raw_stats.get("Air", 0)) + int(raw_stats.get("Helo", 0))
     sam    = int(raw_stats.get("SAM", 0))
     ground = (int(raw_stats.get("Ground Units", 0)) + int(raw_stats.get("Structure", 0))
@@ -749,22 +756,23 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
 
     # (priority_rank, label_text) — lower rank = higher priority, always kept first
     candidates = [
-        (0, f"{missions} Missions") if missions > 0 else None,
-        (1, f"{air} Air") if air > 0 else None,
-        (2, f"{sam} SAM") if sam > 0 else None,
-        (3, f"{ground} Ground") if ground > 0 else None,
-        (4, f"{ship} Ship") if ship > 0 else None,
-        (5, f"{rescues} Rescue" + ("s" if rescues != 1 else "")) if rescues > 0 else None,
-        (6, f"{refuels} Refuels") if refuels > 0 else None,
-        (7, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
+        (0, f"{missions} Msn") if missions > 0 else None,
+        (1, f"{achievement} Ach") if achievement > 0 else None,
+        (2, f"{air} Air") if air > 0 else None,
+        (3, f"{sam} SAM") if sam > 0 else None,
+        (4, f"{ground} Ground") if ground > 0 else None,
+        (5, f"{ship} Ship") if ship > 0 else None,
+        (6, f"{rescues} Resc") if rescues > 0 else None,
+        (7, f"{refuels} Refuels") if refuels > 0 else None,
+        (8, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
 
-    # Cap at 6 fields — drop lowest-priority fields first, but always keep deaths
-    if len(candidates) > 6:
-        deaths_entry = next((c for c in candidates if c[0] == 7), None)
-        others       = [c for c in candidates if c[0] != 7]
-        keep_count   = 5 if deaths_entry else 6
+    # Cap at 7 fields — drop lowest-priority fields first, but always keep deaths
+    if len(candidates) > 7:
+        deaths_entry = next((c for c in candidates if c[0] == 8), None)
+        others       = [c for c in candidates if c[0] != 8]
+        keep_count   = 6 if deaths_entry else 7
         others       = sorted(others, key=lambda c: c[0])[:keep_count]
         candidates   = sorted(others + ([deaths_entry] if deaths_entry else []), key=lambda c: c[0])
 
@@ -773,6 +781,36 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
     if not parts:
         return None
     return f"·　{icon} " + " · ".join(parts)
+
+
+# Fixed priority tiers for individual playerStats keys in the full-detail
+# Session/Daily Stats sections of /fh_report player, mirroring the same
+# conceptual grouping order as the main embed's compact card (_build_session_card)
+# — but keeping every individual key visible rather than collapsing them into
+# summed categories. Keys containing "mission" (any case) always sort into
+# tier 0 regardless of their exact name. Deaths is always forced to the end.
+_STAT_KEY_ORDER = [
+    "Achievement", "Air", "Helo", "SAM",
+    "Infantry", "Ground Units", "Structure",
+    "Ship", "Pilot Rescue", "Refueling",
+]
+
+
+def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
+    """Sort a raw playerStats dict into the fixed display order used by the
+    full-detail stats sections: Missions, Achievement, Air, Helo, SAM,
+    Infantry, Ground Units, Structure, Ship, Pilot Rescue, Refueling, any
+    unrecognized keys (alphabetical), then Deaths always last."""
+    def rank(key: str) -> tuple[int, str]:
+        if key == "Deaths":
+            return (99, key)
+        if "mission" in key.lower():
+            return (0, key)
+        if key in _STAT_KEY_ORDER:
+            return (_STAT_KEY_ORDER.index(key) + 1, key)
+        return (98, key)  # unrecognized — after known categories, before Deaths
+
+    return sorted(stats.items(), key=lambda kv: rank(kv[0]))
 
 
 def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
@@ -816,18 +854,20 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     # Only non-zero fields are shown; if everything is zero the section is
     # omitted entirely (not even a placeholder), per the original spec.
     if daily_stats:
-        daily_nonzero = {k: v for k, v in sorted(daily_stats.items()) if k != "Points" and v}
-        if daily_nonzero:
-            daily_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in daily_nonzero.items())
+        daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v}
+        if daily_filtered:
+            daily_ordered = _order_stat_items(daily_filtered)
+            daily_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in daily_ordered)
             embed.add_field(name="\u200b", value="─" * 32, inline=False)
             embed.add_field(name="📅 __Daily Stats__", value=daily_lines, inline=False)
 
     # ── Session Stats (full, unfiltered) ───────────────────────────────
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
     if session_stats:
-        other_stats = {k: v for k, v in sorted(session_stats.items()) if k != "Points"}
+        other_stats = {k: v for k, v in session_stats.items() if k != "Points"}
         if other_stats:
-            stat_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in other_stats.items())
+            other_ordered = _order_stat_items(other_stats)
+            stat_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in other_ordered)
             embed.add_field(name="📊 __Session Stats__", value=stat_lines, inline=False)
         else:
             embed.add_field(name="📊 __Session Stats__",

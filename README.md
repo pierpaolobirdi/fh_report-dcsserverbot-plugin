@@ -222,10 +222,10 @@ Similar cards showing combat stats for the current session or the current day, s
 
 ```
 🥇 `Pilot1` — Staff Sergeant (S: 11,357)
-·　🔸 5 missions · 5 air · 3 helo · 4 SAM · 27 ground · 1 death
+·　🔸 5 Msn · 3 Ach · 5 Air · 4 SAM · 27 Ground · 1 Death
 ```
 
-Shows up to 6 fields, in priority order: missions completed (any stat key containing the word "mission"), air kills, helo kills, SAM kills, ground kills, structure kills, infantry kills, deaths. Lowest-priority fields are dropped first if there are more than 6 with data. Deaths is always shown if greater than zero. Values of zero are omitted; if everything is zero the card is not shown.
+Shows up to 7 fields, in priority order: missions completed (any stat key containing the word "mission", abbreviated `Msn`), achievements unlocked (`Ach`), air/helo kills, SAM kills, ground/structure/infantry kills, ship kills, pilot rescues (`Resc`), refuels, deaths. Lowest-priority fields are dropped first if there are more than 7 with data. Deaths is always shown if greater than zero. Values of zero are omitted; if everything is zero the card is not shown.
 
 The daily card uses the same daily reset mechanism as daily leaderboard points (see `daily_reset_hour` above). Icons are configurable independently via `session_card_icon` and `daily_card_icon` (default: 🔸 for both).
 
@@ -247,6 +247,8 @@ A read-only slash command that shows a single player's full stats as a private (
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
 
 The embed shows, in order: UCID, Rank/Session/Daily Points, Last seen, Daily Stats (full detail, only non-zero fields, delta since the last reset), Session Stats (full detail for the current session), Career Stats (from `Foothold_Ranks.lua`), and current mission status.
+
+Unlike the compact cards on the main campaign embed, Daily Stats and Session Stats here show **every individual stat key**, not just the summarized categories — nothing is capped or dropped. Fields are sorted in a fixed order: missions (any key containing "mission") → achievements → air → helo → SAM → infantry → ground units → structure → ship → pilot rescues → refuels → any other/unrecognized stat key → deaths always last.
 
 ### Who can look up other players (`admin`)
 
