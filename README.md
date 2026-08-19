@@ -80,6 +80,7 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
+| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs--disable_updates) below |
 | `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
 
 ### Example config
@@ -292,6 +293,27 @@ Reads accumulated punishment points from the DCSServerBot Punishment plugin and 
 | 200+ | 💀 | Dishonorably discharged | 🔨🔨🔨🔨🔨🔨 |
 
 Requires the DCSServerBot Punishment plugin. If not present, the option is silently ignored.
+
+---
+
+## Duplicate installs (`disable_updates`)
+
+If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, running one config next to the master and another on an agent box that hosts that instance — both installations will try to manage the same Discord message.
+
+Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing FH_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
+
+What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `points_order`, `bar_style_emoji`, etc.) every time either one refreshes.
+
+To avoid that, set `disable_updates: true` on every duplicate copy except the one that should actually be in control:
+
+```yaml
+DCS_Server:
+  channel_id: 1458145804685541508
+  campaign_name: "Operation — FootHold"
+  disable_updates: true   # this copy stays completely silent for this server
+```
+
+When `disable_updates: true`, that instance skips the server entirely on every cycle — no file reads, no posts, no edits — as if it weren't listed in the config at all. Omitting the option (or leaving it `false`) is the normal, default behavior.
 
 ---
 

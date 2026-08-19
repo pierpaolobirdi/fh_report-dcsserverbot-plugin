@@ -848,7 +848,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
     else:
         activity_line = "- **Last seen:** —"
-    embed.add_field(name="📅 __Activity__", value=activity_line, inline=False)
+    embed.add_field(name="🕒 __Activity__", value=activity_line, inline=False)
 
     # ── Daily Stats (full, unfiltered — same level of detail as Session Stats) ─
     # Only non-zero fields are shown; if everything is zero the section is
@@ -2253,6 +2253,14 @@ class FH_Report(Plugin):
         so the Master transparently fetches data from remote agent nodes."""
 
         instance_name = server.instance.name
+
+        if _bool_cfg(cfg.get("disable_updates")):
+            # This instance is intentionally silenced — typically because a
+            # duplicate fh_report installation exists elsewhere in the same
+            # cluster (e.g. one config per agent box) pointing at the same
+            # channel. Skip entirely: no read, no post, no edit.
+            return
+
         channel_id    = cfg.get("channel_id")
         if not channel_id:
             self.log.warning(f"FH_Report [{instance_name}]: channel_id not configured.")
@@ -2388,14 +2396,38 @@ class FH_Report(Plugin):
 
         try:
             msg_id = self._message_ids.get(instance_name)
+            msg = None
             if msg_id:
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    await msg.edit(embed=embed)
-                    return
                 except discord.NotFound:
-                    self.log.warning(f"FH_Report [{instance_name}]: previous message not found, posting new one.")
+                    self.log.warning(f"FH_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
                     self._message_ids.pop(instance_name, None)
+
+            if msg is None:
+                # No known message (lost message_ids.json entry, or first run
+                # on this instance). Before creating a new one, check if a
+                # matching FH_Report message already exists in this channel —
+                # this makes duplicate posts structurally impossible even if
+                # multiple fh_report installations end up pointing at the
+                # same channel_id (e.g. one config per agent box).
+                campaign_name  = cfg.get("campaign_name", "Foothold Campaign")
+                expected_title = f"📡  {campaign_name}"
+                async for hist_msg in channel.history(limit=50):
+                    if (hist_msg.author.id == self.bot.user.id and hist_msg.embeds
+                            and hist_msg.embeds[0].title == expected_title):
+                        msg = hist_msg
+                        self._message_ids[instance_name] = msg.id
+                        self._save_message_ids()
+                        self.log.info(
+                            f"FH_Report [{instance_name}]: adopted existing message "
+                            f"{msg.id} in channel {channel_id} (message_ids.json was out of sync)."
+                        )
+                        break
+
+            if msg is not None:
+                await msg.edit(embed=embed)
+                return
 
             msg = await channel.send(embed=embed)
             self._message_ids[instance_name] = msg.id

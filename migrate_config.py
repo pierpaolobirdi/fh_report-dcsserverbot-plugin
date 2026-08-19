@@ -151,6 +151,16 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
+#   disable_updates  - Silence this instance's embed entirely      (default: false)
+#                      false = normal operation
+#                      true  = this instance never reads, posts, or edits
+#                              anything for this server — as if it weren't
+#                              in the config at all. Useful when the same
+#                              Foothold instance is reachable from more than
+#                              one fh_report installation in the same cluster
+#                              (e.g. one config per agent box) — set this to
+#                              true on every duplicate copy except the one
+#                              that should actually post.
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -193,6 +203,7 @@ KNOWN_VARS = {
     "max_pilots",
     "max_pilots_2t",
     "excluded_ucids",
+    "disable_updates",
     "saves_dir",
     "channel_id",
     "campaign_name",
