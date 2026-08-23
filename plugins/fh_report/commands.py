@@ -714,8 +714,9 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
         is_latest_day  = (date_idx == 0)
         effective_top  = max(top, 3) if (is_latest_day and min3_latest_day) else top
         try:
-            y, m, d = date_str.split("-")
-            date_disp = f"{d}/{m}/{y}"
+            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            ts = int(dt.timestamp())
+            date_disp = f"<t:{ts}:d>"
         except ValueError:
             date_disp = date_str
         for event in history[date_str]:
@@ -1199,7 +1200,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 sort_zones_by_waypoint: bool = False,
                 waypoint_map: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
-    timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    _now_ts    = int(datetime.now(timezone.utc).timestamp())
+    timestamp  = f"<t:{_now_ts}:f>"
     blue_count  = len(zones["blue"])
     red_count   = len(zones["red"])
     neutral_count = zones.get("neutral", 0)
