@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Type
 
@@ -271,17 +272,69 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict]:
             if not pts_m:
                 continue
             results[name] = int(pts_m.group(1))
-            # Extract all raw key/value stat pairs (excluding Points/Points spent)
+            # Extract all raw key/value stat pairs (excluding Points — shown
+            # separately as Rank/Session/Daily Points; "Points spent" is kept,
+            # it's a genuine combat/economy stat shown in the full-detail
+            # Session/Daily Stats sections of /fh_report player)
             raw_stats = {}
             for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', player_block):
                 key, val = sm.group(1), sm.group(2)
-                if key in ("Points", "Points spent"):
+                if key == "Points":
                     continue
                 raw_stats[key] = float(val) if "." in val else int(val)
             raw_all[name] = raw_stats
         return results, raw_all
     except Exception:
         return {}, {}
+
+
+async def hot_write_waypoints(server) -> None:
+    """Inject Lua that dumps the mission's in-memory WaypointList table
+    (zone name -> waypoint number suffix, set from the .miz's trigger zone
+    flavorText at mission load — never persisted to any Foothold save file)
+    to saves_dir/.fhc/fhc_waypoints.lua. Same technique and same shared file
+    as FH_Control's _hot_write_waypoints, so both plugins benefit from
+    whichever one triggers it first on a given server. No-op if WaypointList
+    isn't defined in the mission (not every Foothold map sets it up)."""
+    lua = (
+        "if WaypointList and lfs and io then "
+        "  lfs.mkdir(lfs.writedir() .. [[Missions/Saves/.fhc]]) "
+        "  local _p = lfs.writedir() .. [[Missions/Saves/.fhc/fhc_waypoints.lua]] "
+        "  local _f = io.open(_p, 'w') "
+        "  if _f then "
+        "    _f:write([[-- FH_Report/FH_Control waypoint cache\n]]) "
+        "    _f:write([[WaypointList = {\n]]) "
+        "    for _k,_v in pairs(WaypointList) do "
+        "      _f:write([[  [\"]] .. _k .. [[\"] = \"]] .. _v .. [[\",\n]]) "
+        "    end "
+        "    _f:write([[}\n]]) "
+        "    _f:close() "
+        "  end "
+        "end"
+    )
+    await _do_script(server, lua)
+
+
+async def load_waypoint_list(saves_dir: str, node) -> dict:
+    """Read fhc_waypoints.lua (written by hot_write_waypoints, possibly by
+    FH_Control instead of us — same shared file). Returns {zone_name: wp_number}
+    with the numeric part already extracted from the raw suffix string
+    (e.g. "3" or "WP3" -> 3). Zones with a non-numeric or missing suffix are
+    omitted from the returned dict entirely — callers treat 'not in dict' as
+    'no waypoint assigned'. Returns {} if the file doesn't exist or fails to
+    parse, which is a normal/expected state (mission never dumped it yet)."""
+    path = os.path.join(saves_dir, ".fhc", "fhc_waypoints.lua")
+    try:
+        raw = (await node.read_file(path)).decode("utf-8", errors="ignore")
+    except Exception:
+        return {}
+    result: dict[str, int] = {}
+    for m in re.finditer(r'\["([^"]+)"\]\s*=\s*"([^"]*)"', raw):
+        zone_name, suffix = m.group(1), m.group(2)
+        num_match = re.search(r"(\d+)", suffix)
+        if num_match:
+            result[zone_name] = int(num_match.group(1))
+    return result
 
 
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
@@ -387,7 +440,8 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     name is cleaned via strip_callsign(). Credits and lastSeen are merged.
     Returns True if any fix was applied and the file was rewritten."""
 
-    ranks_data = (await node.read_file(ranks_file)).decode("utf-8")
+    ranks_data           = (await node.read_file(ranks_file)).decode("utf-8")
+    _original_ranks_data = ranks_data  # snapshot for the pre-write collision check below
 
     # ── ucidToName: build ucid → raw_name ────────────────────────────────
     ucid_to_raw: dict[str, str] = {}
@@ -499,9 +553,24 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     if not modified:
         return False
 
-    # Write using atomic tmp-file pattern (same as fh_control's _write_lua)
-    tmp = ranks_file + ".fhrep.tmp"
+    # Local write (open()/os.replace()), matching FH_Control's proven
+    # _write_lua pattern — node.write_file() was tried here but doesn't
+    # reliably persist to disk for these instance save-file paths (under
+    # investigation with Leka/Foothold; see FH_Report project notes).
+    # Collision check retained: re-read right before writing to detect if
+    # Foothold itself wrote to this file in the meantime, and skip this
+    # cycle's write rather than risk clobbering a newer version — the next
+    # cycle will simply retry.
     try:
+        recheck = (await node.read_file(ranks_file)).decode("utf-8")
+        if recheck != _original_ranks_data:
+            import logging as _lg2
+            _lg2.getLogger(__name__).warning(
+                f"FH_Report: {ranks_file} changed since read (likely written by "
+                f"Foothold) — skipping deduplication this cycle, will retry next."
+            )
+            return False
+        tmp = ranks_file + ".fhrep.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(ranks_data)
         os.replace(tmp, ranks_file)
@@ -583,6 +652,157 @@ def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
     return None
 
 
+def _build_podium_table(history: dict, players: dict, days: int, top: int,
+                        strip_callsign_flag: bool = False,
+                        min3_latest_day: bool = False) -> str | None:
+    """Build the Podium table, grouped by closing event (date + optional
+    Session End marker), each showing the top `top` positions (1-50) that
+    day — NOT a single position, the top N positions.
+
+    history:   the full daily_history.json dict {date_str: [event, ...]}
+    players:   current parsed roster {name: {credits, custom_rank, ...}} —
+               used to look up each entry's CURRENT rank (via custom_rank
+               if the fh_hook.yaml override is set, else get_rank() from
+               current credits), matching how every other table resolves
+               rank — not a frozen rank from the day it happened, since a
+               player's rank keeps climbing and freezing it would show
+               stale titles for old entries.
+    days:      0 = all available history; otherwise only the most recent
+               N calendar dates that have at least one event. This is the
+               only size control here — there's no separate line cap.
+               Real Discord limits (1024 chars/field, 25 fields/embed) are
+               handled downstream by _add_podium_field's chunking, which
+               truncates whole blocks with a "+ N more" note if needed
+               rather than cutting a block awkwardly mid-way. A dedicated
+               max_lines option was tried and removed: with `top` able to
+               go up to 50, a single event could need 51 lines on its own,
+               making any modest line cap truncate mid-block on essentially
+               every render — the opposite of what it was meant to prevent.
+    top:       show the top N positions (1-50) for each closing event —
+               e.g. top=3 shows 1st, 2nd AND 3rd place, not just 3rd.
+    strip_callsign_flag: mirrors the same option used by every other table,
+               for visual consistency.
+    min3_latest_day: if True, every event under the single most recent date
+               (dates_desc[0] — both closures if that day had two) shows at
+               least the top 3 positions, even if `top` is set lower (1 or
+               2). `top` itself is never reduced by this — if top is already
+               >= 3, this has no effect. Only ever passed True from the
+               4R/4DS Podium sub-block (podium_4x_min3_latest_day); the
+               standalone "P" mode never uses this.
+
+    Each event renders as:
+        __**DD/MM/YYYY**__ (Session End)      <- suffix only on campaign-end closures
+        🥇 `Name` — **Rank** — N,NNN pts
+        🥈 `Name` — **Rank** — N,NNN pts
+        🎖️ `Name` — **Rank** — N,NNN pts      <- 4th place onward
+    Blocks are separated by a blank line. A player no longer in the current
+    roster is shown without a rank part.
+
+    Returns None if there's no history at all, or nothing to show at any
+    requested position — the section is then skipped entirely, same
+    cycle-skip convention as every other table."""
+    if not history:
+        return None
+
+    dates_desc = sorted(history.keys(), reverse=True)
+    if days and days > 0:
+        dates_desc = dates_desc[:days]
+
+    medals = ["🥇", "🥈", "🥉"]
+    blocks: list[list[str]] = []
+    for date_idx, date_str in enumerate(dates_desc):
+        is_latest_day  = (date_idx == 0)
+        effective_top  = max(top, 3) if (is_latest_day and min3_latest_day) else top
+        try:
+            y, m, d = date_str.split("-")
+            date_disp = f"{d}/{m}/{y}"
+        except ValueError:
+            date_disp = date_str
+        for event in history[date_str]:
+            top_list = event.get("top") or []
+            n = min(effective_top, len(top_list))
+            if n <= 0:
+                continue
+            suffix = " (Session End)" if event.get("campaign_restart") else ""
+            block = [f"__{date_disp}__{suffix}"]
+            for idx in range(n):
+                entry = top_list[idx]
+                name, pts = entry.get("name"), entry.get("points", 0)
+                if not name:
+                    continue
+                marker  = medals[idx] if idx < 3 else "🎖️"
+                display = strip_callsign(name) if strip_callsign_flag else name
+                short   = display.replace("`", "")
+                player_data = players.get(name)
+                if player_data:
+                    rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
+                    rank_part = f" — **{rank}**"
+                else:
+                    rank_part = ""
+                block.append(f"{marker} `{short}`{rank_part} — {int(pts):,} pts")
+            if len(block) > 1:
+                blocks.append(block)
+
+    if not blocks:
+        return None
+
+    return "\n".join("\n".join(b) for b in blocks)
+
+
+def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None:
+    """Add the Podium table to the embed, chunked across multiple fields if
+    needed — same FIELD_LIMIT-based chunking pattern already used for the
+    pilot leaderboard tables, since a single Discord embed field has a hard
+    1024-character limit that a long Podium listing (many days, and/or long
+    player names/rank titles) could otherwise exceed and get the whole
+    embed rejected by Discord instead of silently trimmed.
+
+    Also guards Discord's SEPARATE hard limit of 25 fields per embed —
+    unrelated to the 6000-character total handled by _trim_embed, and not
+    covered by chunking alone. If adding all Podium chunks would exceed
+    that cap given how many fields the embed already has (zones, leaderboard
+    tables, etc.), the listing is truncated with a "+ N more" note instead
+    of letting Discord reject the whole embed. A couple of field slots are
+    reserved for whatever gets added after Podium (the closing ruler, at
+    minimum) so this doesn't just shift the overflow one step later."""
+    MAX_EMBED_FIELDS    = 25
+    RESERVED_FOR_TRAILER = 2
+
+    title = f"{icon} __Daily Podium__"
+    cont_title = f"{icon} __Daily Podium (cont.)__"
+    lines = podium_text.split("\n")
+    FIELD_LIMIT = 1020
+    chunks, cur, cur_len = [], [], 0
+    for line in lines:
+        ll = len(line) + 1
+        if cur_len + ll > FIELD_LIMIT and cur:
+            chunks.append("\n".join(cur))
+            cur, cur_len = [line], ll
+        else:
+            cur.append(line)
+            cur_len += ll
+    if cur:
+        chunks.append("\n".join(cur))
+
+    available = MAX_EMBED_FIELDS - len(embed.fields) - RESERVED_FOR_TRAILER
+    if available <= 0:
+        return  # No room left at all this cycle — Podium silently omitted
+                # rather than risk pushing the embed over Discord's field cap.
+    if len(chunks) > available:
+        kept = chunks[:available]
+        dropped_lines = sum(c.count("\n") + 1 for c in chunks[available:])
+        note = f"*+ {dropped_lines} more*"
+        last = kept[-1]
+        if len(last) + 1 + len(note) <= FIELD_LIMIT:
+            kept[-1] = last + "\n" + note
+        else:
+            kept[-1] = note
+        chunks = kept
+
+    for i, chunk in enumerate(chunks):
+        embed.add_field(name=title if i == 0 else cont_title, value=chunk, inline=False)
+
+
 def _lb_title(points_order: str) -> str:
     """Build leaderboard field title based on points_order."""
     titles = {
@@ -601,6 +821,8 @@ def _lb_title(points_order: str) -> str:
         "3S":  "\n📊 __Session Leaderboard · by Current Session__",
         "3D":  "\n📅 __Daily Leaderboard · by Today\'s Points__",
         "3DS": "\n📅 __Daily Leaderboard · by Today\'s Points__",
+        "4R":  "\n🏆 __Pilot Leaderboard · by Rank__",
+        "4DS": "\n📅 __Daily Leaderboard · by Today\'s Points__",
     }
     return titles.get(points_order, "\n🏆 __Pilot Leaderboard · by Rank__")
 
@@ -695,13 +917,13 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
 
     parts = []
     fixed_str = _fmt_time(fixed_s)
-    if fixed_str: parts.append(f"{fixed_str} fixed")
+    if fixed_str: parts.append(f"{fixed_str} Fixed")
     helo_str  = _fmt_time(helo_s)
-    if helo_str:  parts.append(f"{helo_str} helo")
-    if kills > 0:      parts.append(f"{kills} kills")
-    if traps > 0:      parts.append(f"{traps} traps")
+    if helo_str:  parts.append(f"{helo_str} Helo")
+    if kills > 0:      parts.append(f"{kills} Kills")
+    if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
-    if deaths > 0:     parts.append(f"{deaths} deaths")
+    if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
         return None
@@ -796,6 +1018,39 @@ _STAT_KEY_ORDER = [
 ]
 
 
+def _display_stat_label(key: str) -> str:
+    """Friendlier display label for specific raw playerStats keys shown in
+    /fh_report player's full-detail Session/Daily Stats. 'Flight time' is
+    Foothold's own landing-triggered counter, limited to a whitelist of
+    helicopters and a few transport aircraft (see AllowedFlightTimeReward
+    in zoneCommander.lua) — nothing to do with total flight hours (that's
+    Career Stats' Flight Hours fixed/helo, which has no such limitation).
+    Relabeling avoids the key being misread as total time flown this session."""
+    if key == "Flight time":
+        return "Transport Flight Time"
+    return key
+
+
+def _display_stat_value(key: str, value: float) -> str:
+    """Unit-aware formatting for specific raw playerStats keys, to avoid
+    ambiguity about what the raw number represents:
+    - 'Flight time' is recorded in minutes (see zoneCommander.lua's
+      addTempStat(player,'Flight time',minutes,crew)) — shown as 'Xh Ym'
+      instead of a bare number that could be misread as hours.
+    - 'Refueling' is a count of in-flight refueling events, not fuel
+      quantity (career's Fuel Received, shown in lbs, is the separate
+      quantity figure) — shown as 'N event(s)' to avoid that confusion.
+    Everything else uses the normal numeric formatting."""
+    if key == "Flight time":
+        total_min = int(value)
+        h, m = divmod(total_min, 60)
+        return f"{h}h {m}m" if h > 0 else f"{m}m"
+    if key == "Refueling":
+        n = int(value)
+        return f"{n} event" if n == 1 else f"{n} events"
+    return _fmt_num(value)
+
+
 def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
     """Sort a raw playerStats dict into the fixed display order used by the
     full-detail stats sections: Missions, Achievement, Air, Helo, SAM,
@@ -832,14 +1087,6 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if ucid:
         embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
 
-    # ── Rank / Session / Daily Points ──────────────────────────────────
-    points_lines = [f"- **Rank Points:** {_fmt_num(credits)} 🏅 — *{get_rank(credits)}*"]
-    if session_points > 0:
-        points_lines.append(f"- **Session Points:** {_fmt_num(session_points)} 📊")
-    if daily_points > 0:
-        points_lines.append(f"- **Daily Points:** {_fmt_num(daily_points)} 📅")
-    embed.add_field(name="\u200b", value="\n".join(points_lines), inline=False)
-
     # ── Last seen ───────────────────────────────────────────────────────
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
     if last_seen is not None:
@@ -853,30 +1100,35 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     # ── Daily Stats (full, unfiltered — same level of detail as Session Stats) ─
     # Only non-zero fields are shown; if everything is zero the section is
     # omitted entirely (not even a placeholder), per the original spec.
+    # Daily Points shown in the section title itself, not as a separate block.
     if daily_stats:
         daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v}
         if daily_filtered:
             daily_ordered = _order_stat_items(daily_filtered)
-            daily_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in daily_ordered)
+            daily_lines = "\n".join(f"- **{_display_stat_label(k)}:** {_display_stat_value(k, v)}" for k, v in daily_ordered)
             embed.add_field(name="\u200b", value="─" * 32, inline=False)
-            embed.add_field(name="📅 __Daily Stats__", value=daily_lines, inline=False)
+            embed.add_field(name=f"📅 __Daily Stats__ (D: {_fmt_num(daily_points)})",
+                            value=daily_lines, inline=False)
 
     # ── Session Stats (full, unfiltered) ───────────────────────────────
+    # Session Points shown in the section title itself.
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    session_title = f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"
     if session_stats:
         other_stats = {k: v for k, v in session_stats.items() if k != "Points"}
         if other_stats:
             other_ordered = _order_stat_items(other_stats)
-            stat_lines = "\n".join(f"- **{k}:** {_fmt_num(v)}" for k, v in other_ordered)
-            embed.add_field(name="📊 __Session Stats__", value=stat_lines, inline=False)
+            stat_lines = "\n".join(f"- **{_display_stat_label(k)}:** {_display_stat_value(k, v)}" for k, v in other_ordered)
+            embed.add_field(name=session_title, value=stat_lines, inline=False)
         else:
-            embed.add_field(name="📊 __Session Stats__",
+            embed.add_field(name=session_title,
                             value="_No stats yet — will appear after first flight._", inline=False)
     else:
-        embed.add_field(name="📊 __Session Stats__",
+        embed.add_field(name=session_title,
                         value="_No stats yet — will appear after first flight._", inline=False)
 
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
+    # Rank Points and rank name shown in the section title itself.
     career = data.get("career") or {}
     career_lines = []
     flight_s = career.get(CAREER_FLIGHT_SECONDS, 0)
@@ -902,7 +1154,9 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
         embed.add_field(name="\u200b", value="─" * 32, inline=False)
-        embed.add_field(name="✈️ __Career Stats__", value="\n".join(career_lines), inline=False)
+        embed.add_field(
+            name=f"🏆 __Career Stats__ (R: {_fmt_num(credits)} — {get_rank(credits)})",
+            value="\n".join(career_lines), inline=False)
 
     # ── Mission ─────────────────────────────────────────────────────────
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
@@ -935,7 +1189,15 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 show_daily_card: bool = False,
                 daily_card_icon: str = "🔸",
                 daily_stats_raw: dict | None = None,
-                player_cmd_hint: str | None = None) -> discord.Embed:
+                player_cmd_hint: str | None = None,
+                daily_history: dict | None = None,
+                podium_days: int = 7,
+                podium_top: int = 1,
+                podium_4x_days: int = 7,
+                podium_4x_top: int = 1,
+                podium_4x_min3_latest_day: bool = False,
+                sort_zones_by_waypoint: bool = False,
+                waypoint_map: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     blue_count  = len(zones["blue"])
@@ -971,10 +1233,18 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         )
         progress     = f"```ansi\n{pct_blue}% {bar_ansi} {pct_red}%\n```"
 
-    # BLUE zones — actives first sorted by level+slots, suspended last
+    # BLUE zones — actives first sorted by level+slots (or by waypoint number
+    # if sort_zones_by_waypoint is enabled), suspended last
     blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
     blue_suspended = [z for z in zones["blue"] if z.get("suspended")]
-    blue_active    = sorted(blue_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    if sort_zones_by_waypoint and waypoint_map:
+        _blue_with_wp    = [z for z in blue_active if z["name"] in waypoint_map]
+        _blue_without_wp = [z for z in blue_active if z["name"] not in waypoint_map]
+        _blue_with_wp    = sorted(_blue_with_wp, key=lambda z: waypoint_map[z["name"]], reverse=True)
+        _blue_without_wp = sorted(_blue_without_wp, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+        blue_active      = _blue_with_wp + _blue_without_wp
+    else:
+        blue_active    = sorted(blue_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
     blue_suspended = sorted(blue_suspended, key=lambda z: z["level"], reverse=True)
     blue_sorted    = blue_active + blue_suspended
     limit          = max_zones if max_zones else len(blue_sorted)
@@ -993,10 +1263,18 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     blue_lines.append(".")
     blue_text = "\n".join(blue_lines) if blue_lines else "—"
 
-    # RED zones — actives first sorted by level+slots, suspended last
+    # RED zones — actives first sorted by level+slots (or by waypoint number
+    # if sort_zones_by_waypoint is enabled), suspended last
     red_active    = [z for z in zones["red"] if not z.get("suspended")]
     red_suspended = [z for z in zones["red"] if z.get("suspended")]
-    red_active    = sorted(red_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+    if sort_zones_by_waypoint and waypoint_map:
+        _red_with_wp    = [z for z in red_active if z["name"] in waypoint_map]
+        _red_without_wp = [z for z in red_active if z["name"] not in waypoint_map]
+        _red_with_wp    = sorted(_red_with_wp, key=lambda z: waypoint_map[z["name"]])
+        _red_without_wp = sorted(_red_without_wp, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
+        red_active      = _red_with_wp + _red_without_wp
+    else:
+        red_active    = sorted(red_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
     red_suspended = sorted(red_suspended, key=lambda z: z["level"], reverse=True)
     red_sorted    = red_active + red_suspended
     limit         = max_zones if max_zones else len(red_sorted)
@@ -1055,7 +1333,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     has_daily   = bool(dp) or any(drs_check.values())
 
     order_by_session = points_order in ("S", "BS", "2S", "3S")
-    order_by_daily   = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS")
+    order_by_daily   = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS")
 
     if order_by_session:
         pilot_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
@@ -1069,7 +1347,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     # In dual-table modes use max_pilots_2t for first table if defined
     _limit_3t    = max_pilots_3t or max_pilots_2t or max_pilots
     _limit_2t_val = max_pilots_2t or max_pilots
-    _limit_first = _limit_3t if points_order in ("3R", "3S", "3D", "3DS") else (_limit_2t_val if points_order in ("2R", "2S", "2D", "2DS") else max_pilots)
+    _limit_first = _limit_3t if points_order in ("3R", "3S", "3D", "3DS", "4R", "4DS") else (_limit_2t_val if points_order in ("2R", "2S", "2D", "2DS") else max_pilots)
     total_pilots_count = len(pilot_items)
     # Apply first table limit and track surplus for cascade
     _surplus = 0
@@ -1080,6 +1358,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     else:
         _surplus = 0
     hidden_pilots = total_pilots_count - len(pilot_items)
+
+    # Mode "P" shows ONLY the Podium table — no pilot leaderboard at all.
+    if points_order == "P":
+        pilot_items = []
 
     medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
     pilot_lines = []
@@ -1114,7 +1396,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         elif points_order == "S":
             pts_str = "" if hide_session else f"(S: {s_pts:,})"
         elif points_order == "D":
-            pts_str = f"(D: {d_pts:,})" if show_d else ""
+            pts_str = f"(D: {d_pts:,})"
         elif points_order == "BR":
             pts_str = _tri(_r(), _s(), _d())
         elif points_order == "BS":
@@ -1126,17 +1408,17 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         elif points_order == "2R":
             pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
         elif points_order == "2D":
-            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _r(), _s()) if not compact_points else "")
+            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _r(), _s()) if not compact_points else "")
         elif points_order == "2DS":
-            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _s(), _r()) if not compact_points else "")
-        elif points_order == "3R":
+            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _s(), _r()) if not compact_points else "")
+        elif points_order in ("3R", "4R"):
             pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
         elif points_order == "3S":
             pts_str = f"(S: {s_pts:,})" if (compact_points and not hide_session and s_pts) else (_tri(_s(), _r(), _d()) if not compact_points else "")
         elif points_order == "3D":
-            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _r(), _s()) if not compact_points else "")
-        elif points_order == "3DS":
-            pts_str = f"(D: {d_pts:,})" if (compact_points and show_d) else (_tri(_d(), _s(), _r()) if not compact_points else "")
+            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _r(), _s()) if not compact_points else "")
+        elif points_order in ("3DS", "4DS"):
+            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _s(), _r()) if not compact_points else "")
         else:  # 2S — primary table is session
             pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
 
@@ -1144,7 +1426,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         # Pilot career card — shown only when this table is sorted by rank.
         # Data sourced from Foothold_Ranks.lua (historical career totals).
         # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
-        _this_table_is_rank = points_order in ("R", "BR", "2R", "3R")
+        _this_table_is_rank = points_order in ("R", "BR", "2R", "3R", "4R")
         if show_pilot_card and _this_table_is_rank:
             card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
             if card:
@@ -1158,7 +1440,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 pilot_lines.append(s_card)
         # Daily stats card — shown only when this table is sorted by daily points.
         # Daily-primary modes: D, BD, BDS, 2D, 3D, 3DS (daily is the first/only table key)
-        _this_table_is_daily = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS")
+        _this_table_is_daily = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS")
         if show_daily_card and _this_table_is_daily:
             d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
             if d_card:
@@ -1168,8 +1450,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         # For single/B modes: always on this (only) table
         # For 2x: on first table only if first table key is R (2R)
         # For 3x: on first table only if first table key is R (3R)
-        _first_is_rank = points_order in ("R", "BR", "BS", "BD", "BDS", "2R", "3R")
-        _is_multi      = points_order.startswith("2") or points_order.startswith("3")
+        _first_is_rank = points_order in ("R", "BR", "BS", "BD", "BDS", "2R", "3R", "4R")
+        _is_multi      = points_order.startswith("2") or points_order.startswith("3") or points_order.startswith("4")
         show_punishment_here = show_punishment and (_first_is_rank or not _is_multi)
         if show_punishment_here:
             ucid = data.get("ucid")
@@ -1179,7 +1461,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 pts = pp.get(ucid, 0)
             else:
                 pts = 0
-            badge = get_punishment_badge(pts, short, data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
+            badge = get_punishment_badge(pts, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
             if badge:
                 pilot_lines.append(badge)
     pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
@@ -1210,7 +1492,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     )
 
     # For compound modes, skip first table entirely if no pilots
-    _is_compound = points_order in ("2R", "2S", "2D", "2DS", "3R", "3S", "3D", "3DS")
+    _is_compound = points_order in ("2R", "2S", "2D", "2DS", "3R", "3S", "3D", "3DS", "4R", "4DS")
     if _is_compound and not pilot_lines:
         pass  # skip first table — no data
     elif show_all_pilots:
@@ -1238,7 +1520,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 value=("\n" + chunk) if i == 0 else chunk,
                 inline=False
             )
-    elif not (_is_compound and not pilot_lines):
+    elif not (_is_compound and not pilot_lines) and points_order != "P":
         # ── Option A (default): single field, cut at limit, show + X more ─────
         FIELD_LIMIT = 1020
         visible_lines, used = [], 0
@@ -1365,7 +1647,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                         s_pts_p = pp.get(s_ucid, 0)
                     else:
                         s_pts_p = 0
-                    s_badge = get_punishment_badge(s_pts_p, s_short, data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
+                    s_badge = get_punishment_badge(s_pts_p, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
                     if s_badge:
                         second_lines.append(s_badge)
             if hidden_second > 0:
@@ -1397,12 +1679,16 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     )
 
     # ── 3x modes: add second and third leaderboard ───────────────────────────
-    if points_order in ("3R", "3S", "3D", "3DS"):
+    if points_order in ("3R", "3S", "3D", "3DS", "4R", "4DS"):
         # Define table order: [2nd_key, 3rd_key]
         # 3R: rank / session / daily  → 2nd=session, 3rd=daily
         # 3S: session / rank / daily  → 2nd=rank,    3rd=daily
         # 3D: daily / rank / session  → 2nd=rank,    3rd=session
         # 3DS: daily / session / rank → 2nd=session, 3rd=rank
+        # 4R:  rank / session / [Podium] / daily  → same 2nd/3rd as 3R, Podium
+        #      inserted after the session table finishes (see below).
+        # 4DS: daily / [Podium] / session / rank  → same 2nd/3rd as 3DS,
+        #      Podium inserted before this loop starts (see below).
         def _sorted_by(key: str):
             if key == "R":
                 return sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
@@ -1421,11 +1707,34 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             "3S":  ("R", "D"),
             "3D":  ("R", "S"),
             "3DS": ("S", "R"),
+            "4R":  ("S", "D"),
+            "4DS": ("S", "R"),
         }
         second_key, third_key = order_map[points_order]
         _lim_3 = _limit_3t if _limit_3t else max_pilots
 
+        # 4DS: Podium goes between the first table (Daily, rendered above
+        # this block) and the second table (Session) — i.e. right here,
+        # before the loop below builds anything.
+        if points_order == "4DS":
+            podium_lines_4x = _build_podium_table(
+                daily_history or {}, players, days=podium_4x_days, top=podium_4x_top, strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_4x_min3_latest_day
+            )
+            if podium_lines_4x:
+                _add_podium_field(embed, "👑", podium_lines_4x)
+
         for tbl_key in (second_key, third_key):
+            # 4R: Podium goes between the Session table and the Daily table
+            # — inserted here, at the very start of processing third_key,
+            # so it lands in the right spot even if the Session table ended
+            # up empty/skipped above.
+            if points_order == "4R" and tbl_key == third_key:
+                podium_lines_4x = _build_podium_table(
+                    daily_history or {}, players, days=podium_4x_days, top=podium_4x_top, strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_4x_min3_latest_day
+                )
+                if podium_lines_4x:
+                    _add_podium_field(embed, "👑", podium_lines_4x)
+
             tbl_items = _sorted_by(tbl_key)
             # Skip daily table if no daily data
             if tbl_key == "D" and not has_daily:
@@ -1468,7 +1777,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 if compact_points:
                     if tbl_key == "R":   t_pts_part = f"(R: {t_credits:,})" if not t_hide else ""
                     elif tbl_key == "S": t_pts_part = f"(S: {t_pts:,})" if (not t_hide_s and t_pts) else ""
-                    else:                t_pts_part = f"(D: {t_d_pts:,})" if t_show_d else ""
+                    else:                t_pts_part = f"(D: {t_d_pts:,})"
                 elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
@@ -1495,6 +1804,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     "3S":  ("S", "R", "D"),
                     "3D":  ("D", "R", "S"),
                     "3DS": ("D", "S", "R"),
+                    "4R":  ("R", "S", "D"),
+                    "4DS": ("D", "S", "R"),
                 }
                 _all_keys = _order_keys_3x.get(points_order, ())
                 _priority = {"R": 0, "S": 1, "D": 2}
@@ -1504,7 +1815,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 if show_punishment and tbl_key == _badge_tbl:
                     t_ucid = data.get("ucid")
                     t_pp   = data.get("hook_punishment") if "hook_punishment" in data else (pp.get(t_ucid, 0) if pp and t_ucid else 0)
-                    t_badge = get_punishment_badge(t_pp, t_short, data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
+                    t_badge = get_punishment_badge(t_pp, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
                     if t_badge:
                         tbl_lines.append(t_badge)
             if hidden_tbl > 0:
@@ -1529,6 +1840,15 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     value=("\n" + chunk) if i == 0 else chunk,
                     inline=False
                 )
+
+    # ── Podium — standalone mode "P" (fully config-driven) ────────────────
+    if points_order == "P":
+        podium_lines = _build_podium_table(
+            daily_history or {}, players, days=podium_days, top=podium_top,
+            strip_callsign_flag=strip_callsign_flag
+        )
+        if podium_lines:
+            _add_podium_field(embed, "👑", podium_lines)
 
     # Full-width separator — placed at the bottom to fix embed width
     # without interrupting the visual flow of the content.
@@ -2031,10 +2351,17 @@ class FH_Report(Plugin):
 
     def _resolve_points_order(self, server_name: str, cfg: dict,
                               has_daily: bool = True,
-                              has_session: bool = True) -> str:
+                              has_session: bool = True,
+                              has_podium: bool = True) -> str:
         """Parse points_order — supports comma-separated cycle list.
-        Skips daily-primary modes if has_daily=False and session-primary modes
-        if has_session=False, advancing to the next valid mode in the cycle."""
+        Skips daily-primary modes if has_daily=False, session-primary modes
+        if has_session=False, and the standalone "P" (Podium-only) mode if
+        has_podium=False (no daily_history recorded yet) — advancing to the
+        next valid mode in the cycle in every case. Note: "P" is the only
+        mode gated by has_podium — 4R/4DS still render their R/S/D tables
+        even with no podium data, only their internal Podium sub-block is
+        omitted (handled separately in build_embed), so they're never
+        skipped here for that reason."""
         raw   = str(cfg.get("points_order") or "R").strip()
         items = [x.strip() for x in raw.split(",") if x.strip()]
         if not items:
@@ -2042,10 +2369,11 @@ class FH_Report(Plugin):
         if len(items) == 1:
             return items[0]
 
-        daily_primary   = {"D", "BD", "BDS", "2D", "2DS", "3D", "3DS"}
+        daily_primary   = {"D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS"}
         session_primary = {"S", "BS", "2S", "3S"}
+        podium_primary  = {"P"}
 
-        # For compound modes (2x, 3x), define which data keys they use
+        # For compound modes (2x, 3x, 4x), define which data keys they use
         # Mode skips only if ALL its data keys have no data
         compound_keys = {
             "2R":  ("R", "S"),
@@ -2056,6 +2384,8 @@ class FH_Report(Plugin):
             "3S":  ("S", "R", "D"),
             "3D":  ("D", "R", "S"),
             "3DS": ("D", "S", "R"),
+            "4R":  ("R", "S", "D"),
+            "4DS": ("D", "S", "R"),
         }
 
         idx = self._cycle_index.get(server_name, 0)
@@ -2076,10 +2406,12 @@ class FH_Report(Plugin):
                 if not has_any:
                     continue
             else:
-                # Simple/B mode: skip if primary key has no data
+                # Simple/B/Podium mode: skip if primary key has no data
                 if not has_daily and candidate in daily_primary:
                     continue
                 if not has_session and candidate in session_primary:
+                    continue
+                if not has_podium and candidate in podium_primary:
                     continue
 
             self._cycle_index[server_name] = idx % len(items)
@@ -2092,6 +2424,43 @@ class FH_Report(Plugin):
     def _get_daily_file(self, saves_dir: str) -> str:
         """Return path to daily_snapshot.json cache file."""
         return os.path.join(saves_dir, ".fhc", "daily_snapshot.json")
+
+    def _get_history_file(self, saves_dir: str) -> str:
+        """Return path to daily_history.json — the Podium feature's historical
+        record of each day's top-10, keyed by date (YYYY-MM-DD)."""
+        return os.path.join(saves_dir, ".fhc", "daily_history.json")
+
+    def _load_daily_history(self, saves_dir: str) -> dict:
+        """Load daily history from disk. Returns {date_str: [event, ...]},
+        where each event is {"campaign_restart": bool, "top": [{"name","points"}, ...]}.
+        A date can have more than one event if a campaign restart happened
+        on the same calendar day as the normal daily rollover — both are
+        kept, never overwritten."""
+        path = self._get_history_file(saves_dir)
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return json.load(f)
+            except (ValueError, OSError):
+                pass
+        return {}
+
+    def _save_daily_history(self, saves_dir: str, data: dict) -> None:
+        """Save daily history to disk atomically (write to .tmp then replace)."""
+        path = self._get_history_file(saves_dir)
+        tmp  = path + ".tmp"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except OSError as e:
+            self.log.error(f"FH_Report: failed to write daily history: {e}")
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _load_daily_snapshot(self, saves_dir: str) -> dict:
         """Load daily snapshot from disk. Returns dict with keys:
@@ -2144,10 +2513,11 @@ class FH_Report(Plugin):
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
 
-        snap           = self._load_daily_snapshot(saves_dir)
-        snap_date      = snap.get("date", "")
-        snapshot       = snap.get("snapshot", {})
-        stats_snapshot = snap.get("stats_snapshot", {})
+        snap             = self._load_daily_snapshot(saves_dir)
+        snap_date        = snap.get("date", "")
+        snapshot         = snap.get("snapshot", {})
+        stats_snapshot   = snap.get("stats_snapshot", {})
+        last_daily_saved = snap.get("last_daily", {})
 
         # ── Campaign restart detection ──────────────────────────────────────
         # Points and kill counts only ever increase during a normal campaign.
@@ -2192,17 +2562,53 @@ class FH_Report(Plugin):
                     "FH_Report: campaign restart detected (points and kills both "
                     "dropped) — daily snapshot reset automatically."
                 )
+
+            # Capture the ending day's final top-10 into daily_history.json
+            # BEFORE overwriting the snapshot below. Skipped on first_run
+            # since there's no prior day to close. A date can end up with
+            # more than one event if a campaign restart happens on the same
+            # calendar day as the normal reset_hour rollover — both are
+            # appended, never overwriting each other (see Podium feature).
+            #
+            # Two different sources depending on WHY we're resetting:
+            # - Campaign restart: by the time we detect this, campaign_stats
+            #   already reflects the NEW (just-reset) campaign's low values,
+            #   not the old campaign's last totals — computing
+            #   current - old_snapshot would come out negative/zero, which
+            #   is wrong. Instead we use last_daily_saved: the daily totals
+            #   as they stood on the last successful cycle BEFORE the
+            #   restart was noticed (persisted every cycle below), which is
+            #   the closest available approximation (accurate to within one
+            #   update_interval).
+            # - Normal date rollover: campaign_stats still belongs to the
+            #   same ongoing campaign, so current - old_snapshot correctly
+            #   gives the day's final totals.
+            if not first_run:
+                if campaign_restarted:
+                    closing_daily = dict(last_daily_saved)
+                else:
+                    closing_daily = {}
+                    for name, current_pts in campaign_stats.items():
+                        baseline = snapshot.get(name, 0)
+                        delta    = max(0, current_pts - baseline)
+                        if delta > 0:
+                            closing_daily[name] = delta
+                if closing_daily:
+                    top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
+                    history    = self._load_daily_history(saves_dir)
+                    close_date = snap_date or today_str
+                    history.setdefault(close_date, []).append({
+                        "campaign_restart": campaign_restarted,
+                        "top": [{"name": n, "points": p} for n, p in top_list],
+                    })
+                    self._save_daily_history(saves_dir, history)
+
             # Baseline = current values in every case. This means a missing
             # snapshot file (first install, or an admin manually deleting it
             # to force a reset) always starts the daily counter at 0 rather
             # than retroactively counting everything accumulated so far.
             snapshot       = dict(campaign_stats)
             stats_snapshot = {name: dict(stats) for name, stats in session_stats_raw.items()}
-            self._save_daily_snapshot(saves_dir, {
-                "date":           today_str,
-                "snapshot":       snapshot,
-                "stats_snapshot": stats_snapshot,
-            })
 
         # Calculate daily point delta for each player
         # New players not in snapshot get baseline=0 so all their Points count as daily
@@ -2214,11 +2620,28 @@ class FH_Report(Plugin):
                 daily[name] = delta
 
         # Calculate daily combat stats delta for each player (for the daily card)
+        # A stat key is only trustworthy for a delta if it was already being
+        # tracked as of the last snapshot (i.e. present for at least one
+        # player in stats_snapshot). If a key appears nowhere in the old
+        # snapshot, the system simply wasn't recording it yet at the last
+        # reset — computing current_val - 0 would show today's entire
+        # cumulative value mislabeled as "today's activity" (this happened
+        # with "Points spent" right after it was added to the raw stats).
+        # Skip such keys for today only; the next snapshot (taken at the
+        # following reset) will include them naturally since it's built
+        # directly from session_stats_raw, so deltas resume correctly from
+        # the next reset onward.
+        tracked_keys_in_snapshot = set()
+        for _stats in stats_snapshot.values():
+            tracked_keys_in_snapshot.update(_stats.keys())
+
         daily_stats = {}
         for name, current_stats in session_stats_raw.items():
             baseline_stats = stats_snapshot.get(name, {})
             delta_stats = {}
             for key, current_val in current_stats.items():
+                if key not in tracked_keys_in_snapshot:
+                    continue
                 base_val = baseline_stats.get(key, 0)
                 d = current_val - base_val
                 if d > 0:
@@ -2226,7 +2649,21 @@ class FH_Report(Plugin):
             if delta_stats:
                 daily_stats[name] = delta_stats
 
-        return daily, daily_stats
+        # Persist the snapshot every cycle (not just on reset), always
+        # including 'last_daily' — the freshly computed daily totals for
+        # this cycle. This is what lets a future campaign-restart detection
+        # capture an accurate closing total for the day that just ended
+        # (see the campaign_restarted branch above), since by the time a
+        # restart is noticed, campaign_stats itself already belongs to the
+        # new campaign and can no longer be used to compute it directly.
+        self._save_daily_snapshot(saves_dir, {
+            "date":           snap_date if (snap_date and not needs_reset) else today_str,
+            "snapshot":       snapshot,
+            "stats_snapshot": stats_snapshot,
+            "last_daily":     daily,
+        })
+
+        return daily, daily_stats, campaign_restarted
 
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table."""
@@ -2324,12 +2761,22 @@ class FH_Report(Plugin):
             punishment_points = await self._fetch_punishment_points()
 
         # Compute daily points first so we know if daily data exists
-        # before resolving the points_order mode
+        # before resolving the points_order mode. Includes 4R/4DS (their
+        # Daily table/pts_str needs this) and P (Podium's own daily_history
+        # capture-on-reset logic lives inside _compute_daily_points — if
+        # this never ran for a server using only "P", the history file
+        # would never get populated at all).
         raw_order  = str(cfg.get("points_order") or "R").strip()
-        daily_modes = {"D", "BD", "BDS", "2D", "2DS", "BR", "BS", "2R", "2S", "3R", "3S", "3D", "3DS"}
+        daily_modes = {"D", "BD", "BDS", "2D", "2DS", "BR", "BS", "2R", "2S", "3R", "3S", "3D", "3DS", "4R", "4DS", "P"}
         needs_daily = any(m.strip() in daily_modes for m in raw_order.split(","))
+        # Also run daily-points computation (and its campaign-restart
+        # detection) whenever waypoint sorting is enabled, regardless of
+        # points_order — that's the signal used to know when to refresh
+        # the shared waypoint cache (see sort_zones_by_waypoint below).
+        needs_daily = needs_daily or _bool_cfg(cfg.get("sort_zones_by_waypoint"))
         daily_pts: dict = {}
         daily_stats: dict = {}
+        campaign_restarted_now = False
         if needs_daily and campaign_stats:
             reset_hour    = int(cfg.get("daily_reset_hour") or 0)
             # Override with day-specific hour if daily_reset_schedule is defined
@@ -2339,18 +2786,57 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts, daily_stats = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
+            daily_pts, daily_stats, campaign_restarted_now = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
 
+        # Load daily_history once here (cheap, tiny file) so we can both
+        # decide whether "P" should be skipped in the cycle (no history yet
+        # = nothing to show) and reuse the same data for build_embed below
+        # without reading the file twice.
+        daily_history_data = self._load_daily_history(saves_dir)
+
         # Resolve points_order — skips daily-primary modes if no daily data,
-        # advancing to the next valid mode in the cycle instead of substituting
+        # session-primary modes if no session data, and "P" if there's no
+        # Podium history yet — advancing to the next valid mode in the cycle
+        # instead of substituting or showing an empty table.
         current_order = self._resolve_points_order(
             instance_name, cfg,
             has_daily   = bool(daily_pts) or any(daily_stats.values()),
             has_session = has_session,
+            has_podium  = bool(daily_history_data),
         )
+
+        # Zone ordering by waypoint number — opt-in, uses hot injection to
+        # dump Foothold's in-memory WaypointList (never persisted to any
+        # save file) to a shared cache file also used by FH_Control. Only
+        # re-triggered when the cache is missing entirely, or when a
+        # campaign restart was just detected (a new mission/map load is
+        # exactly the event that would change zone-to-waypoint assignments).
+        # Never re-triggered on every ordinary cycle, since WaypointList is
+        # static for the lifetime of a stable campaign.
+        sort_zones_by_wp = _bool_cfg(cfg.get("sort_zones_by_waypoint"))
+        waypoint_map: dict = {}
+        if sort_zones_by_wp:
+            wp_cache_file = os.path.join(saves_dir, ".fhc", "fhc_waypoints.lua")
+            cache_missing = True
+            try:
+                await node.read_file(wp_cache_file)
+                cache_missing = False
+            except Exception:
+                cache_missing = True
+            if (cache_missing or campaign_restarted_now) and server.status in HOT_STATES:
+                try:
+                    await hot_write_waypoints(server)
+                    await asyncio.sleep(1.5)
+                except Exception as e:
+                    self.log.warning(f"FH_Report [{instance_name}]: waypoint hot-write failed: {e}")
+            try:
+                waypoint_map = await load_waypoint_list(saves_dir, node)
+            except Exception as e:
+                self.log.warning(f"FH_Report [{instance_name}]: could not load waypoint cache: {e}")
+                waypoint_map = {}
 
         # Player command hint — plain-text reminder of /fh_report player,
         # shown as a second line in the footer. Active by default (migrate
@@ -2392,6 +2878,14 @@ class FH_Report(Plugin):
             daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
             daily_stats_raw     = daily_stats,
             player_cmd_hint     = player_cmd_hint,
+            daily_history       = daily_history_data if current_order in ("P", "4R", "4DS") else None,
+            podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7),
+            podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1))),
+            podium_4x_days      = int(cfg.get("podium_4x_days") if cfg.get("podium_4x_days") is not None else 7),
+            podium_4x_top       = max(1, min(50, int(cfg.get("podium_4x_top") or 1))),
+            podium_4x_min3_latest_day = _bool_cfg(cfg.get("podium_4x_min3_latest_day")),
+            sort_zones_by_waypoint = sort_zones_by_wp,
+            waypoint_map        = waypoint_map,
         )
 
         try:
@@ -2575,8 +3069,9 @@ class FH_Report(Plugin):
                 await interaction.followup.send(
                     f"❌ No Foothold save file found for **`{server}`**.", ephemeral=True)
                 return
+            ranks_file = os.path.join(saves_dir, "Foothold_Ranks.lua")
+
             excluded_ucids = cfg.get("excluded_ucids") or []
-            ranks_file     = os.path.join(saves_dir, "Foothold_Ranks.lua")
             players        = await parse_ranks(ranks_file, excluded_ucids, node)
             campaign_stats, session_stats_raw = await parse_player_stats(persistence_file, node)
         except Exception as e:
@@ -2654,7 +3149,7 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        daily_pts_all, daily_stats_all = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
+        daily_pts_all, daily_stats_all, _ = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
         d_pts     = daily_pts_all.get(match, 0)
         d_stats   = daily_stats_all.get(match)
         if d_stats is None:
@@ -2693,6 +3188,100 @@ class FH_Report(Plugin):
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
             mission_status=mission_status, daily_stats=d_stats
         )
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+
+    @fh_report.command(name="podium", description="Show who held a given daily-history position between two dates.")
+    @app_commands.describe(
+        date_from="Start date (YYYY-MM-DD)",
+        date_to="End date (YYYY-MM-DD)",
+        top="Show the top N positions for each day (1-50)"
+    )
+    async def podium(self, interaction: discord.Interaction,
+                     date_from: str, date_to: str, top: app_commands.Range[int, 1, 50]):
+        ephemeral = utils.get_ephemeral(interaction)
+        await interaction.response.defer(ephemeral=ephemeral)
+
+        server = self._resolve_server_from_channel(interaction)
+        if not server:
+            await interaction.followup.send(
+                "❌ Couldn't determine which server this channel belongs to. "
+                "Run this command in the channel where FH_Report posts the campaign embed.",
+                ephemeral=True)
+            return
+
+        srv = self._get_server_by_instance(server)
+        if srv is None:
+            await interaction.followup.send(
+                f"❌ Server **`{server}`** not found among configured DCSServerBot instances.",
+                ephemeral=True)
+            return
+
+        try:
+            d_from = datetime.strptime(date_from.strip(), "%Y-%m-%d").date()
+            d_to   = datetime.strptime(date_to.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            await interaction.followup.send(
+                "❌ Invalid date format — use `YYYY-MM-DD` for both `date_from` and `date_to` "
+                "(e.g. `2026-08-01`).", ephemeral=True)
+            return
+        if d_from > d_to:
+            await interaction.followup.send(
+                "❌ `date_from` must not be after `date_to`.", ephemeral=True)
+            return
+
+        cfg       = self._merged_cfg(server)
+        saves_dir = cfg.get("saves_dir")
+        if not saves_dir:
+            saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
+        node = srv.node
+
+        try:
+            history = self._load_daily_history(saves_dir)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error reading daily history:\n```{e}```", ephemeral=True)
+            return
+
+        # Filter to the requested [date_from, date_to] range (inclusive)
+        filtered_history = {}
+        for date_str, events in history.items():
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d_from <= d <= d_to:
+                filtered_history[date_str] = events
+
+        if not filtered_history:
+            await interaction.followup.send(
+                f"No history found for **`{server}`** between `{date_from}` and `{date_to}`.",
+                ephemeral=True)
+            return
+
+        # Need the current roster for live rank lookups, same as the main embed
+        try:
+            excluded_ucids = cfg.get("excluded_ucids") or []
+            ranks_file     = os.path.join(saves_dir, "Foothold_Ranks.lua")
+            players        = await parse_ranks(ranks_file, excluded_ucids, node)
+        except Exception:
+            players = {}
+
+        podium_lines = _build_podium_table(
+            filtered_history, players, days=0, top=top,
+            strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign"))
+        )
+        if not podium_lines:
+            await interaction.followup.send(
+                f"No history found with data for the top **{top}** position(s) between "
+                f"`{date_from}` and `{date_to}`.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"👑 Daily Podium — Top {top}",
+            description=f"{date_from} → {date_to}",
+            color=0xF1C40F, timestamp=datetime.now(timezone.utc)
+        )
+        _add_podium_field(embed, "👑", podium_lines)
+        embed.set_footer(text="FH_Report · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 

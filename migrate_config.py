@@ -54,6 +54,30 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                              zone with active slots beyond position 5 still shows
 #                              them as active rather than appearing fully destroyed.
 #                              🔹/🔺 = active unit slot  ◇/△ = destroyed slot
+#   sort_zones_by_waypoint - Order active zones by their mission waypoint
+#                      number instead of level/damage           (default: false)
+#                      false = current behavior (sort by level, then active
+#                              slot count)
+#                      true  = BLUE zones: highest waypoint number first
+#                              (descending). RED zones: lowest waypoint
+#                              number first (ascending). Zones with no
+#                              waypoint assigned fall to the end of the
+#                              active block (same secondary order as
+#                              false), before suspended zones — which are
+#                              always last regardless of this setting.
+#                      Waypoint numbers come from Foothold's in-memory
+#                      WaypointList table (set from the .miz's trigger zone
+#                      flavorText) — never written to any save file on its
+#                      own, so this requires a one-time hot-injection dump
+#                      to a shared cache file (saves_dir/.fhc/fhc_waypoints.lua,
+#                      also used by FH_Control if installed). The dump is
+#                      only triggered when that cache is missing, or when a
+#                      campaign restart was just detected — never on every
+#                      ordinary cycle, since the mapping is static for the
+#                      life of a stable campaign. Requires the mission to
+#                      be running at the time of the (re)trigger; falls
+#                      back to the false behavior until a fresh cache is
+#                      available.
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
@@ -77,12 +101,48 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                        3S  = session / rank / daily
 #                        3D  = daily / rank / session
 #                        3DS = daily / session / rank
+#                      Quad table (4 = three leaderboards + Podium, see below):
+#                        4R  = rank / session / Podium / daily
+#                        4DS = daily / Podium / session / rank
+#                      Podium-only table (no pilot leaderboard at all):
+#                        P   = Podium only — see podium_days/podium_top below
 #                      Comma-separated = cycle through modes on each update
 #                      Example: points_order: 2S, BS, R
 #                      D modes show nothing if no daily data yet (silently skipped)
 #   compact_points   - In multi-table modes (2x, 3x), show only the primary data  (default: false)
 #                      false = each table shows all data (R · S · D)
 #                      true  = each table shows only its own sorted value (R, S, or D)
+#   podium_days      - Window of days shown in the standalone "P" mode's
+#                      Podium table                                  (default: 7)
+#                      0 = all available history (since campaign start)
+#                      A positive number = only the most recent N calendar
+#                      dates that have at least one recorded closing event.
+#                      Only affects points_order: P. The Podium icon is
+#                      fixed (👑) everywhere and is not configurable.
+#   podium_top       - Show the top N positions (1-50) for each closing
+#                      event in the standalone "P" mode's Podium table
+#                      (default: 1) — e.g. 3 shows 1st, 2nd AND 3rd place,
+#                      not just 3rd place alone.
+#                      Only affects points_order: P — see podium_days above.
+#   podium_4x_days   - Same as podium_days, but for the Podium sub-block
+#                      shown inside 4R/4DS instead of standalone "P"
+#                      (default: 7). Independent from podium_days — the two
+#                      Podium displays can be configured differently.
+#   podium_4x_top    - Same as podium_top (top N positions, 1-50), but for
+#                      4R/4DS's Podium sub-block (default: 1). Independent
+#                      from podium_top.
+#   podium_4x_min3_latest_day - Force at least the top 3 positions to show
+#                      for the single most recent closing event(s) in
+#                      4R/4DS's Podium sub-block, even if podium_4x_top is
+#                      set lower (1 or 2)                        (default: false)
+#                      false = every day strictly follows podium_4x_top
+#                      true  = the most recent date always shows at least
+#                              3 positions (both closures if that day had
+#                              two); all other days still follow
+#                              podium_4x_top exactly. Has no effect if
+#                              podium_4x_top is already 3 or higher.
+#                      Only affects 4R/4DS — the standalone "P" mode never
+#                      uses this.
 #   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
 #                          Manual reset (no commands in this plugin): delete
 #                          saves_dir/.fhc/daily_snapshot.json — the daily counter
@@ -189,6 +249,7 @@ KNOWN_VARS = {
     "max_zones",
     "zone_name_length",
     "slot_status",
+    "sort_zones_by_waypoint",
     "show_pilot_card",
     "pilot_card_icon",
     "show_session_card",
@@ -210,6 +271,11 @@ KNOWN_VARS = {
     "admin",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
+    "podium_days",
+    "podium_top",
+    "podium_4x_days",
+    "podium_4x_top",
+    "podium_4x_min3_latest_day",
 }
 
 # ── Default values for DEFAULT block variables ─────────────────────────────────
@@ -222,6 +288,7 @@ DEFAULTS = {
     "max_zones":        15,
     "zone_name_length": 16,
     "slot_status":      False,
+    "sort_zones_by_waypoint": False,
     "show_pilot_card":  False,
     "pilot_card_icon":  "🔸",
     "show_session_card": False,
@@ -235,6 +302,11 @@ DEFAULTS = {
     "show_all_pilots":  False,
     "show_player_cmd_hint":  True,
     "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
+    "podium_days":      7,
+    "podium_top":       1,
+    "podium_4x_days":      7,
+    "podium_4x_top":       1,
+    "podium_4x_min3_latest_day": False,
 }
 
 COMMENTS = {
@@ -246,6 +318,7 @@ COMMENTS = {
     "max_zones":        "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
+    "sort_zones_by_waypoint": "# false = sort by level/damage  |  true = sort by mission waypoint number",
     "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "pilot_card_icon":  "# Emoji at the start of the pilot career card line (default: 🔸)",
     "show_session_card": "# false = disabled  |  true = show session stats card per pilot",
@@ -258,6 +331,11 @@ COMMENTS = {
     "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
+    "podium_days":      "# 0 = since campaign start  |  N = last N days. Only affects points_order: P",
+    "podium_top":       "# 1-50, shows the top N positions each day. Only affects points_order: P",
+    "podium_4x_days":      "# Same as podium_days, but for 4R/4DS's Podium sub-block",
+    "podium_4x_top":       "# Same as podium_top, but for 4R/4DS's Podium sub-block",
+    "podium_4x_min3_latest_day": "# false = strictly follow podium_4x_top  |  true = force top 3 for the most recent day",
 }
 
 
@@ -279,10 +357,10 @@ def main():
     obsolete = []
 
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
-    BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign",
+    BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
     "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points",
-    "show_session_card", "show_daily_card", "show_player_cmd_hint"}
+    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
