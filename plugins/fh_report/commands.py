@@ -26,6 +26,11 @@ from .version import __version__
 
 log = logging.getLogger(__name__)
 
+# Shown in every embed footer — bumped manually alongside each GitHub
+# release, independent of version.py (which DCSSB manages/reads on its own
+# terms; keeping this separate avoids the conflicts that caused).
+FH_REPORT_RELEASE = "9.5.0"
+
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
                    90000, 120000, 155000, 195000, 240000, 290000, 345000, 405000, 470000, 540000]
@@ -74,6 +79,33 @@ def _fmt_career_time(seconds: float) -> str:
 
 def _fmt_num(v: float) -> str:
     return f"{int(v):,}" if float(v) == int(v) else f"{v:,.2f}"
+
+
+def _slot_display_counts(total_slots: int, active_slots: int) -> tuple[int, int]:
+    """Returns (display_total, display_active) — how many of the 5 drawable
+    slot symbols to show, and how many of those should render as active.
+
+    With 5 or fewer real slots (total_slots), this is a direct 1:1 count,
+    same as before. With more than 5 real slots, the 5 symbols instead
+    represent a PROPORTION of real progress: display_active =
+    round((active_slots / total_slots) * 5), using standard round-half-up
+    (0.5 always rounds up, not Python's built-in banker's rounding which
+    would round 2.5 down to 2). This avoids a zone with, say, 6 of 9 slots
+    active looking visually identical to one with 9 of 9 (both would
+    otherwise show as "5 filled") — the 5 symbols now reflect real progress
+    proportionally instead of just being silently capped."""
+    if total_slots <= 5:
+        display_total  = total_slots
+        display_active = min(active_slots, total_slots)
+        return display_total, display_active
+
+    display_total = 5
+    ratio = active_slots / total_slots if total_slots > 0 else 0
+    # Round-half-up (not Python's round(), which rounds .5 to even)
+    display_active = int(ratio * 5 + 0.5)
+    display_active = max(0, min(5, display_active))
+    return display_total, display_active
+
 
 def get_rank(credits: float) -> str:
     rank_idx = 0
@@ -134,6 +166,15 @@ async def parse_zones(filepath: str, node) -> dict:
             content
         )
     ]
+
+    # BLUE-only extra-slot mechanic (mirrors ZoneCommander:addExtraSlot):
+    # every blue zone can get +1 extra slot unlocked per-zone, and if this
+    # mission-wide flag is also true, a SECOND extra slot becomes available
+    # too (max = 1 + (globalExtraUnlock and 1 or 0), from zoneCommander.lua).
+    # RED has its own separate mechanic (left untouched here) — this is
+    # deliberately blue-specific, not a generic per-side computation.
+    gxu_m = re.search(r'globalExtraUnlock"?\]\s*=\s*(true|false)', content)
+    global_extra_unlock = (gxu_m.group(1) == "true") if gxu_m else False
 
     for zone in zone_names:
         ez = re.escape(zone)
@@ -217,6 +258,26 @@ async def parse_zones(filepath: str, node) -> dict:
 
         info = {"name": zone, "level": level, "active_slots": active_slots, "suspended": suspended}
         if side == 2:
+            # BLUE true max = base slots (randomUpgradesBlue's own entry
+            # count for THIS zone) + the extra-slot allowance above. This
+            # can exceed `level` when a slot has been unlocked/purchased
+            # but hasn't finished building yet, or simply hasn't been
+            # started — those should still show as an empty (not-yet-filled)
+            # symbol rather than not being drawn at all.
+            ru_key2 = '"randomUpgradesBlue"' if '"randomUpgradesBlue"' in block else "'randomUpgradesBlue'"
+            rub_start = block.find(f'[{ru_key2}]={{')
+            base_slots = 0
+            if rub_start != -1:
+                bs2 = block.find('{', rub_start)
+                depth2, j2 = 1, bs2 + 1
+                while j2 < len(block) and depth2 > 0:
+                    if block[j2] == '{': depth2 += 1
+                    elif block[j2] == '}': depth2 -= 1
+                    j2 += 1
+                rub_block = block[bs2 + 1:j2 - 1]
+                base_slots = len(re.findall(r'\[\d+\]=', rub_block))
+            extra_allowance = 2 if global_extra_unlock else 1
+            info["true_max"] = base_slots + extra_allowance
             zones["blue"].append(info)
         elif side == 1:
             zones["red"].append(info)
@@ -434,6 +495,116 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
 
 
 
+# Tracks which target file paths have already logged a write-failure
+# warning, so repeated failures (e.g. every ~5min cycle on a remote-agent
+# instance running an older DCSServerBot) log a clear explanation ONCE,
+# then drop to debug-level noise instead of spamming ERROR forever.
+# Cleared automatically the next time a write to that same path succeeds.
+_dedup_write_warned: set[str] = set()
+
+# Logged once, globally, the first time we detect the installed
+# DCSServerBot predates the new node.write_file(target, source, overwrite)
+# API (3.0.4.28+) — separate from _dedup_write_warned, which tracks
+# per-file write FAILURES. This one just informs that an update would
+# unlock full remote-node compatibility, even while the local fallback
+# below is working fine for this (local) instance.
+_old_dcssb_api_warned = False
+
+
+async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> bool:
+    """Write arbitrary content to `target_path` on `node`, working correctly
+    whether that node is the local/master node or a genuinely remote agent
+    node, with a safe fallback for older DCSServerBot installs.
+
+    Priority order:
+    1. New-style node.write_file(target, source, overwrite) — added in
+       DCSServerBot 3.0.4.28 (confirmed with Special K). `source` here is a
+       LOCAL file path (not a URL, not raw bytes) — DCSSB itself handles
+       copying it to the target node (shutil.copy2 for local, or via its
+       internal file-transfer mechanism for remote). We write our content
+       to a local temp file first, then hand that path to node.write_file().
+       This is the only path that can reach a genuinely remote node.
+    2. If that fails — either because the installed DCSSB predates this
+       API (old signature is write_file(filename, url, overwrite), so
+       calling with target=/source= keyword args raises TypeError), or for
+       any other reason — fall back to a plain local open()/os.replace()
+       write. This only ever reaches the local/master node's own
+       filesystem, but is proven reliable there on any DCSSB version.
+    3. If BOTH fail, this is almost certainly a genuinely remote node on a
+       DCSServerBot version that doesn't have the new write_file yet —
+       nothing we do locally can reach it. Logs a clear one-time hint to
+       update DCSServerBot to 3.0.4.28+ (as of writing, on the 'dev'
+       branch) rather than a bare, confusing OS error.
+    """
+    import tempfile
+
+    # ── Attempt 1: new-style node.write_file(target, source, overwrite) ──
+    tmp_local_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".fhrep.tmp", delete=False) as tf:
+            tf.write(data)
+            tmp_local_path = tf.name
+        status = await node.write_file(target=target_path, source=tmp_local_path, overwrite=True)
+        if getattr(status, "name", None) == "OK":
+            _dedup_write_warned.discard(target_path)
+            return True
+        elif log:
+            log.debug(f"FH_Report: node.write_file (new API) returned {status!r} for {target_path}")
+    except TypeError:
+        # Old DCSSB signature (filename, url, overwrite) doesn't accept
+        # target=/source= keyword args — this install predates the new API.
+        # The local fallback below still works fine for local/master-node
+        # instances, but inform once (not a failure — just a heads-up) that
+        # updating DCSServerBot would unlock full remote-node compatibility.
+        global _old_dcssb_api_warned
+        if not _old_dcssb_api_warned:
+            _old_dcssb_api_warned = True
+            if log:
+                log.info(
+                    "FH_Report: detected an older DCSServerBot version (older "
+                    "than 3.0.4.28) — falling back to local file writes, which "
+                    "work fine for local/master-node instances. Update "
+                    "DCSServerBot to 3.0.4.28 or later to enable full "
+                    "remote-agent-node compatibility for FH_Report's file-write "
+                    "features. This message won't repeat."
+                )
+    except Exception as e:
+        if log:
+            log.debug(f"FH_Report: node.write_file (new API) failed for {target_path}: {e}")
+    finally:
+        if tmp_local_path:
+            try:
+                os.remove(tmp_local_path)
+            except OSError:
+                pass
+
+    # ── Attempt 2: local open()/os.replace() — only reaches local nodes ──
+    try:
+        tmp = target_path + ".fhrep.tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, target_path)
+        _dedup_write_warned.discard(target_path)
+        return True
+    except Exception as e:
+        if target_path not in _dedup_write_warned:
+            _dedup_write_warned.add(target_path)
+            if log:
+                log.error(
+                    f"FH_Report: could not write {target_path} via either the new "
+                    f"node.write_file() API or a local write ({e}). If this "
+                    f"instance runs on a remote agent node, please update "
+                    f"DCSServerBot to 3.0.4.28 or later (currently on the 'dev' "
+                    f"branch as of writing) — it adds the remote file-write "
+                    f"support FH_Report needs for this. This message won't repeat "
+                    f"until the write succeeds, or fails again after that."
+                )
+        else:
+            if log:
+                log.debug(f"FH_Report: write to {target_path} failed again: {e}")
+        return False
+
+
 async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     """Detect and fix duplicate player entries in Foothold_Ranks.lua caused by
     callsign changes. The entry with a UCID in ucidToName is canonical; its
@@ -553,32 +724,20 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     if not modified:
         return False
 
-    # Local write (open()/os.replace()), matching FH_Control's proven
-    # _write_lua pattern — node.write_file() was tried here but doesn't
-    # reliably persist to disk for these instance save-file paths (under
-    # investigation with Leka/Foothold; see FH_Report project notes).
-    # Collision check retained: re-read right before writing to detect if
-    # Foothold itself wrote to this file in the meantime, and skip this
-    # cycle's write rather than risk clobbering a newer version — the next
-    # cycle will simply retry.
-    try:
-        recheck = (await node.read_file(ranks_file)).decode("utf-8")
-        if recheck != _original_ranks_data:
-            import logging as _lg2
-            _lg2.getLogger(__name__).warning(
-                f"FH_Report: {ranks_file} changed since read (likely written by "
-                f"Foothold) — skipping deduplication this cycle, will retry next."
-            )
-            return False
-        tmp = ranks_file + ".fhrep.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(ranks_data)
-        os.replace(tmp, ranks_file)
-    except Exception as e:
+    # Re-read right before writing to detect if Foothold itself wrote to
+    # this file in the meantime, and skip this cycle's write rather than
+    # risk clobbering a newer version — the next cycle will simply retry.
+    recheck = (await node.read_file(ranks_file)).decode("utf-8")
+    if recheck != _original_ranks_data:
         import logging as _lg2
-        _lg2.getLogger(__name__).error(f"FH_Report: deduplicate_ranks write failed: {e}")
+        _lg2.getLogger(__name__).warning(
+            f"FH_Report: {ranks_file} changed since read (likely written by "
+            f"Foothold) — skipping deduplication this cycle, will retry next."
+        )
         return False
-    return True
+
+    import logging as _lg2
+    return await write_bytes_to_node(node, ranks_file, ranks_data.encode("utf-8"), log=_lg2.getLogger(__name__))
 
 
 def _is_numeric_segment(s: str) -> bool:
@@ -725,7 +884,11 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
             if n <= 0:
                 continue
             suffix = " (Session End)" if event.get("campaign_restart") else ""
-            block = [f"__{date_disp}__{suffix}"]
+
+            # Build each position's (marker, line_body) first — only then
+            # decide the header format, since an invalid entry (no name)
+            # could reduce the ACTUAL count below `n`.
+            position_lines: list[tuple[str, str]] = []
             for idx in range(n):
                 entry = top_list[idx]
                 name, pts = entry.get("name"), entry.get("points", 0)
@@ -740,9 +903,22 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     rank_part = f" — **{rank}**"
                 else:
                     rank_part = ""
-                block.append(f"{marker} `{short}`{rank_part} — {int(pts):,} pts")
-            if len(block) > 1:
-                blocks.append(block)
+                position_lines.append((marker, f"`{short}`{rank_part} — {int(pts):,} pts"))
+
+            if not position_lines:
+                continue
+
+            if len(position_lines) == 1:
+                # Single position for this event — compact one-line form:
+                # date, medal, name, rank and points all on the same line,
+                # instead of a separate underlined date header above it.
+                marker, line_body = position_lines[0]
+                block = [f"__{date_disp}__ {marker} {line_body}{suffix}"]
+            else:
+                block = [f"__{date_disp}__{suffix}"]
+                for marker, line_body in position_lines:
+                    block.append(f"{marker} {line_body}")
+            blocks.append(block)
 
     if not blocks:
         return None
@@ -1163,7 +1339,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
-    embed.set_footer(text="FH_Report · Read-only player report")
+    embed.set_footer(text=f"FH_Report · Version {FH_REPORT_RELEASE} · Read-only player report")
     return embed
 
 
@@ -1254,8 +1430,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for z in blue_sorted[:limit]:
         lvl = min(z["level"], 5)
         if slot_status and not z.get("suspended"):
-            display_lvl    = min(z["level"], 5)
-            display_active = min(z.get("active_slots", display_lvl), display_lvl)
+            _blue_total = z.get("true_max") or z["level"]
+            display_lvl, display_active = _slot_display_counts(_blue_total, z.get("active_slots", z["level"]))
             stars = "🔹" * display_active + "◇" * (display_lvl - display_active)
         else:
             stars  = "🔹" * lvl
@@ -1284,8 +1460,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     for z in red_sorted[:limit]:
         lvl = min(z["level"], 5)
         if slot_status and not z.get("suspended"):
-            display_lvl    = min(z["level"], 5)
-            display_active = min(z.get("active_slots", display_lvl), display_lvl)
+            display_lvl, display_active = _slot_display_counts(z["level"], z.get("active_slots", z["level"]))
             stars = "🔺" * display_active + "△" * (display_lvl - display_active)
         else:
             stars  = "🔺" * lvl
@@ -1860,10 +2035,11 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    footer_text = f"{campaign_name} • Updated automatically"
+    footer_lines = [f"FH_Report · Version {FH_REPORT_RELEASE}"]
     if player_cmd_hint:
-        footer_text += f"\n{player_cmd_hint}"
-    embed.set_footer(text=footer_text)
+        footer_lines.append(player_cmd_hint)
+    footer_lines.append(f"{campaign_name} • Updated automatically")
+    embed.set_footer(text="\n".join(footer_lines))
     embed.timestamp = datetime.now(timezone.utc)
 
     # Trim if embed exceeds Discord 6000 char limit
@@ -2318,25 +2494,17 @@ class FH_Report(Plugin):
 
         # ── Write modified Lua files back to node ─────────────────────────
         if ranks_modified:
-            try:
-                await node.write_file(ranks_file, ranks_data.encode("utf-8"))
-            except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: failed to write Foothold_Ranks.lua: {e}")
+            await write_bytes_to_node(node, ranks_file, ranks_data.encode("utf-8"), log=self.log)
 
         if camp_modified and persistence_file:
-            try:
-                await node.write_file(persistence_file, camp_data.encode("utf-8"))
-            except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: failed to write campaign lua: {e}")
+            await write_bytes_to_node(node, persistence_file, camp_data.encode("utf-8"), log=self.log)
 
         # ── Write penalty state JSON ──────────────────────────────────────
-        try:
-            await node.write_file(
-                penalty_file,
-                json.dumps(penalty_state, indent=2, ensure_ascii=False).encode("utf-8")
-            )
-        except Exception as e:
-            self.log.error(f"FH_Report [{instance_name}]: failed to write penalty state: {e}")
+        await write_bytes_to_node(
+            node, penalty_file,
+            json.dumps(penalty_state, indent=2, ensure_ascii=False).encode("utf-8"),
+            log=self.log
+        )
 
         # ── Append to log file ────────────────────────────────────────────
         if log_lines:
@@ -2347,9 +2515,10 @@ class FH_Report(Plugin):
                 except FileNotFoundError:
                     pass
                 new_content = existing + "\n".join(log_lines).encode("utf-8") + b"\n"
-                await node.write_file(log_file, new_content)
             except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: failed to write inactivity log: {e}")
+                self.log.error(f"FH_Report [{instance_name}]: failed to read inactivity log: {e}")
+            else:
+                await write_bytes_to_node(node, log_file, new_content, log=self.log)
 
     def _resolve_points_order(self, server_name: str, cfg: dict,
                               has_daily: bool = True,
@@ -2447,22 +2616,22 @@ class FH_Report(Plugin):
                 pass
         return {}
 
-    def _save_daily_history(self, saves_dir: str, data: dict) -> None:
-        """Save daily history to disk atomically (write to .tmp then replace)."""
+    async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
+        """Save daily history to disk atomically, via write_bytes_to_node
+        (works for both local and remote-node instances, with the old
+        local-only fallback and update hint for pre-3.0.4.28 DCSServerBot).
+        Ensures the .fhc subdirectory exists first — safe to create locally
+        here specifically, since saves_dir itself is already known-reachable
+        (we've successfully read other files from it earlier this same
+        cycle), unlike Foothold's own save files where a missing directory
+        is itself the signal that we're on an unreachable remote path."""
         path = self._get_history_file(saves_dir)
-        tmp  = path + ".tmp"
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, path)
-        except OSError as e:
-            self.log.error(f"FH_Report: failed to write daily history: {e}")
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+        await write_bytes_to_node(
+            node, path,
+            json.dumps(data, indent=2).encode("utf-8"),
+            log=self.log
+        )
 
     def _load_daily_snapshot(self, saves_dir: str) -> dict:
         """Load daily snapshot from disk. Returns dict with keys:
@@ -2476,26 +2645,22 @@ class FH_Report(Plugin):
                 pass
         return {}
 
-    def _save_daily_snapshot(self, saves_dir: str, data: dict) -> None:
-        """Save daily snapshot to disk atomically (write to .tmp then replace)
-        to avoid a corrupted/partial JSON if the process is interrupted mid-write."""
+    async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
+        """Save daily snapshot to disk atomically, via write_bytes_to_node
+        (works for both local and remote-node instances, with the old
+        local-only fallback and update hint for pre-3.0.4.28 DCSServerBot).
+        Ensures the .fhc subdirectory exists first — see _save_daily_history
+        for why this is safe to do locally specifically for this subfolder."""
         path = self._get_daily_file(saves_dir)
-        tmp  = path + ".tmp"
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, path)
-        except OSError as e:
-            self.log.error(f"FH_Report: failed to write daily snapshot: {e}")
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+        await write_bytes_to_node(
+            node, path,
+            json.dumps(data, indent=2).encode("utf-8"),
+            log=self.log
+        )
 
-    def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
-                              session_stats_raw: dict, reset_hour: int) -> tuple[dict, dict]:
+    async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
+                              session_stats_raw: dict, reset_hour: int, node) -> tuple[dict, dict]:
         """Compute today's points and today's combat stats for each player by
         comparing current campaign values against the snapshot taken at reset_hour UTC.
         Returns (daily_pts, daily_stats):
@@ -2603,7 +2768,7 @@ class FH_Report(Plugin):
                         "campaign_restart": campaign_restarted,
                         "top": [{"name": n, "points": p} for n, p in top_list],
                     })
-                    self._save_daily_history(saves_dir, history)
+                    await self._save_daily_history(saves_dir, history, node)
 
             # Baseline = current values in every case. This means a missing
             # snapshot file (first install, or an admin manually deleting it
@@ -2658,12 +2823,12 @@ class FH_Report(Plugin):
         # (see the campaign_restarted branch above), since by the time a
         # restart is noticed, campaign_stats itself already belongs to the
         # new campaign and can no longer be used to compute it directly.
-        self._save_daily_snapshot(saves_dir, {
+        await self._save_daily_snapshot(saves_dir, {
             "date":           snap_date if (snap_date and not needs_reset) else today_str,
             "snapshot":       snapshot,
             "stats_snapshot": stats_snapshot,
             "last_daily":     daily,
-        })
+        }, node)
 
         return daily, daily_stats, campaign_restarted
 
@@ -2788,7 +2953,7 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts, daily_stats, campaign_restarted_now = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3151,7 +3316,7 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        daily_pts_all, daily_stats_all, _ = self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour)
+        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node)
         d_pts     = daily_pts_all.get(match, 0)
         d_stats   = daily_stats_all.get(match)
         if d_stats is None:
@@ -3283,7 +3448,7 @@ class FH_Report(Plugin):
             color=0xF1C40F, timestamp=datetime.now(timezone.utc)
         )
         _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text="FH_Report · Read-only historical report")
+        embed.set_footer(text=f"FH_Report · Version {FH_REPORT_RELEASE} · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
