@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "9.5.0"
+FH_REPORT_RELEASE = "9.6.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -510,6 +510,11 @@ _dedup_write_warned: set[str] = set()
 # below is working fine for this (local) instance.
 _old_dcssb_api_warned = False
 
+# Tracks which saves_dir paths have already had their one-time write
+# self-test run this bot session, so it only ever runs once per instance
+# per process lifetime — not on every update cycle.
+_write_self_tested: set[str] = set()
+
 
 async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> bool:
     """Write arbitrary content to `target_path` on `node`, working correctly
@@ -605,6 +610,48 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
         return False
 
 
+async def run_write_self_test(node, saves_dir: str, log=None) -> None:
+    """Proactively verify that write_bytes_to_node actually works for this
+    instance, once per bot session — instead of only discovering a write
+    problem the next time something genuinely needs correcting (a callsign
+    dedup, an inactivity penalty), which could be a long wait and would
+    otherwise surface the failure at an inconvenient, hard-to-reproduce
+    moment. Writes and reads back a tiny throwaway file under saves_dir/.fhc/
+    — never touches anything Foothold itself owns. Reuses the exact same
+    write_bytes_to_node() path real writes use, so this exercises precisely
+    the mechanism we care about, not a separate/parallel check."""
+    if saves_dir in _write_self_tested:
+        return
+    _write_self_tested.add(saves_dir)
+
+    test_path = os.path.join(saves_dir, ".fhc", "fhrep_write_test.tmp")
+    test_content = b"FH_Report write self-test - safe to delete"
+
+    if log:
+        log.debug(f"FH_Report: running one-time write self-test for {saves_dir}")
+
+    ok = await write_bytes_to_node(node, test_path, test_content, log=log)
+    if not ok:
+        # write_bytes_to_node already logged the detailed ERROR/INFO hint
+        # itself — nothing more to do here.
+        return
+
+    try:
+        readback = await node.read_file(test_path)
+        if readback != test_content:
+            if log:
+                log.warning(
+                    f"FH_Report: write self-test for {saves_dir} wrote successfully "
+                    f"but read back different content than expected — file writes "
+                    f"may not be fully reliable for this instance."
+                )
+        elif log:
+            log.debug(f"FH_Report: write self-test for {saves_dir} passed (write + read-back verified)")
+    except Exception as e:
+        if log:
+            log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
+
+
 async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     """Detect and fix duplicate player entries in Foothold_Ranks.lua caused by
     callsign changes. The entry with a UCID in ucidToName is canonical; its
@@ -658,9 +705,30 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
     modified    = False
 
     for base_name, raw_names in duplicates.items():
-        name_with_ucid = next((n for n in raw_names if n in raw_to_ucid), None)
-        if not name_with_ucid:
+        names_with_ucid = [n for n in raw_names if n in raw_to_ucid]
+
+        # Only treat this as "one real person renamed" if EXACTLY ONE raw
+        # name in the group still has a live UCID mapping — the others are
+        # then genuinely orphaned leftovers from a past callsign change,
+        # safe to fold into the live one. If MORE than one raw name has its
+        # own current UCID, these are actually different real players who
+        # simply share the same stripped base name (e.g. a squadron tag
+        # like "82 TF AA") — merging them would silently combine two
+        # distinct players' credits and delete one of their identities.
+        # Confirmed with real data: this exact case (two separate live
+        # UCIDs both ending in "| 82 TF AA") was actually happening.
+        if len(names_with_ucid) != 1:
+            if len(names_with_ucid) > 1:
+                import logging as _lg3
+                _lg3.getLogger(__name__).debug(
+                    f"FH_Report: deduplicate_ranks: '{base_name}' has "
+                    f"{len(names_with_ucid)} raw names each with their own "
+                    f"live UCID ({names_with_ucid}) — treating as distinct "
+                    f"players who share a stripped base name, not a rename. "
+                    f"Skipping merge."
+                )
             continue
+        name_with_ucid = names_with_ucid[0]
 
         canonical     = strip_callsign(name_with_ucid)
         ucid          = raw_to_ucid[name_with_ucid]
@@ -2883,6 +2951,10 @@ class FH_Report(Plugin):
 
         node = server.node
 
+        # One-time-per-instance write self-test — see run_write_self_test()
+        # for why this doesn't wait for a real correction to be needed.
+        await run_write_self_test(node, saves_dir, log=self.log)
+
         persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
             self.log.warning(f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir}")
@@ -3454,3 +3526,4 @@ class FH_Report(Plugin):
 
 async def setup(bot: DCSServerBot):
     await bot.add_cog(FH_Report(bot))
+    logging.getLogger(__name__).info(f"FH_Report v{FH_REPORT_RELEASE} loaded.")
