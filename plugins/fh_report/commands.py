@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "9.6.0"
+FH_REPORT_RELEASE = "9.7.5"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -134,9 +134,16 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
         try:
             await node.read_file(path)
             return path
-        except FileNotFoundError:
+        except OSError:
+            # Covers FileNotFoundError (file genuinely missing) and
+            # TimeoutError (remote agent-node RPC read timed out — reported
+            # by Special K; TimeoutError is a subclass of OSError in Python,
+            # same as FileNotFoundError, so this one except now catches
+            # both uniformly). Either way, fall through to the
+            # list_directory fallback below rather than crashing the whole
+            # update cycle with an unhandled exception.
             pass
-    except FileNotFoundError:
+    except OSError:
         pass
     # Fallback: list directory and find foothold_*.lua candidates
     try:
@@ -1073,6 +1080,18 @@ def _lb_title(points_order: str) -> str:
 
 
 
+
+def _lb_icon(points_order: str) -> str:
+    """Icon matching this points_order's primary table family, used to style
+    a 'Pilots X–Y' continuation title the same way as the table's own
+    visible title (same icon, underlined) instead of plain unstyled text."""
+    if points_order in ("S", "BS", "2S", "3S"):
+        return "📊"
+    if points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS"):
+        return "📅"
+    return "🏆"
+
+
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
 
 
@@ -1667,7 +1686,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         else:  # 2S — primary table is session
             pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
 
-        pilot_lines.append(f"{medal} `{short}` — **{rank}** {pts_str}".rstrip())
+        player_block = [f"{medal} `{short}` — **{rank}** {pts_str}".rstrip()]
         # Pilot career card — shown only when this table is sorted by rank.
         # Data sourced from Foothold_Ranks.lua (historical career totals).
         # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
@@ -1675,21 +1694,21 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         if show_pilot_card and _this_table_is_rank:
             card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
             if card:
-                pilot_lines.append(card)
+                player_block.append(card)
         # Session stats card — shown only when this table is sorted by session.
         # Session-primary modes: S, BS, 2S, 3S (session is the first/only table key)
         _this_table_is_session = points_order in ("S", "BS", "2S", "3S")
         if show_session_card and _this_table_is_session:
             s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
             if s_card:
-                pilot_lines.append(s_card)
+                player_block.append(s_card)
         # Daily stats card — shown only when this table is sorted by daily points.
         # Daily-primary modes: D, BD, BDS, 2D, 3D, 3DS (daily is the first/only table key)
         _this_table_is_daily = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS")
         if show_daily_card and _this_table_is_daily:
             d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
             if d_card:
-                pilot_lines.append(d_card)
+                player_block.append(d_card)
         # Punishment badge — on rank table always; on session table only when S is the only table
         # Badge goes on the table with highest priority R>S>D
         # For single/B modes: always on this (only) table
@@ -1708,7 +1727,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 pts = 0
             badge = get_punishment_badge(pts, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
             if badge:
-                pilot_lines.append(badge)
+                player_block.append(badge)
+        # Each player's full block (main line + any cards/badge) is kept as
+        # ONE list entry, joined internally — this is what guarantees the
+        # chunking logic below can only ever split BETWEEN players, never
+        # inside one, since it operates on whole list entries.
+        pilot_lines.append("\n".join(player_block))
     pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
 
     embed = discord.Embed(
@@ -1748,23 +1772,39 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
 
         FIELD_LIMIT = 1020
         chunks = []
-        current_chunk, current_len = [], 0
+        current_chunk, current_len, current_count = [], 0, 0
+        _is_more_note = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
         for line in pilot_lines:
             line_len = len(line) + 1
             if current_len + line_len > FIELD_LIMIT and current_chunk:
-                chunks.append("\n".join(current_chunk))
+                chunks.append((current_chunk, current_count))
                 current_chunk, current_len = [line], line_len
+                current_count = 0 if _is_more_note(line) else 1
             else:
                 current_chunk.append(line)
                 current_len += line_len
+                if not _is_more_note(line):
+                    current_count += 1
         if current_chunk:
-            chunks.append("\n".join(current_chunk))
-        for i, chunk in enumerate(chunks):
+            chunks.append((current_chunk, current_count))
+        _position = 1
+        for i, (chunk_lines, chunk_count) in enumerate(chunks):
+            chunk = "\n".join(chunk_lines)
+            if i == 0:
+                cont_name = _lb_title(points_order)
+            elif chunk_count > 0:
+                # Turns Discord's field-length limit into useful info instead
+                # of a purely decorative separator: shows which rank
+                # positions this continuation field covers.
+                cont_name = f"{_lb_icon(points_order)} __Pilots {_position}–{_position + chunk_count - 1}__"
+            else:
+                cont_name = "\u200b"
             embed.add_field(
-                name=(_lb_title(points_order)) if i == 0 else ("📊 __Session Leaderboard (cont.)__" if points_order in ('S','BS','2S') else "🎖️ __Leaderboard (cont.)__"),
+                name=(_lb_title(points_order)) if i == 0 else cont_name,
                 value=("\n" + chunk) if i == 0 else chunk,
                 inline=False
             )
+            _position += chunk_count
     elif not (_is_compound and not pilot_lines) and points_order != "P":
         # ── Option A (default): single field, cut at limit, show + X more ─────
         FIELD_LIMIT = 1020
@@ -1796,22 +1836,22 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
             second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
                             if d.get("session_points", 0) > 0]
             second_title = "📊 __Session Leaderboard · by Current Session__"
-            second_cont  = "📊 __Session Leaderboard (cont.)__"
+            second_cont  = "\u200b"
         elif points_order == "2S":
             second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
                             if d.get("credits", 0) > 0]
             second_title = "🏆 __Pilot Leaderboard · by Rank__"
-            second_cont  = "🎖️ __Leaderboard (cont.)__"
+            second_cont  = "\u200b"
         elif points_order == "2D":
             second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
                             if d.get("credits", 0) > 0]
             second_title = "🏆 __Pilot Leaderboard · by Rank__"
-            second_cont  = "🎖️ __Leaderboard (cont.)__"
+            second_cont  = "\u200b"
         else:  # 2DS: second table = session
             second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
                             if d.get("session_points", 0) > 0]
             second_title = "📊 __Session Leaderboard · by Current Session__"
-            second_cont  = "📊 __Session Leaderboard (cont.)__"
+            second_cont  = "\u200b"
 
         if second_items:
             # Use max_pilots_2t + cascade surplus from first table
@@ -1857,19 +1897,19 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 else:  # 2DS second = session
                     pts_part = _s_tri(_ss(), _sr(), _sd())
                 line = f"{s_medal} `{s_short}` — **{s_rank}** {pts_part}".rstrip()
-                second_lines.append(line)
+                s_block = [line]
                 # Pilot career card on second table when second table is rank-ordered
                 _2nd_is_rank = points_order in ("2S", "2D")  # 2nd table = R for these modes
                 if show_pilot_card and _2nd_is_rank:
                     s_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
                     if s_card:
-                        second_lines.append(s_card)
+                        s_block.append(s_card)
                 # Session stats card on second table when second table is session-ordered
                 _2nd_is_session = points_order in ("2R", "2DS")  # 2nd table = S for these modes
                 if show_session_card and _2nd_is_session:
                     s_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
                     if s_sess_card:
-                        second_lines.append(s_sess_card)
+                        s_block.append(s_sess_card)
                 # Punishment badge on second table only for 2S (rank table)
                 # Badge on second table when second table has higher priority than first
                 # 2S: 2nd=R (R>S) ✓  |  2D: 2nd=R (R>D) ✓  |  2DS: 2nd=S (S>D) ✓  |  2R: 2nd=S (R already on 1st) ✗
@@ -1894,7 +1934,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                         s_pts_p = 0
                     s_badge = get_punishment_badge(s_pts_p, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
                     if s_badge:
-                        second_lines.append(s_badge)
+                        s_block.append(s_badge)
+                # Same atomic-block guarantee as the other tables — never
+                # split a player's own lines across chunked fields.
+                second_lines.append("\n".join(s_block))
             if hidden_second > 0:
                 second_lines.append(f"*+ {hidden_second} more pilots*")
 
@@ -1905,23 +1948,38 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 # Split into chunks
                 FIELD_LIMIT = 1020
                 s_chunks, s_current, s_len = [], [], 0
+                s_current_count = 0
+                _is_more_note_s = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
                 for line in second_lines:
                     ll = len(line) + 1
                     if s_len + ll > FIELD_LIMIT and s_current:
-                        s_chunks.append("\n".join(s_current))
+                        s_chunks.append((s_current, s_current_count))
                         s_current, s_len = [line], ll
+                        s_current_count = 0 if _is_more_note_s(line) else 1
                     else:
                         s_current.append(line)
                         s_len += ll
+                        if not _is_more_note_s(line):
+                            s_current_count += 1
                 if s_current:
-                    s_chunks.append("\n".join(s_current))
+                    s_chunks.append((s_current, s_current_count))
 
-                for i, chunk in enumerate(s_chunks):
+                _s_position = 1
+                for i, (s_chunk_lines, s_chunk_count) in enumerate(s_chunks):
+                    chunk = "\n".join(s_chunk_lines)
+                    if i == 0:
+                        s_cont_name = second_title
+                    elif s_chunk_count > 0:
+                        _s_icon = second_title.split(" ", 1)[0]
+                        s_cont_name = f"{_s_icon} __Pilots {_s_position}–{_s_position + s_chunk_count - 1}__"
+                    else:
+                        s_cont_name = second_cont
                     embed.add_field(
-                        name=("\n" + second_title) if i == 0 else second_cont,
+                        name=("\n" + second_title) if i == 0 else s_cont_name,
                         value=("\n" + chunk) if i == 0 else chunk,
                         inline=False
                     )
+                    _s_position += s_chunk_count
 
     # ── 3x modes: add second and third leaderboard ───────────────────────────
     if points_order in ("3R", "3S", "3D", "3DS", "4R", "4DS"):
@@ -1943,9 +2001,9 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 return sorted(players.items(), key=lambda x: dp.get(x[0], 0), reverse=True)
 
         def _title(key: str):
-            if key == "R": return ("🏆 __Pilot Leaderboard · by Rank__", "🎖️ __Leaderboard (cont.)__")
-            if key == "S": return ("📊 __Session Leaderboard · by Current Session__", "📊 __Session Leaderboard (cont.)__")
-            return ("📅 __Daily Leaderboard · by Today's Points__", "📅 __Daily Leaderboard (cont.)__")
+            if key == "R": return ("🏆 __Pilot Leaderboard · by Rank__", "\u200b")
+            if key == "S": return ("📊 __Session Leaderboard · by Current Session__", "\u200b")
+            return ("📅 __Daily Leaderboard · by Today's Points__", "\u200b")
 
         order_map = {
             "3R":  ("S", "D"),
@@ -2026,22 +2084,22 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
-                tbl_lines.append(f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip())
+                t_block = [f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip()]
                 # Pilot career card on third table when this table is rank-ordered
                 if show_pilot_card and tbl_key == "R":
                     t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
                     if t_card:
-                        tbl_lines.append(t_card)
+                        t_block.append(t_card)
                 # Session stats card on third table when this table is session-ordered
                 if show_session_card and tbl_key == "S":
                     t_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
                     if t_sess_card:
-                        tbl_lines.append(t_sess_card)
+                        t_block.append(t_sess_card)
                 # Daily stats card on third table when this table is daily-ordered
                 if show_daily_card and tbl_key == "D":
                     t_daily_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
                     if t_daily_card:
-                        tbl_lines.append(t_daily_card)
+                        t_block.append(t_daily_card)
                 # Badge on this table if its key has highest priority among remaining tables
                 # In 3x: badge goes on R if exists, else S, else D
                 _order_keys_3x = {
@@ -2062,29 +2120,47 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     t_pp   = data.get("hook_punishment") if "hook_punishment" in data else (pp.get(t_ucid, 0) if pp and t_ucid else 0)
                     t_badge = get_punishment_badge(t_pp, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
                     if t_badge:
-                        tbl_lines.append(t_badge)
+                        t_block.append(t_badge)
+                # Same atomic-block guarantee as the main pilot table above —
+                # never split a player's own lines across chunked fields.
+                tbl_lines.append("\n".join(t_block))
             if hidden_tbl > 0:
                 tbl_lines.append(f"*+ {hidden_tbl} more pilots*")
             if not tbl_lines:
                 continue  # skip this table entirely if no data
             FIELD_LIMIT = 1020
             t_chunks, t_cur, t_len = [], [], 0
+            t_cur_count = 0
+            _is_more_note_t = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
             for line in tbl_lines:
                 ll = len(line) + 1
                 if t_len + ll > FIELD_LIMIT and t_cur:
-                    t_chunks.append("\n".join(t_cur))
+                    t_chunks.append((t_cur, t_cur_count))
                     t_cur, t_len = [line], ll
+                    t_cur_count = 0 if _is_more_note_t(line) else 1
                 else:
                     t_cur.append(line)
                     t_len += ll
+                    if not _is_more_note_t(line):
+                        t_cur_count += 1
             if t_cur:
-                t_chunks.append("\n".join(t_cur))
-            for i, chunk in enumerate(t_chunks):
+                t_chunks.append((t_cur, t_cur_count))
+            _t_position = 1
+            for i, (t_chunk_lines, t_chunk_count) in enumerate(t_chunks):
+                chunk = "\n".join(t_chunk_lines)
+                if i == 0:
+                    t_cont_name = tbl_title
+                elif t_chunk_count > 0:
+                    _t_icon = tbl_title.split(" ", 1)[0]
+                    t_cont_name = f"{_t_icon} __Pilots {_t_position}–{_t_position + t_chunk_count - 1}__"
+                else:
+                    t_cont_name = tbl_cont
                 embed.add_field(
-                    name=("\n" + tbl_title) if i == 0 else tbl_cont,
+                    name=("\n" + tbl_title) if i == 0 else t_cont_name,
                     value=("\n" + chunk) if i == 0 else chunk,
                     inline=False
                 )
+                _t_position += t_chunk_count
 
     # ── Podium — standalone mode "P" (fully config-driven) ────────────────
     if points_order == "P":
@@ -2728,10 +2804,11 @@ class FH_Report(Plugin):
         )
 
     async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
-                              session_stats_raw: dict, reset_hour: int, node) -> tuple[dict, dict]:
+                              session_stats_raw: dict, reset_hour: int, node,
+                              persistence_filename: str | None = None) -> tuple[dict, dict, bool]:
         """Compute today's points and today's combat stats for each player by
         comparing current campaign values against the snapshot taken at reset_hour UTC.
-        Returns (daily_pts, daily_stats):
+        Returns (daily_pts, daily_stats, campaign_restarted):
           daily_pts   = {name: daily_points}      — only players with daily_pts > 0
           daily_stats = {name: {stat_key: delta}} — used for the daily card (show_daily_card)
 
@@ -2741,32 +2818,52 @@ class FH_Report(Plugin):
         counter restarts at 0 rather than retroactively counting everything
         accumulated up to that point.
 
-        Campaign restart detection: if both total points and total kills for
-        players common to the snapshot and current data have dropped, a
-        campaign restart is assumed and the snapshot is reset automatically.
+        Mission/map reset handling: a mid-day mission or map change (a new
+        Foothold save file, or the same file wiped in place) must NOT
+        interrupt today's point/stat counting, and is never treated as a
+        Podium-worthy closing event — only the real scheduled reset_hour
+        rollover closes a day and feeds Podium. Detected via any of:
+          (a) the active persistence file's name changed since last cycle
+          (b) campaign_stats/session_stats_raw lost every player that was
+              in the snapshot (the new file started empty)
+          (c) the existing points+kills-both-dropped heuristic (an in-place
+              admin/Foothold reset without a filename change)
+        When any of these fire (and it's not also a real calendar-day
+        reset), today's already-earned points/stats are preserved in a
+        separate 'carry_over' bucket, and the snapshot rebases to the new
+        file's own (usually empty) starting values — so
+        daily = (current - snapshot) + carry_over continues seamlessly
+        across the swap, with no visible interruption and no Podium entry.
         """
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
 
-        snap             = self._load_daily_snapshot(saves_dir)
-        snap_date        = snap.get("date", "")
-        snapshot         = snap.get("snapshot", {})
-        stats_snapshot   = snap.get("stats_snapshot", {})
-        last_daily_saved = snap.get("last_daily", {})
+        snap                = self._load_daily_snapshot(saves_dir)
+        snap_date           = snap.get("date", "")
+        snapshot            = snap.get("snapshot", {})
+        stats_snapshot      = snap.get("stats_snapshot", {})
+        last_daily_saved    = snap.get("last_daily", {})
+        last_daily_stats_saved = snap.get("last_daily_stats", {})
+        carry_over          = snap.get("carry_over", {})
+        stats_carry_over    = snap.get("stats_carry_over", {})
+        last_persistence_fn = snap.get("persistence_filename", "")
 
-        # ── Campaign restart detection ──────────────────────────────────────
+        # ── Mid-day mission/map reset detection (never a Podium event) ─────
+        filename_changed = bool(last_persistence_fn) and bool(persistence_filename) and \
+                            last_persistence_fn != persistence_filename
+        common_with_snapshot = set(snapshot) & set(campaign_stats)
+        data_vanished = bool(snapshot) and not common_with_snapshot
+
+        # ── Campaign restart detection (in-place reset, same file) ─────────
         # Points and kill counts only ever increase during a normal campaign.
         # If both the total points AND total kills (Air + Ground Units) for
         # players common to both the snapshot and current data have dropped
-        # significantly, the campaign has almost certainly been reset (new
-        # map, manual admin reset, etc.) rather than this being a normal
-        # daily fluctuation. Both signals must agree to avoid false positives
-        # from an isolated credit penalty or similar single-player anomaly.
+        # significantly, treat this the same as the other mission-reset
+        # signals above — never a Podium event, daily counts carry over.
         campaign_restarted = False
-        common_names = set(snapshot) & set(campaign_stats)
-        if common_names:
-            snap_pts_sum = sum(snapshot.get(n, 0) for n in common_names)
-            cur_pts_sum  = sum(campaign_stats.get(n, 0) for n in common_names)
+        if common_with_snapshot:
+            snap_pts_sum = sum(snapshot.get(n, 0) for n in common_with_snapshot)
+            cur_pts_sum  = sum(campaign_stats.get(n, 0) for n in common_with_snapshot)
             points_dropped = snap_pts_sum > 0 and cur_pts_sum < snap_pts_sum * 0.5
 
             def _kill_sum(stats_dict, names):
@@ -2776,85 +2873,113 @@ class FH_Report(Plugin):
                     total += s.get("Air", 0) + s.get("Ground Units", 0)
                 return total
 
-            snap_kills_sum = _kill_sum(stats_snapshot, common_names)
-            cur_kills_sum  = _kill_sum(session_stats_raw, common_names)
+            snap_kills_sum = _kill_sum(stats_snapshot, common_with_snapshot)
+            cur_kills_sum  = _kill_sum(session_stats_raw, common_with_snapshot)
             kills_dropped  = snap_kills_sum > 0 and cur_kills_sum < snap_kills_sum
 
             campaign_restarted = points_dropped and kills_dropped
 
-        # Reset if:
-        # - No snapshot exists yet (first run ever, or admin manually deleted
-        #   the snapshot file to force a reset — same handling for both cases)
-        # - Date changed and we're past reset_hour
-        # - A campaign restart was detected (see above)
-        reset_time  = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
-        first_run   = not snap_date
-        needs_reset = first_run or (snap_date != today_str and now_utc >= reset_time) or campaign_restarted
+        mission_reset = filename_changed or data_vanished or campaign_restarted
 
-        if needs_reset:
-            if campaign_restarted:
-                self.log.info(
-                    "FH_Report: campaign restart detected (points and kills both "
-                    "dropped) — daily snapshot reset automatically."
-                )
+        # ── Real calendar-day reset (the only thing that closes a day) ─────
+        reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+        first_run      = not snap_date
+        date_reset_due = (not first_run) and snap_date != today_str and now_utc >= reset_time
 
-            # Capture the ending day's final top-10 into daily_history.json
-            # BEFORE overwriting the snapshot below. Skipped on first_run
-            # since there's no prior day to close. A date can end up with
-            # more than one event if a campaign restart happens on the same
-            # calendar day as the normal reset_hour rollover — both are
-            # appended, never overwriting each other (see Podium feature).
-            #
-            # Two different sources depending on WHY we're resetting:
-            # - Campaign restart: by the time we detect this, campaign_stats
-            #   already reflects the NEW (just-reset) campaign's low values,
-            #   not the old campaign's last totals — computing
-            #   current - old_snapshot would come out negative/zero, which
-            #   is wrong. Instead we use last_daily_saved: the daily totals
-            #   as they stood on the last successful cycle BEFORE the
-            #   restart was noticed (persisted every cycle below), which is
-            #   the closest available approximation (accurate to within one
-            #   update_interval).
-            # - Normal date rollover: campaign_stats still belongs to the
-            #   same ongoing campaign, so current - old_snapshot correctly
-            #   gives the day's final totals.
-            if not first_run:
-                if campaign_restarted:
-                    closing_daily = dict(last_daily_saved)
-                else:
-                    closing_daily = {}
-                    for name, current_pts in campaign_stats.items():
-                        baseline = snapshot.get(name, 0)
-                        delta    = max(0, current_pts - baseline)
-                        if delta > 0:
-                            closing_daily[name] = delta
-                if closing_daily:
-                    top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
-                    history    = self._load_daily_history(saves_dir)
-                    close_date = snap_date or today_str
-                    history.setdefault(close_date, []).append({
-                        "campaign_restart": campaign_restarted,
-                        "top": [{"name": n, "points": p} for n, p in top_list],
-                    })
-                    await self._save_daily_history(saves_dir, history, node)
+        if first_run:
+            # No prior day to close or carry over — start completely fresh.
+            snapshot         = dict(campaign_stats)
+            stats_snapshot   = {name: dict(stats) for name, stats in session_stats_raw.items()}
+            carry_over       = {}
+            stats_carry_over = {}
 
-            # Baseline = current values in every case. This means a missing
-            # snapshot file (first install, or an admin manually deleting it
-            # to force a reset) always starts the daily counter at 0 rather
-            # than retroactively counting everything accumulated so far.
+        elif date_reset_due:
+            reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
+            self.log.debug(f"FH_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
+
+            # Close out the day for Podium — using the CURRENT snapshot/
+            # carry_over (which already correctly reflect any mid-day
+            # mission swaps folded in via the branch below on prior
+            # cycles), so this is accurate even if the day had several
+            # mission changes in it. Falls back to last_daily_saved for
+            # anyone not resolvable via the fresh delta (covers the rare
+            # edge case of a mission swap landing in this exact same cycle
+            # as the date-based reset, before campaign_stats/snapshot could
+            # be reconciled for it).
+            closing_daily = {}
+            for name, current_pts in campaign_stats.items():
+                delta = max(0, current_pts - snapshot.get(name, 0)) + carry_over.get(name, 0)
+                if delta > 0:
+                    closing_daily[name] = delta
+            for name, carried in carry_over.items():
+                if name not in closing_daily and carried > 0:
+                    closing_daily[name] = carried
+            for name, val in last_daily_saved.items():
+                if name not in closing_daily and val > 0:
+                    closing_daily[name] = val
+
+            if closing_daily:
+                top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
+                history    = self._load_daily_history(saves_dir)
+                history.setdefault(snap_date, []).append({
+                    "campaign_restart": False,
+                    "top": [{"name": n, "points": p} for n, p in top_list],
+                })
+                await self._save_daily_history(saves_dir, history, node)
+
+            snapshot         = dict(campaign_stats)
+            stats_snapshot   = {name: dict(stats) for name, stats in session_stats_raw.items()}
+            carry_over       = {}
+            stats_carry_over = {}
+
+        elif mission_reset:
+            # Mid-day mission/map change — never a Podium event. By this
+            # point campaign_stats/session_stats_raw already belong to the
+            # NEW file (often empty), so we can no longer compute "how much
+            # was earned today" via current-minus-old-snapshot — the only
+            # reliable source left is last_daily_saved/last_daily_stats_saved,
+            # persisted every cycle for exactly this reason. Fold that into
+            # carry_over, then rebase the snapshot to the new file so
+            # (current - new_snapshot) + carry_over continues the day
+            # seamlessly with no visible interruption.
+            self.log.debug(
+                f"FH_Report: mid-day mission/map reset detected for {saves_dir} "
+                f"(filename_changed={filename_changed}, data_vanished={data_vanished}, "
+                f"campaign_restarted={campaign_restarted}) — carrying today's totals "
+                f"forward, no Podium entry."
+            )
+            new_carry_over = dict(carry_over)
+            for name, val in last_daily_saved.items():
+                if val > 0:
+                    new_carry_over[name] = max(new_carry_over.get(name, 0), val)
+            carry_over = new_carry_over
+
+            new_stats_carry_over = {name: dict(stats) for name, stats in stats_carry_over.items()}
+            for name, stats in last_daily_stats_saved.items():
+                merged = dict(new_stats_carry_over.get(name, {}))
+                for key, val in stats.items():
+                    if val > merged.get(key, 0):
+                        merged[key] = val
+                if merged:
+                    new_stats_carry_over[name] = merged
+            stats_carry_over = new_stats_carry_over
+
             snapshot       = dict(campaign_stats)
             stats_snapshot = {name: dict(stats) for name, stats in session_stats_raw.items()}
 
-        # Calculate daily point delta for each player
-        # New players not in snapshot get baseline=0 so all their Points count as daily
+        # ── Calculate today's point delta for each player ──────────────────
+        # (snapshot/carry_over above already reflect any resets/carries
+        # that happened this cycle, so this is a single, uniform formula.)
         daily = {}
         for name, current_pts in campaign_stats.items():
-            baseline = snapshot.get(name, 0)
-            delta    = max(0, current_pts - baseline)
+            delta = max(0, current_pts - snapshot.get(name, 0)) + carry_over.get(name, 0)
             if delta > 0:
                 daily[name] = delta
+        for name, carried in carry_over.items():
+            if name not in daily and carried > 0:
+                daily[name] = carried
 
-        # Calculate daily combat stats delta for each player (for the daily card)
+        # ── Calculate today's combat stats delta for each player ───────────
         # A stat key is only trustworthy for a delta if it was already being
         # tracked as of the last snapshot (i.e. present for at least one
         # player in stats_snapshot). If a key appears nowhere in the old
@@ -2873,29 +2998,34 @@ class FH_Report(Plugin):
         daily_stats = {}
         for name, current_stats in session_stats_raw.items():
             baseline_stats = stats_snapshot.get(name, {})
-            delta_stats = {}
+            carried_stats  = stats_carry_over.get(name, {})
+            delta_stats = dict(carried_stats)
             for key, current_val in current_stats.items():
                 if key not in tracked_keys_in_snapshot:
                     continue
                 base_val = baseline_stats.get(key, 0)
                 d = current_val - base_val
                 if d > 0:
-                    delta_stats[key] = d
+                    delta_stats[key] = delta_stats.get(key, 0) + d
             if delta_stats:
                 daily_stats[name] = delta_stats
+        for name, carried_stats in stats_carry_over.items():
+            if name not in daily_stats and carried_stats:
+                daily_stats[name] = dict(carried_stats)
 
         # Persist the snapshot every cycle (not just on reset), always
-        # including 'last_daily' — the freshly computed daily totals for
-        # this cycle. This is what lets a future campaign-restart detection
-        # capture an accurate closing total for the day that just ended
-        # (see the campaign_restarted branch above), since by the time a
-        # restart is noticed, campaign_stats itself already belongs to the
-        # new campaign and can no longer be used to compute it directly.
+        # including 'last_daily' and the carry-over buckets, plus the
+        # current persistence filename (used to detect the next mission
+        # change) and reset markers.
         await self._save_daily_snapshot(saves_dir, {
-            "date":           snap_date if (snap_date and not needs_reset) else today_str,
-            "snapshot":       snapshot,
-            "stats_snapshot": stats_snapshot,
-            "last_daily":     daily,
+            "date":                 today_str if (first_run or date_reset_due) else (snap_date or today_str),
+            "snapshot":             snapshot,
+            "stats_snapshot":       stats_snapshot,
+            "last_daily":           daily,
+            "last_daily_stats":     daily_stats,
+            "carry_over":           carry_over,
+            "stats_carry_over":     stats_carry_over,
+            "persistence_filename": persistence_filename or last_persistence_fn,
         }, node)
 
         return daily, daily_stats, campaign_restarted
@@ -3025,7 +3155,7 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node)
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3388,7 +3518,7 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node)
+        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None)
         d_pts     = daily_pts_all.get(match, 0)
         d_stats   = daily_stats_all.get(match)
         if d_stats is None:
