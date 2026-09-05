@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "9.7.5"
+FH_REPORT_RELEASE = "9.8.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -626,9 +626,37 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     moment. Writes and reads back a tiny throwaway file under saves_dir/.fhc/
     — never touches anything Foothold itself owns. Reuses the exact same
     write_bytes_to_node() path real writes use, so this exercises precisely
-    the mechanism we care about, not a separate/parallel check."""
+    the mechanism we care about, not a separate/parallel check.
+
+    Before attempting anything, actively confirms the save folder itself
+    exists (a read, via list_directory — never assumed from the write
+    failing). If the mission/server has simply never run yet, Foothold
+    hasn't created saves_dir at all, and ANY write into it — ours included —
+    would fail with a plain "path not found", which is not a real write
+    problem at all. That specific, confirmed case is logged at DEBUG (not
+    ERROR) and is NOT marked as tested, so it retries on a later cycle once
+    the folder actually exists. Any other failure while checking (timeout,
+    permission, etc.) is inconclusive — it does NOT get treated as "folder
+    missing", since that could silently mask a real write problem; the
+    self-test proceeds normally in that case instead."""
     if saves_dir in _write_self_tested:
         return
+
+    try:
+        await node.list_directory(saves_dir)
+    except FileNotFoundError:
+        if log:
+            log.debug(
+                f"FH_Report: write self-test skipped for {saves_dir} — the save "
+                f"folder doesn't exist yet (mission/server probably hasn't run "
+                f"yet). Will retry on a later cycle once it exists."
+            )
+        return
+    except Exception:
+        # Inconclusive (timeout, permission issue, etc.) — don't assume the
+        # folder is missing; fall through and run the self-test as normal.
+        pass
+
     _write_self_tested.add(saves_dir)
 
     test_path = os.path.join(saves_dir, ".fhc", "fhrep_write_test.tmp")
@@ -1796,7 +1824,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 # Turns Discord's field-length limit into useful info instead
                 # of a purely decorative separator: shows which rank
                 # positions this continuation field covers.
-                cont_name = f"{_lb_icon(points_order)} __Pilots {_position}–{_position + chunk_count - 1}__"
+                cont_name = f"{_lb_icon(points_order)} __Pilots #{_position}–{_position + chunk_count - 1}__"
             else:
                 cont_name = "\u200b"
             embed.add_field(
@@ -1971,7 +1999,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                         s_cont_name = second_title
                     elif s_chunk_count > 0:
                         _s_icon = second_title.split(" ", 1)[0]
-                        s_cont_name = f"{_s_icon} __Pilots {_s_position}–{_s_position + s_chunk_count - 1}__"
+                        s_cont_name = f"{_s_icon} __Pilots #{_s_position}–{_s_position + s_chunk_count - 1}__"
                     else:
                         s_cont_name = second_cont
                     embed.add_field(
@@ -2152,7 +2180,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     t_cont_name = tbl_title
                 elif t_chunk_count > 0:
                     _t_icon = tbl_title.split(" ", 1)[0]
-                    t_cont_name = f"{_t_icon} __Pilots {_t_position}–{_t_position + t_chunk_count - 1}__"
+                    t_cont_name = f"{_t_icon} __Pilots #{_t_position}–{_t_position + t_chunk_count - 1}__"
                 else:
                     t_cont_name = tbl_cont
                 embed.add_field(
@@ -2805,7 +2833,8 @@ class FH_Report(Plugin):
 
     async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
                               session_stats_raw: dict, reset_hour: int, node,
-                              persistence_filename: str | None = None) -> tuple[dict, dict, bool]:
+                              persistence_filename: str | None = None,
+                              name_to_ucid: dict | None = None) -> tuple[dict, dict, bool]:
         """Compute today's points and today's combat stats for each player by
         comparing current campaign values against the snapshot taken at reset_hour UTC.
         Returns (daily_pts, daily_stats, campaign_restarted):
@@ -2817,6 +2846,18 @@ class FH_Report(Plugin):
         is always treated as a fresh baseline (current values), so the daily
         counter restarts at 0 rather than retroactively counting everything
         accumulated up to that point.
+
+        Mid-campaign callsign-change reconciliation: Foothold's playerStats
+        is keyed by in-game name, not UCID — so a player who changes callsign
+        mid-campaign gets a BRAND NEW playerStats entry under the new name,
+        with no history at all under it. Left unhandled, this would look
+        exactly like a new player joining, and their entire accumulated
+        total under the new name would be misattributed as "today's gain"
+        the moment it first appears (name_to_ucid, built from the already-
+        parsed Foothold_Ranks.lua data, is used to detect this: if a name
+        that's new to our snapshot shares a UCID with a name we already had
+        tracked, it's a rename, not a new player, and today's already-earned
+        total is carried across to the new name automatically).
 
         Mission/map reset handling: a mid-day mission or map change (a new
         Foothold save file, or the same file wiped in place) must NOT
@@ -2847,6 +2888,44 @@ class FH_Report(Plugin):
         carry_over          = snap.get("carry_over", {})
         stats_carry_over    = snap.get("stats_carry_over", {})
         last_persistence_fn = snap.get("persistence_filename", "")
+        name_to_ucid_snapshot = snap.get("name_to_ucid", {})
+
+        # ── Mid-campaign callsign-change reconciliation ─────────────────────
+        # See docstring above. Runs BEFORE mission-reset detection since a
+        # single rename shouldn't be confused with one (other players' names
+        # still overlap fine with the snapshot in that case).
+        if name_to_ucid and name_to_ucid_snapshot:
+            ucid_to_old_name = {u: n for n, u in name_to_ucid_snapshot.items() if u}
+            for new_name in list(campaign_stats.keys()):
+                if new_name in snapshot:
+                    continue  # already tracked under this exact name
+                new_ucid = name_to_ucid.get(new_name)
+                if not new_ucid:
+                    continue
+                old_name = ucid_to_old_name.get(new_ucid)
+                if not old_name or old_name == new_name or old_name in campaign_stats:
+                    # No match, no-op rename, or the "old" name is still
+                    # present in playerStats too (so it's genuinely a
+                    # different, unrelated player, not a rename) — skip.
+                    continue
+                migrated_pts = last_daily_saved.get(old_name, 0)
+                if migrated_pts > 0:
+                    carry_over[new_name] = carry_over.get(new_name, 0) + migrated_pts
+                migrated_stats = last_daily_stats_saved.get(old_name, {})
+                if migrated_stats:
+                    merged = dict(stats_carry_over.get(new_name, {}))
+                    for key, val in migrated_stats.items():
+                        if val > merged.get(key, 0):
+                            merged[key] = val
+                    stats_carry_over[new_name] = merged
+                snapshot[new_name] = campaign_stats[new_name]
+                if new_name in session_stats_raw:
+                    stats_snapshot[new_name] = dict(session_stats_raw[new_name])
+                self.log.info(
+                    f"FH_Report: detected a mid-campaign callsign change for "
+                    f"{saves_dir}: '{old_name}' -> '{new_name}' (same UCID) — "
+                    f"today's totals carried over to the new name."
+                )
 
         # ── Mid-day mission/map reset detection (never a Podium event) ─────
         filename_changed = bool(last_persistence_fn) and bool(persistence_filename) and \
@@ -3026,6 +3105,7 @@ class FH_Report(Plugin):
             "carry_over":           carry_over,
             "stats_carry_over":     stats_carry_over,
             "persistence_filename": persistence_filename or last_persistence_fn,
+            "name_to_ucid":         {**name_to_ucid_snapshot, **(name_to_ucid or {})},
         }, node)
 
         return daily, daily_stats, campaign_restarted
@@ -3155,7 +3235,7 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None)
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, {n: d.get("ucid") for n, d in players.items() if d.get("ucid")})
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3518,7 +3598,7 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None)
+        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, {n: d.get("ucid") for n, d in players.items() if d.get("ucid")})
         d_pts     = daily_pts_all.get(match, 0)
         d_stats   = daily_stats_all.get(match)
         if d_stats is None:
@@ -3656,4 +3736,4 @@ class FH_Report(Plugin):
 
 async def setup(bot: DCSServerBot):
     await bot.add_cog(FH_Report(bot))
-    logging.getLogger(__name__).info(f"FH_Report v{FH_REPORT_RELEASE} loaded.")
+    logging.getLogger(__name__).info(f"  => FH_Report v{FH_REPORT_RELEASE} loaded.")
