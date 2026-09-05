@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "9.8.0"
+FH_REPORT_RELEASE = "10.0.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -292,22 +292,52 @@ async def parse_zones(filepath: str, node) -> dict:
     return zones
 
 
-async def parse_player_stats(filepath: str, node) -> tuple[dict, dict]:
+async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
     """Parse playerStats from Foothold persistence file.
-    Returns (campaign_stats, session_stats_raw):
+    Returns (campaign_stats, session_stats_raw, name_to_ucid):
       campaign_stats    = {player_name: points}  (unchanged contract)
       session_stats_raw = {player_name: {stat_key: value}} — used for the
                            session card (show_session_card). Excludes
-                           Points/Points spent."""
+                           Points/Points spent.
+      name_to_ucid      = {player_name: ucid}
+
+    Foothold 4.9.1+ restructured playerStats to be keyed by UCID directly
+    (with "name" and a nested "stats" sub-table inside each block),
+    replacing the older name-keyed structure with stats stored inline.
+    zonePersistance["playerStatsIdentityVersion"] tells us which is
+    present:
+      nil -> old format (name-keyed, stats inline, no UCID info at all in
+             this file — name_to_ucid comes back empty, caller falls back
+             to cross-referencing Foothold_Ranks.lua)
+      1   -> new format (UCID-keyed; name_to_ucid is built for free from
+             the block's own keys, no separate lookup table needed)
+      anything else -> a future format not understood yet; skip this file
+             and warn once rather than risk misparsing it.
+    Same one-time-migration guarantee as parse_ranks (see its docstring) —
+    no migration logic needed on our side, just per-read format detection."""
     try:
         data = await node.read_file(filepath)
         content = data.decode("utf-8")
+
+        version_m = re.search(r'zonePersistance\[["\']playerStatsIdentityVersion["\']\]\s*=\s*(\d+)', content)
+        version = int(version_m.group(1)) if version_m else None
+
+        if version is not None and version != 1:
+            if filepath not in _unsupported_version_warned:
+                _unsupported_version_warned.add(filepath)
+                logging.getLogger(__name__).warning(
+                    f"FH_Report: {filepath} reports playerStatsIdentityVersion={version}, "
+                    f"which this version of FH_Report doesn't understand yet — "
+                    f"please update FH_Report. Skipping this file for now."
+                )
+            return {}, {}, {}
+
         stats_match = re.search(
             r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{",
             content
         )
         if not stats_match:
-            return {}, {}
+            return {}, {}, {}
         # Use brace counting to extract the full playerStats block robustly,
         # regardless of inconsistent indentation in the Lua file.
         start  = stats_match.end()
@@ -322,38 +352,102 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict]:
         block   = content[start:pos - 1]
         results = {}
         raw_all = {}
-        # Find each player entry by name key
-        for m in re.finditer(r"\[[\"']([^\"']+)[\"']\]\s*=\s*\{", block):
-            name      = m.group(1)
-            blk_start = m.end()
-            # Count braces to find end of this player's block
-            d = 1
-            i = blk_start
-            while i < len(block) and d > 0:
-                if block[i] == "{":
-                    d += 1
-                elif block[i] == "}":
-                    d -= 1
-                i += 1
-            player_block = block[blk_start:i - 1]
-            pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', player_block)
-            if not pts_m:
-                continue
-            results[name] = int(pts_m.group(1))
-            # Extract all raw key/value stat pairs (excluding Points — shown
-            # separately as Rank/Session/Daily Points; "Points spent" is kept,
-            # it's a genuine combat/economy stat shown in the full-detail
-            # Session/Daily Stats sections of /fh_report player)
-            raw_stats = {}
-            for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', player_block):
-                key, val = sm.group(1), sm.group(2)
-                if key == "Points":
+        name_to_ucid: dict = {}
+
+        if version is None:
+            # ── Old format: name-keyed, stats inline in the player block ──
+            for m in re.finditer(r"\[[\"']([^\"']+)[\"']\]\s*=\s*\{", block):
+                name      = m.group(1)
+                blk_start = m.end()
+                d = 1
+                i = blk_start
+                while i < len(block) and d > 0:
+                    if block[i] == "{":
+                        d += 1
+                    elif block[i] == "}":
+                        d -= 1
+                    i += 1
+                player_block = block[blk_start:i - 1]
+                pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', player_block)
+                if not pts_m:
                     continue
-                raw_stats[key] = float(val) if "." in val else int(val)
-            raw_all[name] = raw_stats
-        return results, raw_all
+                results[name] = int(pts_m.group(1))
+                raw_stats = {}
+                for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', player_block):
+                    key, val = sm.group(1), sm.group(2)
+                    if key == "Points":
+                        continue
+                    raw_stats[key] = float(val) if "." in val else int(val)
+                raw_all[name] = raw_stats
+
+            # Native ucidToName may still be present as a supplementary
+            # table even in an old-format file (an interim Foothold step) —
+            # use it opportunistically if so, costs nothing if absent.
+            ucid_match = re.search(
+                r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{",
+                content
+            )
+            if ucid_match:
+                u_start = ucid_match.end()
+                u_depth = 1
+                u_pos   = u_start
+                while u_pos < len(content) and u_depth > 0:
+                    if content[u_pos] == "{":
+                        u_depth += 1
+                    elif content[u_pos] == "}":
+                        u_depth -= 1
+                    u_pos += 1
+                ucid_block = content[u_start:u_pos - 1]
+                for um in re.finditer(r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]", ucid_block):
+                    name_to_ucid[um.group(2)] = um.group(1)
+
+        else:
+            # ── New format (4.9.1+): UCID-keyed, name + nested "stats" ────
+            for m in re.finditer(r"\[[\"']([a-f0-9]{32})[\"']\]\s*=\s*\{", block):
+                ucid      = m.group(1)
+                blk_start = m.end()
+                d = 1
+                i = blk_start
+                while i < len(block) and d > 0:
+                    if block[i] == "{":
+                        d += 1
+                    elif block[i] == "}":
+                        d -= 1
+                    i += 1
+                player_block = block[blk_start:i - 1]
+
+                name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', player_block)
+                if not name_m:
+                    continue
+                name = name_m.group(1)
+
+                stats_m = re.search(r'\[(?:"stats"|\'stats\')\]\s*=\s*\{', player_block)
+                if not stats_m:
+                    continue
+                sb = player_block.find('{', stats_m.end() - 1)
+                sd, sj = 1, sb + 1
+                while sj < len(player_block) and sd > 0:
+                    if player_block[sj] == '{': sd += 1
+                    elif player_block[sj] == '}': sd -= 1
+                    sj += 1
+                stats_block = player_block[sb + 1:sj - 1]
+
+                pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', stats_block)
+                if not pts_m:
+                    continue
+                results[name] = int(pts_m.group(1))
+                raw_stats = {}
+                for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', stats_block):
+                    key, val = sm.group(1), sm.group(2)
+                    if key == "Points":
+                        continue
+                    raw_stats[key] = float(val) if "." in val else int(val)
+                raw_all[name] = raw_stats
+                name_to_ucid[name] = ucid
+
+        return results, raw_all, name_to_ucid
     except Exception:
-        return {}, {}
+        return {}, {}, {}
 
 
 async def hot_write_waypoints(server) -> None:
@@ -405,98 +499,177 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
     return result
 
 
+_unsupported_version_warned: set[str] = set()
+
+
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
-    """Parse Foothold_Ranks.lua. Returns pilot dict sorted by credits desc.
-    Pilots whose UCID is in excluded_ucids are omitted."""
+    """Parse Foothold_Ranks.lua. Returns pilot dict sorted by credits desc,
+    keyed by name (unchanged contract) regardless of which on-disk format
+    was used. Pilots whose UCID is in excluded_ucids are omitted.
+
+    Foothold 4.9.1+ restructured this file to key RankSave["players"] by
+    UCID directly (with "name" nested inside each block), replacing the
+    older name-keyed structure + separate RankSave["ucidToName"] lookup
+    table. Confirmed with Leka: RankSave["playerIdentityVersion"] (NOT the
+    unrelated, pre-existing RankSave["version"], which tracks career-rank
+    data separately) tells us which structure is present:
+      nil       -> old format (name-keyed, needs ucidToName to resolve UCID)
+      1 or 2    -> new format (UCID-keyed; name/credits/career live inside
+                   each UCID's own block — no ucidToName needed at all)
+      anything else -> a future format we don't understand yet; skip this
+                   file entirely rather than risk misparsing it, and warn
+                   once that FH_Report needs updating.
+    Foothold itself migrates an old-format file to the new one exactly
+    once, in memory, the first time it loads with an updated Foothold —
+    every subsequent save is internally consistent for whichever version
+    it reports, so a per-read version check here is sufficient; FH_Report
+    never needs to perform or track any migration of its own."""
     data = await node.read_file(filepath)
     content = data.decode("utf-8")
-    # Build set of excluded player names from ucidToName table
-    excluded_names: set[str] = set()
-    for ucid in excluded_ucids:
-        m = re.search(rf"\['{re.escape(ucid)}'\]=\"([^\"]+)\"", content)
-        if m:
-            excluded_names.add(m.group(1))
 
-    # Build name->ucid mapping from ucidToName table
-    name_to_ucid = {}
-    ucid_pattern = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]=[\'\"]([^\'\"]+)[\'\"]"
-    for ucid_m in re.finditer(ucid_pattern, content):
-        name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
+    version_m = re.search(r'RankSave\[["\']playerIdentityVersion["\']\]\s*=\s*(\d+)', content)
+    version = int(version_m.group(1)) if version_m else None
+
+    if version is not None and version not in (1, 2):
+        if filepath not in _unsupported_version_warned:
+            _unsupported_version_warned.add(filepath)
+            logging.getLogger(__name__).warning(
+                f"FH_Report: {filepath} reports playerIdentityVersion={version}, "
+                f"which this version of FH_Report doesn't understand yet — "
+                f"please update FH_Report. Skipping this file for now."
+            )
+        return {}
 
     players = {}
 
-    # Find the players block first using brace counting
-    players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
-    if not players_start:
-        return {}
-    bs = content.find('{', players_start.end() - 1)
-    depth, j = 1, bs + 1
-    while j < len(content) and depth > 0:
-        if content[j] == '{': depth += 1
-        elif content[j] == '}': depth -= 1
-        j += 1
-    players_block = content[bs + 1:j - 1]
+    if version is None:
+        # ── Old format: name-keyed, separate ucidToName lookup ────────────
+        excluded_names: set[str] = set()
+        for ucid in excluded_ucids:
+            m = re.search(rf"\['{re.escape(ucid)}'\]=\"([^\"]+)\"", content)
+            if m:
+                excluded_names.add(m.group(1))
 
-    # Extract each player using brace counting — handles nested sub-tables
-    # introduced in Foothold v4.5 (career, aircraft fields)
-    pos = 0
-    while pos < len(players_block):
-        km = re.search(r'\[["\']([^"\']+)["\']\]=\{', players_block[pos:])
-        if not km:
-            break
-        name = km.group(1)
-        brace_pos = pos + km.end() - 1
-        depth2, k = 1, brace_pos + 1
-        while k < len(players_block) and depth2 > 0:
-            if players_block[k] == '{': depth2 += 1
-            elif players_block[k] == '}': depth2 -= 1
-            k += 1
-        block = players_block[brace_pos + 1:k - 1]
-        pos = pos + km.start() + 1
+        name_to_ucid = {}
+        ucid_pattern = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]=[\'\"]([^\'\"]+)[\'\"]"
+        for ucid_m in re.finditer(ucid_pattern, content):
+            name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
 
-        credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
-        if not credit_m:
-            continue
-        clean_name = name.strip()
-        if not clean_name or len(clean_name) < 2:
-            continue
-        if clean_name in excluded_names:
-            continue
+        players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
+        if not players_start:
+            return {}
+        bs = content.find('{', players_start.end() - 1)
+        depth, j = 1, bs + 1
+        while j < len(content) and depth > 0:
+            if content[j] == '{': depth += 1
+            elif content[j] == '}': depth -= 1
+            j += 1
+        players_block = content[bs + 1:j - 1]
 
-        # Extract career stats (Foothold v4.5+)
-        # CAREER_STAT IDs: FlightSeconds=1, HelicopterSeconds=3,
-        # TotalKills=10, ConventionalCarrierTraps=8,
-        # FuelReceivedLbs=30, PilotDeaths=21
-        career: dict = {}
-        career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
-        if career_m:
-            cb = block.find('{', career_m.end() - 1)
-            cd, cj = 1, cb + 1
-            while cj < len(block) and cd > 0:
-                if block[cj] == '{': cd += 1
-                elif block[cj] == '}': cd -= 1
-                cj += 1
-            career_block = block[cb + 1:cj - 1]
-            for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
-                career[int(cm.group(1))] = float(cm.group(2))
+        pos = 0
+        while pos < len(players_block):
+            km = re.search(r'\[["\']([^"\']+)["\']\]=\{', players_block[pos:])
+            if not km:
+                break
+            name = km.group(1)
+            brace_pos = pos + km.end() - 1
+            depth2, k = 1, brace_pos + 1
+            while k < len(players_block) and depth2 > 0:
+                if players_block[k] == '{': depth2 += 1
+                elif players_block[k] == '}': depth2 -= 1
+                k += 1
+            block = players_block[brace_pos + 1:k - 1]
+            pos = pos + km.start() + 1
 
-        # Extract aircraft stats — sum flight seconds across all aircraft types
-        aircraft_helo_seconds = 0.0
-        aircraft_m = re.search(r'\[(?:"aircraft"|\'aircraft\')\]\s*=\s*\{', block)
-        if aircraft_m:
-            ab = block.find('{', aircraft_m.end() - 1)
-            ad, aj = 1, ab + 1
-            while aj < len(block) and ad > 0:
-                if block[aj] == '{': ad += 1
-                elif block[aj] == '}': ad -= 1
-                aj += 1
-            # We don't parse individual aircraft here — helo time comes from career[3]
+            credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
+            if not credit_m:
+                continue
+            clean_name = name.strip()
+            if not clean_name or len(clean_name) < 2:
+                continue
+            if clean_name in excluded_names:
+                continue
 
-        players[clean_name] = {
-            "credits": float(credit_m.group(1)),
-            "ucid":    name_to_ucid.get(clean_name),
-            "career":  career,
-        }
+            career: dict = {}
+            career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
+            if career_m:
+                cb = block.find('{', career_m.end() - 1)
+                cd, cj = 1, cb + 1
+                while cj < len(block) and cd > 0:
+                    if block[cj] == '{': cd += 1
+                    elif block[cj] == '}': cd -= 1
+                    cj += 1
+                career_block = block[cb + 1:cj - 1]
+                for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+                    career[int(cm.group(1))] = float(cm.group(2))
+
+            players[clean_name] = {
+                "credits": float(credit_m.group(1)),
+                "ucid":    name_to_ucid.get(clean_name),
+                "career":  career,
+            }
+
+    else:
+        # ── New format (4.9.1+): UCID-keyed, name/credits/career inline ───
+        # No ucidToName lookup needed at all — the UCID is already the
+        # block's own key, and "name" lives inside the same block.
+        players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
+        if not players_start:
+            return {}
+        bs = content.find('{', players_start.end() - 1)
+        depth, j = 1, bs + 1
+        while j < len(content) and depth > 0:
+            if content[j] == '{': depth += 1
+            elif content[j] == '}': depth -= 1
+            j += 1
+        players_block = content[bs + 1:j - 1]
+
+        pos = 0
+        while pos < len(players_block):
+            km = re.search(r'\[["\']([a-f0-9]{32})["\']\]=\{', players_block[pos:])
+            if not km:
+                break
+            ucid = km.group(1)
+            brace_pos = pos + km.end() - 1
+            depth2, k = 1, brace_pos + 1
+            while k < len(players_block) and depth2 > 0:
+                if players_block[k] == '{': depth2 += 1
+                elif players_block[k] == '}': depth2 -= 1
+                k += 1
+            block = players_block[brace_pos + 1:k - 1]
+            pos = pos + km.start() + 1
+
+            if ucid in excluded_ucids:
+                continue
+
+            credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
+            if not credit_m:
+                continue
+            name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', block)
+            if not name_m:
+                continue
+            clean_name = name_m.group(1).strip()
+            if not clean_name or len(clean_name) < 2:
+                continue
+
+            career: dict = {}
+            career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
+            if career_m:
+                cb = block.find('{', career_m.end() - 1)
+                cd, cj = 1, cb + 1
+                while cj < len(block) and cd > 0:
+                    if block[cj] == '{': cd += 1
+                    elif block[cj] == '}': cd -= 1
+                    cj += 1
+                career_block = block[cb + 1:cj - 1]
+                for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+                    career[int(cm.group(1))] = float(cm.group(2))
+
+            players[clean_name] = {
+                "credits": float(credit_m.group(1)),
+                "ucid":    ucid,
+                "career":  career,
+            }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
@@ -623,10 +796,15 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     problem the next time something genuinely needs correcting (a callsign
     dedup, an inactivity penalty), which could be a long wait and would
     otherwise surface the failure at an inconvenient, hard-to-reproduce
-    moment. Writes and reads back a tiny throwaway file under saves_dir/.fhc/
-    — never touches anything Foothold itself owns. Reuses the exact same
-    write_bytes_to_node() path real writes use, so this exercises precisely
-    the mechanism we care about, not a separate/parallel check.
+    moment. Writes, reads back, then deletes a tiny throwaway file directly
+    under saves_dir — never touches anything Foothold itself owns, and
+    matches deduplicate_ranks's own write location (our most frequent real
+    write), rather than saves_dir/.fhc/ (which wouldn't exist yet for an
+    instance that hasn't triggered daily-tracking's own .fhc creation, and
+    would leave a needless empty folder behind for instances that never
+    do). Reuses the exact same write_bytes_to_node() path real writes use,
+    so this exercises precisely the mechanism we care about, not a
+    separate/parallel check.
 
     Before attempting anything, actively confirms the save folder itself
     exists (a read, via list_directory — never assumed from the write
@@ -659,7 +837,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
 
     _write_self_tested.add(saves_dir)
 
-    test_path = os.path.join(saves_dir, ".fhc", "fhrep_write_test.tmp")
+    test_path = os.path.join(saves_dir, "fhrep_write_test.tmp")
     test_content = b"FH_Report write self-test - safe to delete"
 
     if log:
@@ -685,6 +863,15 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     except Exception as e:
         if log:
             log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
+
+    # Best-effort cleanup — only works for local/master nodes (no confirmed
+    # remote-delete API exists on `node`, and we don't invent one just for
+    # this). A leftover test file on a genuinely remote node is harmless;
+    # not worth a whole new mechanism just to remove it there too.
+    try:
+        os.remove(test_path)
+    except OSError:
+        pass
 
 
 async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
@@ -1454,7 +1641,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     embed.add_field(name="\u200b", value="─" * 32, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
-    embed.set_footer(text=f"FH_Report · Version {FH_REPORT_RELEASE} · Read-only player report")
+    embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only player report")
     return embed
 
 
@@ -2207,7 +2394,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    footer_lines = [f"FH_Report · Version {FH_REPORT_RELEASE}"]
+    footer_lines = [f"FH_Report {FH_REPORT_RELEASE}"]
     if player_cmd_hint:
         footer_lines.append(player_cmd_hint)
     footer_lines.append(f"{campaign_name} • Updated automatically")
@@ -3192,7 +3379,7 @@ class FH_Report(Plugin):
             excluded_ucids = cfg.get("excluded_ucids") or []
             zones          = await parse_zones(persistence_file, node)
             players        = {} if ranks_missing else await parse_ranks(ranks_file, excluded_ucids, node)
-            campaign_stats, session_stats_raw = await parse_player_stats(persistence_file, node)
+            campaign_stats, session_stats_raw, name_to_ucid_native = await parse_player_stats(persistence_file, node)
         except Exception as e:
             self.log.error(f"FH_Report [{instance_name}]: error parsing data: {e}")
             return
@@ -3235,7 +3422,22 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, {n: d.get("ucid") for n, d in players.items() if d.get("ucid")})
+            # Prefer the native ucidToName from THIS SAME file (Foothold
+            # 4.9.1+ — confirmed with Leka, lives right alongside
+            # playerStats). Falls back to cross-referencing the already-
+            # parsed Foothold_Ranks.lua data (older Foothold versions that
+            # don't have this field in the mission progress file yet).
+            name_to_ucid_fallback = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
+            # Merge per-player, not "pick one source entirely" — during a
+            # transition period right after updating Foothold to 4.9.1+,
+            # players already in playerStats from BEFORE the update may not
+            # yet have an entry in the native ucidToName table (only
+            # populated for them once they reconnect). Native takes
+            # priority per-name where available; the older Ranks-based
+            # cross-reference still fills in anyone the native table
+            # doesn't have yet, instead of being discarded wholesale.
+            name_to_ucid = {**name_to_ucid_fallback, **name_to_ucid_native}
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3522,7 +3724,7 @@ class FH_Report(Plugin):
 
             excluded_ucids = cfg.get("excluded_ucids") or []
             players        = await parse_ranks(ranks_file, excluded_ucids, node)
-            campaign_stats, session_stats_raw = await parse_player_stats(persistence_file, node)
+            campaign_stats, session_stats_raw, name_to_ucid_native = await parse_player_stats(persistence_file, node)
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
             return
@@ -3598,7 +3800,17 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, {n: d.get("ucid") for n, d in players.items() if d.get("ucid")})
+        name_to_ucid_fallback = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
+        # Merge per-player, not "pick one source entirely" — during a
+        # transition period right after updating Foothold to 4.9.1+,
+        # players already in playerStats from BEFORE the update may not
+        # yet have an entry in the native ucidToName table (only
+        # populated for them once they reconnect). Native takes
+        # priority per-name where available; the older Ranks-based
+        # cross-reference still fills in anyone the native table
+        # doesn't have yet, instead of being discarded wholesale.
+        name_to_ucid = {**name_to_ucid_fallback, **name_to_ucid_native}
+        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
         d_pts     = daily_pts_all.get(match, 0)
         d_stats   = daily_stats_all.get(match)
         if d_stats is None:
@@ -3730,7 +3942,7 @@ class FH_Report(Plugin):
             color=0xF1C40F, timestamp=datetime.now(timezone.utc)
         )
         _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"FH_Report · Version {FH_REPORT_RELEASE} · Read-only historical report")
+        embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
