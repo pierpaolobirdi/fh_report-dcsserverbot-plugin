@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "10.0.0"
+FH_REPORT_RELEASE = "10.0.5"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -500,6 +500,7 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
 
 
 _unsupported_version_warned: set[str] = set()
+_unmatched_instance_warned: set[str] = set()
 
 
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
@@ -1188,6 +1189,17 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                 display = strip_callsign(name) if strip_callsign_flag else name
                 short   = display.replace("`", "")
                 player_data = players.get(name)
+                if not player_data:
+                    # No exact-name match — playerStats/history may record
+                    # the name without the flight-callsign prefix that
+                    # Foothold_Ranks.lua (and therefore `players`) carries,
+                    # or vice versa. Fall back to a callsign-stripped
+                    # comparison, same as the Session/Daily leaderboard
+                    # lookups above, before giving up on a rank entirely.
+                    for p_name, p_data in players.items():
+                        if strip_callsign(p_name) == strip_callsign(name):
+                            player_data = p_data
+                            break
                 if player_data:
                     rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
                     rank_part = f" — **{rank}**"
@@ -2617,6 +2629,25 @@ class FH_Report(Plugin):
 
         raw          = self.locals or {}
         default_cfg  = raw.get("DEFAULT") or {}
+
+        # Warn (once per key) about any fh_report.yaml server block whose key
+        # doesn't match any currently-registered DCSServerBot instance name —
+        # a common config mistake (e.g. copying the "DCS_Server" example
+        # verbatim instead of the actual instance name from nodes.yaml) that
+        # otherwise fails completely silently: the loop below just skips it
+        # forever with no log trace at all, and the mismatch was previously
+        # only ever surfaced by the /fh_report player command's own check.
+        live_instance_names = {server.instance.name for server in self.bot.servers.values()}
+        for cfg_key in raw.keys():
+            if cfg_key == "DEFAULT" or cfg_key in live_instance_names:
+                continue
+            if cfg_key not in _unmatched_instance_warned:
+                _unmatched_instance_warned.add(cfg_key)
+                self.log.warning(
+                    f"FH_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
+                    f"any configured DCSServerBot instance name — check the instance name "
+                    f"in nodes.yaml. This server block will be skipped until fixed."
+                )
 
         # Iterate all DCSSB servers — same pattern as Pretense.
         # Config is looked up by instance name (the key used in fh_report.yaml)
