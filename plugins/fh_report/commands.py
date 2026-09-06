@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "10.0.5"
+FH_REPORT_RELEASE = "10.1.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1187,7 +1187,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     continue
                 marker  = medals[idx] if idx < 3 else "🎖️"
                 display = strip_callsign(name) if strip_callsign_flag else name
-                short   = display.replace("`", "")
+                short   = display.replace("`", "\\`")
                 player_data = players.get(name)
                 if not player_data:
                     # No exact-name match — playerStats/history may record
@@ -1862,7 +1862,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         rank    = get_rank(credits)
         medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
         display = strip_callsign(name) if strip_callsign_flag else name
-        short   = display.replace('`', '') if len(display) <= 22 else display[:20].replace('`', '') + '..'
+        short   = display.replace('`', '\\`') if len(display) <= 22 else display[:20].replace('`', '\\`') + '..'
         # Hook overrides
         rank    = data.get("custom_rank") or rank
         hide_credits = data.get("hide_credits", False)
@@ -2096,7 +2096,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 s_credits = int(data["credits"])
                 s_rank    = data.get("custom_rank") or get_rank(s_credits)
                 s_display = strip_callsign(name) if strip_callsign_flag else name
-                s_short   = s_display.replace('`', '') if len(s_display) <= 22 else s_display[:20].replace('`', '') + '..'
+                s_short   = s_display.replace('`', '\\`') if len(s_display) <= 22 else s_display[:20].replace('`', '\\`') + '..'
                 s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
                 s_pts        = data.get("session_points", 0)
                 s_hide       = data.get("hide_credits", False)
@@ -2291,7 +2291,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 t_credits = int(data["credits"])
                 t_rank    = data.get("custom_rank") or get_rank(t_credits)
                 t_display = strip_callsign(name) if strip_callsign_flag else name
-                t_short   = t_display.replace('`', '') if len(t_display) <= 22 else t_display[:20].replace('`', '') + '..'
+                t_short   = t_display.replace('`', '\\`') if len(t_display) <= 22 else t_display[:20].replace('`', '\\`') + '..'
                 t_medal   = data.get("custom_medal") or (t_medals[i] if i < len(t_medals) else "•")
                 t_pts     = data.get("session_points", 0)
                 t_hide    = data.get("hide_credits", False)
