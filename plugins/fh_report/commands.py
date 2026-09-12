@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "10.1.0"
+FH_REPORT_RELEASE = "10.2.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1076,7 +1076,42 @@ def strip_callsign(name: str) -> str:
     return name.strip()
 
 
-# ── Punishment thresholds ─────────────────────────────────────────────────────
+def _safe_code_span(text: str) -> str:
+    """Wrap arbitrary text in a Markdown code span that is guaranteed to
+    render correctly no matter what characters it contains — backticks,
+    backslashes, quotes, asterisks, underscores, tildes, pipes, etc.
+
+    A Markdown/Discord code span does not interpret ANY formatting or
+    backslash-escapes inside it — the only character that matters is the
+    backtick itself, because a run of N backticks closes a fence opened by
+    a run of N (or fewer) backticks. Per the CommonMark rule, using a fence
+    one backtick longer than the longest run of consecutive backticks found
+    inside the content makes it impossible for the content to accidentally
+    close the span early — regardless of anything else it contains.
+
+    A single padding space is added on each side when the content starts or
+    ends with a backtick (or is empty/whitespace-only), matching the
+    CommonMark convention, so the fence never visually merges with it.
+    Ordinary names (the overwhelming majority) are unaffected: they get the
+    same single-backtick wrap as before.
+    """
+    if text is None:
+        text = ""
+    longest_run = 0
+    current = 0
+    for ch in text:
+        if ch == "`":
+            current += 1
+            longest_run = max(longest_run, current)
+        else:
+            current = 0
+    fence = "`" * (longest_run + 1)
+    if text.startswith("`") or text.endswith("`") or text.strip() == "":
+        text = f" {text} "
+    return f"{fence}{text}{fence}"
+
+
+
 # (min_points, icon, label, hammer_count)
 PUNISHMENT_THRESHOLDS = [
     (200, "💀", "Dishonorably discharged", 6),
@@ -1187,7 +1222,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     continue
                 marker  = medals[idx] if idx < 3 else "🎖️"
                 display = strip_callsign(name) if strip_callsign_flag else name
-                short   = display.replace("`", "\\`")
+                short   = _safe_code_span(display)
                 player_data = players.get(name)
                 if not player_data:
                     # No exact-name match — playerStats/history may record
@@ -1205,7 +1240,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     rank_part = f" — **{rank}**"
                 else:
                     rank_part = ""
-                position_lines.append((marker, f"`{short}`{rank_part} — {int(pts):,} pts"))
+                position_lines.append((marker, f"{short}{rank_part} — {int(pts):,} pts"))
 
             if not position_lines:
                 continue
@@ -1862,7 +1897,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         rank    = get_rank(credits)
         medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
         display = strip_callsign(name) if strip_callsign_flag else name
-        short   = display.replace('`', '\\`') if len(display) <= 22 else display[:20].replace('`', '\\`') + '..'
+        _short_src = display if len(display) <= 22 else display[:20] + '..'
+        short   = _safe_code_span(_short_src)
         # Hook overrides
         rank    = data.get("custom_rank") or rank
         hide_credits = data.get("hide_credits", False)
@@ -1913,7 +1949,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         else:  # 2S — primary table is session
             pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
 
-        player_block = [f"{medal} `{short}` — **{rank}** {pts_str}".rstrip()]
+        player_block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
         # Pilot career card — shown only when this table is sorted by rank.
         # Data sourced from Foothold_Ranks.lua (historical career totals).
         # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
@@ -2096,7 +2132,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 s_credits = int(data["credits"])
                 s_rank    = data.get("custom_rank") or get_rank(s_credits)
                 s_display = strip_callsign(name) if strip_callsign_flag else name
-                s_short   = s_display.replace('`', '\\`') if len(s_display) <= 22 else s_display[:20].replace('`', '\\`') + '..'
+                _s_short_src = s_display if len(s_display) <= 22 else s_display[:20] + '..'
+                s_short   = _safe_code_span(_s_short_src)
                 s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
                 s_pts        = data.get("session_points", 0)
                 s_hide       = data.get("hide_credits", False)
@@ -2123,7 +2160,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     pts_part = _s_tri(_sr(), _ss(), _sd())
                 else:  # 2DS second = session
                     pts_part = _s_tri(_ss(), _sr(), _sd())
-                line = f"{s_medal} `{s_short}` — **{s_rank}** {pts_part}".rstrip()
+                line = f"{s_medal} {s_short} — **{s_rank}** {pts_part}".rstrip()
                 s_block = [line]
                 # Pilot career card on second table when second table is rank-ordered
                 _2nd_is_rank = points_order in ("2S", "2D")  # 2nd table = R for these modes
@@ -2291,7 +2328,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 t_credits = int(data["credits"])
                 t_rank    = data.get("custom_rank") or get_rank(t_credits)
                 t_display = strip_callsign(name) if strip_callsign_flag else name
-                t_short   = t_display.replace('`', '\\`') if len(t_display) <= 22 else t_display[:20].replace('`', '\\`') + '..'
+                _t_short_src = t_display if len(t_display) <= 22 else t_display[:20] + '..'
+                t_short   = _safe_code_span(_t_short_src)
                 t_medal   = data.get("custom_medal") or (t_medals[i] if i < len(t_medals) else "•")
                 t_pts     = data.get("session_points", 0)
                 t_hide    = data.get("hide_credits", False)
@@ -2311,7 +2349,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
-                t_block = [f"{t_medal} `{t_short}` — **{t_rank}** {t_pts_part}".rstrip()]
+                t_block = [f"{t_medal} {t_short} — **{t_rank}** {t_pts_part}".rstrip()]
                 # Pilot career card on third table when this table is rank-ordered
                 if show_pilot_card and tbl_key == "R":
                     t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
@@ -3770,7 +3808,7 @@ class FH_Report(Plugin):
                 )
             if match is None:
                 await interaction.followup.send(
-                    f"❌ Player **`{player_name}`** not found in **`{server}`**.\n"
+                    f"❌ Player **{_safe_code_span(player_name)}** not found in **`{server}`**.\n"
                     f"Check the exact name (case-sensitive autocomplete is available).",
                     ephemeral=True)
                 return
