@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "10.2.0"
+FH_REPORT_RELEASE = "11.0.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -66,6 +66,71 @@ async def _force_save(server) -> None:
     await _do_script(server, "bc:saveToDisk()")
     import asyncio as _asyncio
     await _asyncio.sleep(1.5)
+
+
+class _UpdateReadCache:
+    """Reuse remote file reads within one server's current update only.
+
+    Several parse steps in one update cycle (parse_zones, parse_ranks,
+    parse_player_stats) read the same persistence file independently. This
+    wrapper memoizes read_file() results for the lifetime of a single
+    _update_server() call so the same path is only fetched once from the
+    node, cutting down redundant I/O — especially relevant when the node is
+    remote. It intentionally does NOT persist across update cycles, so it
+    can never serve data older than the current cycle. Call invalidate()
+    right after writing a file this cache may have already read, so a
+    later read in the same cycle doesn't return the stale pre-write copy.
+    """
+
+    def __init__(self, node):
+        self._node = node
+        self._files: dict[str, bytes] = {}
+
+    async def read_file(self, path: str) -> bytes:
+        if path not in self._files:
+            self._files[path] = await self._node.read_file(path)
+        return self._files[path]
+
+    async def list_directory(self, path: str):
+        return await self._node.list_directory(path)
+
+    def invalidate(self, path: str) -> None:
+        self._files.pop(path, None)
+
+
+def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str | None]:
+    """Validate DEFAULT.update_interval from fh_report.yaml.
+
+    A misconfigured value of zero, negative, or non-numeric would otherwise
+    make the periodic updater loop run flat-out (or crash outright), so this
+    falls back to `default` and returns a warning message for the caller to
+    log — rather than either silently misbehaving or refusing to load the
+    whole plugin over one bad config value.
+    """
+    configured = (raw.get("DEFAULT") or {}).get("update_interval", default)
+    try:
+        interval = int(configured)
+    except (TypeError, ValueError):
+        return default, (
+            f"FH_Report: DEFAULT.update_interval ({configured!r}) is not a valid "
+            f"integer — falling back to the default of {default}s."
+        )
+    if interval <= 0:
+        return default, (
+            f"FH_Report: DEFAULT.update_interval ({interval}) must be greater than "
+            f"zero — falling back to the default of {default}s."
+        )
+    return interval, None
+
+
+def _server_stagger_seconds(interval: float, server_count: int) -> float:
+    """Small delay between processing each configured server in one update
+    cycle, so multiple servers don't all hit the node/API at once. Capped at
+    5s, and scales down as server_count grows. A single-server setup (the
+    common case) always gets 0 — no behavior change."""
+    if server_count <= 1:
+        return 0
+    return min(5, interval / server_count)
 
 
 def _fmt_career_time(seconds: float) -> str:
@@ -875,13 +940,16 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         pass
 
 
-async def deduplicate_ranks(ranks_file: str, persistence_file, node) -> bool:
+async def deduplicate_ranks(ranks_file: str, persistence_file, node,
+                            ranks_source: bytes | None = None) -> bool:
     """Detect and fix duplicate player entries in Foothold_Ranks.lua caused by
     callsign changes. The entry with a UCID in ucidToName is canonical; its
     name is cleaned via strip_callsign(). Credits and lastSeen are merged.
     Returns True if any fix was applied and the file was rewritten."""
 
-    ranks_data           = (await node.read_file(ranks_file)).decode("utf-8")
+    if ranks_source is None:
+        ranks_source = await node.read_file(ranks_file)
+    ranks_data           = ranks_source.decode("utf-8")
     _original_ranks_data = ranks_data  # snapshot for the pre-write collision check below
 
     # ── ucidToName: build ucid → raw_name ────────────────────────────────
@@ -2611,8 +2679,10 @@ class FH_Report(Plugin):
         await super().cog_load()
         self._message_ids = self._load_message_ids()
         raw      = self.locals or {}
-        interval = (raw.get("DEFAULT") or {}).get("update_interval", 300)
-        self.updater.change_interval(seconds=int(interval))
+        interval, interval_warning = _validated_update_interval(raw)
+        if interval_warning:
+            self.log.warning(interval_warning)
+        self.updater.change_interval(seconds=interval)
         utils.safe_start(self.updater)
         # Start inactivity checker only if at least one server has it enabled
         any_penalty = any(
@@ -2676,8 +2746,13 @@ class FH_Report(Plugin):
         # forever with no log trace at all, and the mismatch was previously
         # only ever surfaced by the /fh_report player command's own check.
         live_instance_names = {server.instance.name for server in self.bot.servers.values()}
+        configured_server_count = 0
         for cfg_key in raw.keys():
-            if cfg_key == "DEFAULT" or cfg_key in live_instance_names:
+            if cfg_key == "DEFAULT":
+                continue
+            if cfg_key in live_instance_names:
+                if raw.get(cfg_key):
+                    configured_server_count += 1
                 continue
             if cfg_key not in _unmatched_instance_warned:
                 _unmatched_instance_warned.add(cfg_key)
@@ -2691,6 +2766,8 @@ class FH_Report(Plugin):
         # Config is looked up by instance name (the key used in fh_report.yaml)
         # rather than server.name (the long DCS display name), so existing yaml
         # configs require no changes.
+        stagger_seconds = _server_stagger_seconds(interval, configured_server_count)
+        processed_server_count = 0
         for server in self.bot.servers.values():
             try:
                 instance_name = server.instance.name
@@ -2700,6 +2777,9 @@ class FH_Report(Plugin):
                 # Merge DEFAULT + instance overrides fresh each cycle (like Pretense)
                 cfg = dict(default_cfg)
                 cfg.update(srv_cfg)
+                if processed_server_count > 0:
+                    await asyncio.sleep(stagger_seconds)
+                processed_server_count += 1
                 await self._update_server(server, cfg)
             except Exception as e:
                 self.log.error(
@@ -3415,11 +3495,12 @@ class FH_Report(Plugin):
         if not saves_dir:
             saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
 
-        node = server.node
+        source_node = server.node
+        node = _UpdateReadCache(source_node)
 
         # One-time-per-instance write self-test — see run_write_self_test()
         # for why this doesn't wait for a real correction to be needed.
-        await run_write_self_test(node, saves_dir, log=self.log)
+        await run_write_self_test(source_node, saves_dir, log=self.log)
 
         persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
@@ -3428,8 +3509,9 @@ class FH_Report(Plugin):
 
         ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
         ranks_missing = False
+        ranks_source  = None
         try:
-            await node.read_file(ranks_file)
+            ranks_source = await node.read_file(ranks_file)
         except FileNotFoundError:
             self.log.debug(
                 f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found — "
@@ -3440,7 +3522,8 @@ class FH_Report(Plugin):
         if not ranks_missing:
             # Deduplicate player entries caused by callsign changes before parsing.
             try:
-                await deduplicate_ranks(ranks_file, persistence_file, node)
+                if await deduplicate_ranks(ranks_file, persistence_file, source_node, ranks_source):
+                    node.invalidate(ranks_file)
             except Exception as e:
                 self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
 
@@ -3506,7 +3589,7 @@ class FH_Report(Plugin):
             # cross-reference still fills in anyone the native table
             # doesn't have yet, instead of being discarded wholesale.
             name_to_ucid = {**name_to_ucid_fallback, **name_to_ucid_native}
-            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, source_node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3550,6 +3633,7 @@ class FH_Report(Plugin):
                 try:
                     await hot_write_waypoints(server)
                     await asyncio.sleep(1.5)
+                    node.invalidate(wp_cache_file)
                 except Exception as e:
                     self.log.warning(f"FH_Report [{instance_name}]: waypoint hot-write failed: {e}")
             try:
