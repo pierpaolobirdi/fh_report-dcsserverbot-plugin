@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "11.0.0"
+FH_REPORT_RELEASE = "11.1.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1179,6 +1179,33 @@ def _safe_code_span(text: str) -> str:
     return f"{fence}{text}{fence}"
 
 
+def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 77) -> str:
+    """Dynamically shorten `rank` (from the tail, adding '..') just enough
+    to keep the full rendered line under `threshold` visible characters, as
+    the reader actually sees it — i.e. ignoring Markdown syntax like ** and
+    backticks, which take no visual width. `prefix` is everything visible
+    before the rank (name plus its separator); `suffix` is everything
+    visible after it (its own separator plus the points text). Measured
+    against Discord's DESKTOP client specifically (mobile line-wrap width
+    is unpredictable and out of scope here).
+
+    Chosen over a fixed rank-abbreviation table so it also covers
+    hook-supplied custom_rank text, which a static table could never
+    anticipate. Below the threshold, or for short ranks that don't need
+    it, `rank` is returned unchanged.
+    """
+    other_len = len(prefix) + len(suffix)
+    full_len  = other_len + len(rank)
+    if full_len < threshold:
+        return rank
+    budget = (threshold - 1) - other_len  # max chars rank may occupy, strictly under threshold
+    if budget <= 0:
+        return ""  # extreme edge case — no room for any rank text at all
+    if budget <= 2:
+        return rank[:budget]
+    return rank[:budget - 2] + ".."
+
+
 
 # (min_points, icon, label, hammer_count)
 PUNISHMENT_THRESHOLDS = [
@@ -1305,6 +1332,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                             break
                 if player_data:
                     rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
+                    rank = _fit_rank(f"{display} — ", rank, f" — {int(pts):,} pts")
                     rank_part = f" — **{rank}**"
                 else:
                     rank_part = ""
@@ -2017,6 +2045,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         else:  # 2S — primary table is session
             pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
 
+        rank = _fit_rank(f"{_short_src} — ", rank, f" {pts_str}")
         player_block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
         # Pilot career card — shown only when this table is sorted by rank.
         # Data sourced from Foothold_Ranks.lua (historical career totals).
@@ -2228,6 +2257,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                     pts_part = _s_tri(_sr(), _ss(), _sd())
                 else:  # 2DS second = session
                     pts_part = _s_tri(_ss(), _sr(), _sd())
+                s_rank = _fit_rank(f"{_s_short_src} — ", s_rank, f" {pts_part}")
                 line = f"{s_medal} {s_short} — **{s_rank}** {pts_part}".rstrip()
                 s_block = [line]
                 # Pilot career card on second table when second table is rank-ordered
@@ -2417,6 +2447,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
                 elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
                 else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
+                t_rank = _fit_rank(f"{_t_short_src} — ", t_rank, f" {t_pts_part}")
                 t_block = [f"{t_medal} {t_short} — **{t_rank}** {t_pts_part}".rstrip()]
                 # Pilot career card on third table when this table is rank-ordered
                 if show_pilot_card and tbl_key == "R":
