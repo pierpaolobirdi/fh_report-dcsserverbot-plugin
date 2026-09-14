@@ -1179,7 +1179,7 @@ def _safe_code_span(text: str) -> str:
     return f"{fence}{text}{fence}"
 
 
-def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 77) -> str:
+def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 75) -> str:
     """Dynamically shorten `rank` (from the tail, adding '..') just enough
     to keep the full rendered line under `threshold` visible characters, as
     the reader actually sees it — i.e. ignoring Markdown syntax like ** and
