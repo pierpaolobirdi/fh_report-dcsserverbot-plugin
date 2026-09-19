@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "11.5.0"
+FH_REPORT_RELEASE = "11.2.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -3256,6 +3256,16 @@ class FH_Report(Plugin):
         stats_carry_over    = snap.get("stats_carry_over", {})
         last_persistence_fn = snap.get("persistence_filename", "")
         name_to_ucid_snapshot = snap.get("name_to_ucid", {})
+        # Stat categories ever seen across ALL cycles, not just the current
+        # in-memory stats_snapshot — a plain set(list) accumulator that only
+        # grows. Deriving "trusted" categories solely from stats_snapshot
+        # broke on a mid-day mission/map change: that branch rebases
+        # stats_snapshot to the new file's session_stats_raw, which is
+        # legitimately empty right after the swap (nobody's flown yet),
+        # so EVERY category got silently dropped from the Daily card for
+        # the rest of that day (Session wasn't affected — it doesn't use
+        # this gate). Persisting the set survives that empty moment.
+        known_stat_keys = set(snap.get("known_stat_keys", []))
 
         # ── Mid-campaign callsign-change reconciliation ─────────────────────
         # See docstring above. Runs BEFORE mission-reset detection since a
@@ -3437,7 +3447,7 @@ class FH_Report(Plugin):
         # following reset) will include them naturally since it's built
         # directly from session_stats_raw, so deltas resume correctly from
         # the next reset onward.
-        tracked_keys_in_snapshot = set()
+        tracked_keys_in_snapshot = set(known_stat_keys)
         for _stats in stats_snapshot.values():
             tracked_keys_in_snapshot.update(_stats.keys())
 
@@ -3459,6 +3469,16 @@ class FH_Report(Plugin):
             if name not in daily_stats and carried_stats:
                 daily_stats[name] = dict(carried_stats)
 
+        # Grow the persisted "ever seen" set with whatever categories are
+        # visible this cycle, so they're trusted from the NEXT cycle on
+        # (mirrors the original one-day-grace-period intent, just anchored
+        # to a persistent accumulator instead of the transient in-memory
+        # stats_snapshot).
+        for _stats in session_stats_raw.values():
+            known_stat_keys.update(_stats.keys())
+        for _stats in stats_snapshot.values():
+            known_stat_keys.update(_stats.keys())
+
         # Persist the snapshot every cycle (not just on reset), always
         # including 'last_daily' and the carry-over buckets, plus the
         # current persistence filename (used to detect the next mission
@@ -3473,6 +3493,7 @@ class FH_Report(Plugin):
             "stats_carry_over":     stats_carry_over,
             "persistence_filename": persistence_filename or last_persistence_fn,
             "name_to_ucid":         {**name_to_ucid_snapshot, **(name_to_ucid or {})},
+            "known_stat_keys":      sorted(known_stat_keys),
         }, node)
 
         return daily, daily_stats, campaign_restarted
