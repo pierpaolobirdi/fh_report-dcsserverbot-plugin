@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "11.1.0"
+FH_REPORT_RELEASE = "11.5.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1179,7 +1179,7 @@ def _safe_code_span(text: str) -> str:
     return f"{fence}{text}{fence}"
 
 
-def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 75) -> str:
+def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 78) -> str:
     """Dynamically shorten `rank` (from the tail, adding '..') just enough
     to keep the full rendered line under `threshold` visible characters, as
     the reader actually sees it — i.e. ignoring Markdown syntax like ** and
@@ -3596,7 +3596,15 @@ class FH_Report(Plugin):
         daily_pts: dict = {}
         daily_stats: dict = {}
         campaign_restarted_now = False
-        if needs_daily and campaign_stats:
+        # NOTE: intentionally does NOT require `campaign_stats` to be
+        # non-empty. Right after a mission/map change, the new file's
+        # playerStats is legitimately empty until someone scores — but
+        # that is exactly when this must still run: it's what detects the
+        # persistence-filename change and migrates today's already-earned
+        # points into carry_over (see _compute_daily_points' docstring).
+        # Skipping this call on an empty campaign_stats silently freezes
+        # daily_snapshot.json at the previous mission's state forever.
+        if needs_daily:
             reset_hour    = int(cfg.get("daily_reset_hour") or 0)
             # Override with day-specific hour if daily_reset_schedule is defined
             schedule      = cfg.get("daily_reset_schedule") or {}
@@ -3830,6 +3838,33 @@ class FH_Report(Plugin):
         # which doesn't need the player_name parameter at all.
         if not self._is_admin(interaction, server_name):
             return []
+
+        # Primary path: query DCSServerBot's own `players` table (ucid +
+        # name — the same table /linkme and our self-lookup path already
+        # use) instead of re-reading and re-parsing Foothold_Ranks.lua on
+        # every keystroke. Much cheaper against a roster this size, and it
+        # hands back a UCID rather than a raw name, so the actual command
+        # below can match it against the Foothold data by UCID — sidestepping
+        # callsign-prefix/strip_callsign mismatches entirely for this path.
+        try:
+            pattern = f"%{current}%"
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT ucid, name FROM players WHERE name ILIKE %s ORDER BY name LIMIT 25",
+                        (pattern,)
+                    )
+                    rows = await cur.fetchall()
+            return [
+                app_commands.Choice(name=(name or ucid)[:100], value=ucid)
+                for ucid, name in rows if ucid
+            ]
+        except Exception:
+            # Fall back to the previous file-based approach rather than
+            # leaving the admin with no suggestions at all — covers the
+            # case where the `players` table/columns aren't what's expected.
+            pass
+
         srv = self._get_server_by_instance(server_name)
         if srv is None:
             return []
@@ -3914,19 +3949,37 @@ class FH_Report(Plugin):
             return
 
         if player_name:
-            # Admin path — look up the requested player by name
-            match = next((n for n in players if n.lower() == player_name.lower()), None)
+            # Admin path — look up the requested player.
+            # If player_name came from the autocomplete dropdown above, it's
+            # a UCID (32 hex chars), not a display name: match it directly
+            # against the parsed Foothold roster by UCID, same as the
+            # self-lookup path below. This is immune to callsign prefixes,
+            # unusual characters, or any other name-formatting mismatch
+            # between Foothold_Ranks.lua and what's actually typed/shown.
+            match = None
+            if re.fullmatch(r"[0-9a-f]{32}", player_name.lower()):
+                target_ucid = player_name.lower()
+                match = next((n for n, d in players.items() if d.get("ucid") == target_ucid), None)
+                if match is None:
+                    await interaction.followup.send(
+                        f"❌ No campaign stats found for that player on **`{server}`** yet.",
+                        ephemeral=True)
+                    return
             if match is None:
-                match = next(
-                    (n for n in players if strip_callsign(n).lower() == strip_callsign(player_name).lower()),
-                    None
-                )
-            if match is None:
-                await interaction.followup.send(
-                    f"❌ Player **{_safe_code_span(player_name)}** not found in **`{server}`**.\n"
-                    f"Check the exact name (case-sensitive autocomplete is available).",
-                    ephemeral=True)
-                return
+                # Free-typed text (autocomplete not used, or no UCID match) —
+                # fall back to matching by name as before.
+                match = next((n for n in players if n.lower() == player_name.lower()), None)
+                if match is None:
+                    match = next(
+                        (n for n in players if strip_callsign(n).lower() == strip_callsign(player_name).lower()),
+                        None
+                    )
+                if match is None:
+                    await interaction.followup.send(
+                        f"❌ Player **{_safe_code_span(player_name)}** not found in **`{server}`**.\n"
+                        f"Check the exact name (case-sensitive autocomplete is available).",
+                        ephemeral=True)
+                    return
         else:
             # Self-lookup path — resolve the caller's own UCID via DCSSB's
             # players table (same linking used by /linkme), then match it
