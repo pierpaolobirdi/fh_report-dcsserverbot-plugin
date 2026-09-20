@@ -53,22 +53,26 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 
 ### Options reference
 
+Listed in the same order they appear in `fh_report.yaml` itself:
+
 | Option | Default | Description |
 |---|---|---|
+| `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
+| `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
+| `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
 | `update_interval` | `300` | Seconds between embed refreshes |
+| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
+| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
 | `bar_length` | `40` | Number of squares in the progress bar |
 | `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
 | `max_zones` | `15` | Max zones per column. Omit for all |
 | `zone_name_length` | `16` | Max characters for zone names (8–24, clamped) |
 | `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
+| `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
-| `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
-| `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
-| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
-| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
-| `max_pilots` | all | Max pilots in single-table modes |
-| `max_pilots_2t` | all | Max pilots per table in dual-table modes. Falls back to `max_pilots` |
-| `max_pilots_3t` | `6` | Max pilots per table in triple-table modes. Falls back to `max_pilots_2t` |
+| `max_pilots` | all | Max pilots when `report_layout` has just 1 table |
+| `max_pilots_2t` | all | Max pilots per table when `report_layout` has exactly 2 tables. Falls back to `max_pilots` |
+| `max_pilots_3t` | all | Max pilots per table when `report_layout` has 3 or more tables. Falls back to `max_pilots_2t`, then `max_pilots` |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
@@ -76,28 +80,26 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `session_card_icon` | `🔸` | Emoji shown at the start of the session stats card line |
 | `show_daily_card` | `false` | `true` = show daily combat stats card per pilot |
 | `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
-| `show_punishment` | `false` | `true` = show punishment badges |
-| `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
-| `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
-| `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
-| `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
-| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs--disable_updates) below |
-| `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
-| `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
+| `show_punishment` | `false` | `true` = show punishment badges |
+| `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
+| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs-disable_updates) below |
+| `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
+| `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
+| `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 
 ### Example config
 
 ```yaml
 DEFAULT:
-  update_interval: 300
-  bar_length: 40
-  strip_callsign: true
-  report_layout: DPSR, R
+  report_layout: DPSR
   points_detail_D: SR
   points_detail_S: RD
   points_detail_R: SD
+  update_interval: 300
+  bar_length: 40
+  strip_callsign: true
   show_pilot_card: true
   show_punishment: true
 
