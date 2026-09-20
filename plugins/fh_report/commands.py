@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "11.2.0"
+FH_REPORT_RELEASE = "12.0.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1266,9 +1266,9 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                (dates_desc[0] — both closures if that day had two) shows at
                least the top 3 positions, even if `top` is set lower (1 or
                2). `top` itself is never reduced by this — if top is already
-               >= 3, this has no effect. Only ever passed True from the
-               4R/4DS Podium sub-block (podium_4x_min3_latest_day); the
-               standalone "P" mode never uses this.
+               >= 3, this has no effect. Only ever passed True when "P" is
+               combined with other letters (podium_combined_min3_latest_day);
+               the standalone "P" mode never uses this.
 
     Each event renders as:
         __**DD/MM/YYYY**__ (Session End)      <- suffix only on campaign-end closures
@@ -1411,43 +1411,6 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 
     for i, chunk in enumerate(chunks):
         embed.add_field(name=title if i == 0 else cont_title, value=chunk, inline=False)
-
-
-def _lb_title(points_order: str) -> str:
-    """Build leaderboard field title based on points_order."""
-    titles = {
-        "R":   "\n🏆 __Pilot Leaderboard · by Rank__",
-        "S":   "\n📊 __Session Leaderboard · by Current Session__",
-        "D":   "\n📅 __Daily Leaderboard · by Today\'s Points__",
-        "BR":  "\n🏆 __Pilot Leaderboard · by Rank (R · S · D)__",
-        "BS":  "\n📊 __Session Leaderboard · by Current Session (S · R · D)__",
-        "BD":  "\n📅 __Daily Leaderboard · by Today\'s Points (D · R · S)__",
-        "BDS": "\n📅 __Daily Leaderboard · by Today\'s Points (D · S · R)__",
-        "2R":  "\n🏆 __Pilot Leaderboard · by Rank__",
-        "2S":  "\n📊 __Session Leaderboard · by Current Session__",
-        "2D":  "\n📅 __Daily Leaderboard · by Today\'s Points__",
-        "2DS": "\n📅 __Daily Leaderboard · by Today\'s Points__",
-        "3R":  "\n🏆 __Pilot Leaderboard · by Rank__",
-        "3S":  "\n📊 __Session Leaderboard · by Current Session__",
-        "3D":  "\n📅 __Daily Leaderboard · by Today\'s Points__",
-        "3DS": "\n📅 __Daily Leaderboard · by Today\'s Points__",
-        "4R":  "\n🏆 __Pilot Leaderboard · by Rank__",
-        "4DS": "\n📅 __Daily Leaderboard · by Today\'s Points__",
-    }
-    return titles.get(points_order, "\n🏆 __Pilot Leaderboard · by Rank__")
-
-
-
-
-def _lb_icon(points_order: str) -> str:
-    """Icon matching this points_order's primary table family, used to style
-    a 'Pilots X–Y' continuation title the same way as the table's own
-    visible title (same icon, underlined) instead of plain unstyled text."""
-    if points_order in ("S", "BS", "2S", "3S"):
-        return "📊"
-    if points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS"):
-        return "📅"
-    return "🏆"
 
 
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
@@ -1788,6 +1751,251 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     return embed
 
 
+# ── report_layout engine ──────────────────────────────────────────────────────
+# Generalizes the old fixed set of points_order codes (R, S, D, BR, BS, BD,
+# BDS, 2R, 2S, 2D, 2DS, 3R, 3S, 3D, 3DS, 4R, 4DS, P, T) into a small
+# composable grammar: report_layout is a string of D/P/S/R letters, in any
+# order and any subset, naming which tables to render and in what sequence.
+# points_detail_D/points_detail_S/points_detail_R independently control
+# EXACTLY what each table shows, in the order given — nothing is implied:
+# if you want a table's own value shown, its own letter must be in its
+# own points_detail_<role> string. A role with no points_detail_<role> key
+# at all shows only its own value (e.g. no points_detail_S = "(S: nnn)"),
+# same as every other show_*-style feature in this plugin defaulting off.
+# Legacy points_order/compact_points values (and the older shared
+# points_detail single-string format from before this per-table split)
+# are translated into this grammar once, permanently, by
+# migrate_config.py when the config is migrated — this file only ever
+# reads report_layout/points_detail_D/points_detail_S/points_detail_R
+# directly (see FHReport._resolve_report_layout() in the cog below).
+
+_ROLE_TITLES = {
+    "D": "📅 __Daily Leaderboard · by Today's Points__",
+    "S": "📊 __Session Leaderboard · by Current Session__",
+    "R": "🏆 __Pilot Leaderboard · by Rank__",
+}
+_ROLE_ICONS = {"D": "📅", "S": "📊", "R": "🏆"}
+
+
+def _emit_table_field(embed: discord.Embed, title: str, icon: str,
+                      lines: list[str], hidden: int, show_all_pilots: bool) -> None:
+    """Add one leaderboard table's lines to the embed. Mirrors the two
+    field-limit strategies used throughout this file's legacy table code:
+    show_all_pilots=True chunks into multiple fields with '__Pilots #a-b__'
+    continuation headers so nobody is ever silently dropped; False cuts at
+    Discord's ~1020-char field limit and appends a single '+ N more pilots'
+    note instead."""
+    if not lines:
+        return
+    FIELD_LIMIT = 1020
+    if show_all_pilots:
+        all_lines = list(lines)
+        if hidden > 0:
+            all_lines.append(f"*+ {hidden} more pilots*")
+        is_more_note = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
+        chunks, cur, cur_len, cur_count = [], [], 0, 0
+        for line in all_lines:
+            ll = len(line) + 1
+            if cur_len + ll > FIELD_LIMIT and cur:
+                chunks.append((cur, cur_count))
+                cur, cur_len = [line], ll
+                cur_count = 0 if is_more_note(line) else 1
+            else:
+                cur.append(line)
+                cur_len += ll
+                if not is_more_note(line):
+                    cur_count += 1
+        if cur:
+            chunks.append((cur, cur_count))
+        position = 1
+        for i, (chunk_lines, chunk_count) in enumerate(chunks):
+            chunk = "\n".join(chunk_lines)
+            if i == 0:
+                name = f"\n{title}"
+            elif chunk_count > 0:
+                name = f"{icon} __Pilots #{position}–{position + chunk_count - 1}__"
+            else:
+                name = "\u200b"
+            embed.add_field(
+                name=name,
+                value=(f"\n{chunk}" if i == 0 else chunk)[:1024],
+                inline=False
+            )
+            position += chunk_count
+    else:
+        visible_lines, used = [], 0
+        for i, line in enumerate(lines):
+            line_len = len(line) + 1
+            lines_after = len(lines) - i - 1
+            total_hidden = hidden + lines_after
+            more_label = f"\n*+ {total_hidden} more pilots*" if total_hidden > 0 else ""
+            if used + line_len + len(more_label) > FIELD_LIMIT:
+                break
+            visible_lines.append(line)
+            used += line_len
+        lines_not_shown = len(lines) - len(visible_lines)
+        total_hidden_final = hidden + lines_not_shown
+        value = "\n" + "\n".join(visible_lines)
+        if total_hidden_final > 0:
+            value += f"\n*+ {total_hidden_final} more pilots*"
+        embed.add_field(name=f"\n{title}", value=value[:1024], inline=False)
+
+
+def _render_layout_tables(
+    embed: discord.Embed, report_layout: str, points_detail: dict,
+    players: dict, dp: dict, has_daily: bool, strip_callsign_flag: bool,
+    max_pilots: int | None, max_pilots_2t: int | None, max_pilots_3t: int | None,
+    show_all_pilots: bool,
+    show_pilot_card: bool, pilot_card_icon: str,
+    show_session_card: bool, session_card_icon: str,
+    show_daily_card: bool, daily_card_icon: str,
+    show_punishment: bool, punishment_points: dict | None,
+    daily_history: dict | None,
+    podium_days: int, podium_top: int,
+    podium_combined_days: int, podium_combined_top: int, podium_combined_min3_latest_day: bool,
+) -> None:
+    """Render every table/Podium named in report_layout, in order, onto
+    embed. `points_detail` is a dict {"D": "...", "S": "...", "R": "..."} —
+    a role missing from it shows only its own value. See the module-level
+    comment above for the grammar. Mutates embed in place — mirrors
+    _add_podium_field's own convention."""
+    layout = (report_layout or "R").strip().upper()
+    points_detail = points_detail or {}
+    roles_in_layout = [c for c in layout if c in ("R", "S", "D")]
+
+    # Punishment badge goes on the first table whose role has the highest
+    # priority (R > S > D) among roles actually present — same R>S>D
+    # priority the legacy multi-table modes always used.
+    _priority = {"R": 0, "S": 1, "D": 2}
+    badge_role = min(roles_in_layout, key=lambda r: _priority[r]) if roles_in_layout else None
+    badge_role_done = False
+
+    pp = punishment_points or {}
+    surplus = 0
+
+    # Every table in the composition shares the SAME cap — determined by
+    # the total number of pilot tables (R/S/D letters, Podium doesn't
+    # count) in the layout — falling back down the chain
+    # max_pilots_3t -> max_pilots_2t -> max_pilots, exactly as the legacy
+    # 2x/3x/4x modes did (a single-table layout just uses max_pilots
+    # alone). Surplus still cascades between tables when one has fewer
+    # players than the cap allows.
+    _table_count = len(roles_in_layout)
+    if _table_count <= 1:
+        table_limit = max_pilots
+    elif _table_count == 2:
+        table_limit = max_pilots_2t or max_pilots
+    else:
+        table_limit = max_pilots_3t or max_pilots_2t or max_pilots
+
+    for letter in layout:
+        if letter == "P":
+            if layout == "P":
+                p_lines = _build_podium_table(
+                    daily_history or {}, players, days=podium_days, top=podium_top,
+                    strip_callsign_flag=strip_callsign_flag
+                )
+            else:
+                p_lines = _build_podium_table(
+                    daily_history or {}, players, days=podium_combined_days, top=podium_combined_top,
+                    strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_combined_min3_latest_day
+                )
+            if p_lines:
+                _add_podium_field(embed, "👑", p_lines)
+            continue
+
+        if letter not in ("R", "S", "D"):
+            continue  # unrecognized letter — ignore rather than error
+        role = letter
+
+        if role == "D" and not has_daily:
+            continue  # no daily data recorded at all this cycle
+
+        if role == "R":
+            items = [(n, d) for n, d in players.items() if d.get("credits", 0) > 0]
+            items.sort(key=lambda x: x[1]["credits"], reverse=True)
+        elif role == "S":
+            items = [(n, d) for n, d in players.items() if d.get("session_points", 0) > 0]
+            items.sort(key=lambda x: x[1].get("session_points", 0), reverse=True)
+        else:  # D
+            items = [(n, d) for n, d in players.items() if dp.get(n, 0) > 0 or d.get("daily_stats")]
+            items.sort(key=lambda x: dp.get(x[0], 0), reverse=True)
+
+        if not items:
+            continue
+
+        limit = table_limit
+        total_items = len(items)
+        limit_eff = (limit + surplus) if limit else None
+        if limit_eff:
+            items = items[:limit_eff]
+        surplus = max(0, limit_eff - len(items)) if limit_eff else 0
+        hidden = total_items - len(items)
+
+        medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
+        lines = []
+        for i, (name, data) in enumerate(items):
+            credits = int(data["credits"])
+            rank    = data.get("custom_rank") or get_rank(credits)
+            display = strip_callsign(name) if strip_callsign_flag else name
+            short_src = display if len(display) <= 22 else display[:20] + '..'
+            short   = _safe_code_span(short_src)
+            medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
+
+            s_pts        = data.get("session_points", 0)
+            d_pts        = dp.get(name, 0)
+            hide_credits = data.get("hide_credits", False)
+            hide_session = data.get("hide_session", False)
+            show_d       = has_daily and d_pts > 0
+
+            metrics = {
+                "R": (f"R: {credits:,}" if not hide_credits else None),
+                "S": (f"S: {s_pts:,}"   if not hide_session and s_pts else None),
+                "D": (f"D: {d_pts:,}"   if show_d else None),
+            }
+            order = [c for c in points_detail.get(role, role) if c in ("R", "S", "D")]
+            parts = [metrics[c] for c in order if metrics.get(c)]
+            pts_str = f"({'  ·  '.join(parts)})" if parts else ""
+
+            rank  = _fit_rank(f"{short_src} — ", rank, f" {pts_str}")
+            block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
+
+            if show_pilot_card and role == "R":
+                card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                if card:
+                    block.append(card)
+            if show_session_card and role == "S":
+                s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+                if s_card:
+                    block.append(s_card)
+            if show_daily_card and role == "D":
+                d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
+                if d_card:
+                    block.append(d_card)
+
+            if show_punishment and role == badge_role and not badge_role_done:
+                ucid = data.get("ucid")
+                if "hook_punishment" in data:
+                    pts = data["hook_punishment"]
+                elif pp and ucid:
+                    pts = pp.get(ucid, 0)
+                else:
+                    pts = 0
+                badge = get_punishment_badge(
+                    pts, "", data.get("punishment_icon", ""),
+                    data.get("punishment_label", ""), data.get("punishment_pre_icon", "")
+                )
+                if badge:
+                    block.append(badge)
+
+            lines.append("\n".join(block))
+
+        if role == badge_role:
+            badge_role_done = True  # only the first table of this role gets badges
+
+        _emit_table_field(embed, _ROLE_TITLES[role], _ROLE_ICONS[role], lines, hidden, show_all_pilots)
+
+
 def build_embed(zones: dict, players: dict, campaign_name: str,
                 max_zones: int | None, max_pilots: int | None,
                 bar_length: int, slot_status: bool = False,
@@ -1799,12 +2007,10 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 show_all_pilots: bool = False,
                 strip_callsign_flag: bool = False,
                 campaign_stats: dict | None = None,
-                points_order: str = "T",
                 bar_style_emoji: bool = False,
                 daily_points: dict | None = None,
                 show_pilot_card: bool = False,
                 pilot_card_icon: str = "🔸",
-                compact_points: bool = False,
                 show_session_card: bool = False,
                 session_card_icon: str = "🔸",
                 session_stats_raw: dict | None = None,
@@ -1815,11 +2021,13 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 daily_history: dict | None = None,
                 podium_days: int = 7,
                 podium_top: int = 1,
-                podium_4x_days: int = 7,
-                podium_4x_top: int = 1,
-                podium_4x_min3_latest_day: bool = False,
+                podium_combined_days: int = 7,
+                podium_combined_top: int = 1,
+                podium_combined_min3_latest_day: bool = False,
                 sort_zones_by_waypoint: bool = False,
-                waypoint_map: dict | None = None) -> discord.Embed:
+                waypoint_map: dict | None = None,
+                report_layout: str = "R",
+                points_detail: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     _now_ts    = int(datetime.now(timezone.utc).timestamp())
     timestamp  = f"<t:{_now_ts}:f>"
@@ -1914,6 +2122,34 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
     red_text = "\n".join(red_lines) if red_lines else "—"
 
+    # Embed + zone fields are created here (moved up from just before the
+    # tables section) so the report_layout engine below can add its own
+    # fields onto the same embed object.
+    embed = discord.Embed(
+        title=f"📡  {campaign_name}",
+        description=(
+            f"**Front Status — {timestamp}**\n\n"
+            f"{progress}"
+        ),
+        color=0x3498DB
+    )
+    # Force both column headers to the same fixed width so the embed always
+    # reaches maximum width regardless of zone count digits or content length.
+    # The target is the longer of the two headers + 44 spaces + dot (same as
+    # the manually tuned RED value). Both headers are padded to that target.
+    _blue_hdr  = f"🔵 BLUE Zones ({blue_count})"
+    _red_hdr   = f"🔴 RED Zones ({red_count})"
+    embed.add_field(
+        name=_blue_hdr,
+        value=blue_text[:1024],
+        inline=True
+    )
+    embed.add_field(
+        name=_red_hdr,
+        value=red_text[:1024],
+        inline=True
+    )
+
     # Pilot leaderboard — apply session stats and ordering
     cs   = campaign_stats or {}
     srs  = session_stats_raw or {}
@@ -1949,591 +2185,25 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                         break
             data["daily_stats"] = draw or {}
 
-    # Determine sort key and display flags from points_order
     dp          = daily_points or {}  # {name: daily_pts}
     drs_check   = daily_stats_raw or {}
     has_daily   = bool(dp) or any(drs_check.values())
 
-    order_by_session = points_order in ("S", "BS", "2S", "3S")
-    order_by_daily   = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS")
-
-    if order_by_session:
-        pilot_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
-                       if d.get("session_points", 0) > 0]
-    elif order_by_daily:
-        pilot_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: dp.get(x[0], 0), reverse=True)
-                       if dp.get(n, 0) > 0 or d.get("daily_stats")]
-    else:
-        pilot_items = [(n, d) for n, d in players.items() if d.get("credits", 0) > 0]
-
-    # In dual-table modes use max_pilots_2t for first table if defined
-    _limit_3t    = max_pilots_3t or max_pilots_2t or max_pilots
-    _limit_2t_val = max_pilots_2t or max_pilots
-    _limit_first = _limit_3t if points_order in ("3R", "3S", "3D", "3DS", "4R", "4DS") else (_limit_2t_val if points_order in ("2R", "2S", "2D", "2DS") else max_pilots)
-    total_pilots_count = len(pilot_items)
-    # Apply first table limit and track surplus for cascade
-    _surplus = 0
-    if _limit_first:
-        _actual_first = len(pilot_items)
-        pilot_items   = pilot_items[:_limit_first]
-        _surplus      = max(0, _limit_first - len(pilot_items))
-    else:
-        _surplus = 0
-    hidden_pilots = total_pilots_count - len(pilot_items)
-
-    # Mode "P" shows ONLY the Podium table — no pilot leaderboard at all.
-    if points_order == "P":
-        pilot_items = []
-
-    medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
-    pilot_lines = []
-    pp = punishment_points or {}
-    for i, (name, data) in enumerate(pilot_items):
-        credits = int(data["credits"])
-        rank    = get_rank(credits)
-        medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
-        display = strip_callsign(name) if strip_callsign_flag else name
-        _short_src = display if len(display) <= 22 else display[:20] + '..'
-        short   = _safe_code_span(_short_src)
-        # Hook overrides
-        rank    = data.get("custom_rank") or rank
-        hide_credits = data.get("hide_credits", False)
-        s_pts   = data.get("session_points", 0)
-
-        # Build points string based on points_order
-        hide_session = data.get("hide_session", False)
-        d_pts        = dp.get(name, 0)
-        show_d       = has_daily and d_pts > 0
-
-        def _tri(first, second, third):
-            """Build R·S·D string with only available/non-hidden values."""
-            parts = [p for p in [first, second, third] if p]
-            return f"({'  ·  '.join(parts)})" if parts else ""
-
-        def _r():  return f"R: {credits:,}" if not hide_credits else None
-        def _s():  return f"S: {s_pts:,}"   if not hide_session and s_pts else None
-        def _d():  return f"D: {d_pts:,}"   if show_d else None
-
-        if points_order == "R":
-            pts_str = "" if hide_credits else f"(R: {credits:,})"
-        elif points_order == "S":
-            pts_str = "" if hide_session else f"(S: {s_pts:,})"
-        elif points_order == "D":
-            pts_str = f"(D: {d_pts:,})"
-        elif points_order == "BR":
-            pts_str = _tri(_r(), _s(), _d())
-        elif points_order == "BS":
-            pts_str = _tri(_s(), _r(), _d())
-        elif points_order == "BD":
-            pts_str = _tri(_d(), _r(), _s())
-        elif points_order == "BDS":
-            pts_str = _tri(_d(), _s(), _r())
-        elif points_order == "2R":
-            pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
-        elif points_order == "2D":
-            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _r(), _s()) if not compact_points else "")
-        elif points_order == "2DS":
-            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _s(), _r()) if not compact_points else "")
-        elif points_order in ("3R", "4R"):
-            pts_str = f"(R: {credits:,})" if (compact_points and not hide_credits) else (_tri(_r(), _s(), _d()) if not compact_points else "")
-        elif points_order == "3S":
-            pts_str = f"(S: {s_pts:,})" if (compact_points and not hide_session and s_pts) else (_tri(_s(), _r(), _d()) if not compact_points else "")
-        elif points_order == "3D":
-            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _r(), _s()) if not compact_points else "")
-        elif points_order in ("3DS", "4DS"):
-            pts_str = f"(D: {d_pts:,})" if compact_points else (_tri(_d(), _s(), _r()) if not compact_points else "")
-        else:  # 2S — primary table is session
-            pts_str = (f"(S: {s_pts:,})" if s_pts else "") if compact_points else (_tri(_s(), _r(), _d()) if s_pts else "(S: 0)")
-
-        rank = _fit_rank(f"{_short_src} — ", rank, f" {pts_str}")
-        player_block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
-        # Pilot career card — shown only when this table is sorted by rank.
-        # Data sourced from Foothold_Ranks.lua (historical career totals).
-        # Rank-primary modes: R, BR, 2R, 3R (rank is the first/only table key)
-        _this_table_is_rank = points_order in ("R", "BR", "2R", "3R", "4R")
-        if show_pilot_card and _this_table_is_rank:
-            card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
-            if card:
-                player_block.append(card)
-        # Session stats card — shown only when this table is sorted by session.
-        # Session-primary modes: S, BS, 2S, 3S (session is the first/only table key)
-        _this_table_is_session = points_order in ("S", "BS", "2S", "3S")
-        if show_session_card and _this_table_is_session:
-            s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
-            if s_card:
-                player_block.append(s_card)
-        # Daily stats card — shown only when this table is sorted by daily points.
-        # Daily-primary modes: D, BD, BDS, 2D, 3D, 3DS (daily is the first/only table key)
-        _this_table_is_daily = points_order in ("D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS")
-        if show_daily_card and _this_table_is_daily:
-            d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
-            if d_card:
-                player_block.append(d_card)
-        # Punishment badge — on rank table always; on session table only when S is the only table
-        # Badge goes on the table with highest priority R>S>D
-        # For single/B modes: always on this (only) table
-        # For 2x: on first table only if first table key is R (2R)
-        # For 3x: on first table only if first table key is R (3R)
-        _first_is_rank = points_order in ("R", "BR", "BS", "BD", "BDS", "2R", "3R", "4R")
-        _is_multi      = points_order.startswith("2") or points_order.startswith("3") or points_order.startswith("4")
-        show_punishment_here = show_punishment and (_first_is_rank or not _is_multi)
-        if show_punishment_here:
-            ucid = data.get("ucid")
-            if "hook_punishment" in data:
-                pts = data["hook_punishment"]
-            elif pp and ucid:
-                pts = pp.get(ucid, 0)
-            else:
-                pts = 0
-            badge = get_punishment_badge(pts, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
-            if badge:
-                player_block.append(badge)
-        # Each player's full block (main line + any cards/badge) is kept as
-        # ONE list entry, joined internally — this is what guarantees the
-        # chunking logic below can only ever split BETWEEN players, never
-        # inside one, since it operates on whole list entries.
-        pilot_lines.append("\n".join(player_block))
-    pilots_text = "\n".join(pilot_lines) if pilot_lines else "—"
-
-    embed = discord.Embed(
-        title=f"📡  {campaign_name}",
-        description=(
-            f"**Front Status — {timestamp}**\n\n"
-            f"{progress}"
-        ),
-        color=0x3498DB
+    _render_layout_tables(
+        embed=embed, report_layout=report_layout, points_detail=points_detail,
+        players=players, dp=dp, has_daily=has_daily,
+        strip_callsign_flag=strip_callsign_flag,
+        max_pilots=max_pilots, max_pilots_2t=max_pilots_2t, max_pilots_3t=max_pilots_3t,
+        show_all_pilots=show_all_pilots,
+        show_pilot_card=show_pilot_card, pilot_card_icon=pilot_card_icon,
+        show_session_card=show_session_card, session_card_icon=session_card_icon,
+        show_daily_card=show_daily_card, daily_card_icon=daily_card_icon,
+        show_punishment=show_punishment, punishment_points=punishment_points,
+        daily_history=daily_history,
+        podium_days=podium_days, podium_top=podium_top,
+        podium_combined_days=podium_combined_days, podium_combined_top=podium_combined_top,
+        podium_combined_min3_latest_day=podium_combined_min3_latest_day,
     )
-    # Force both column headers to the same fixed width so the embed always
-    # reaches maximum width regardless of zone count digits or content length.
-    # The target is the longer of the two headers + 44 spaces + dot (same as
-    # the manually tuned RED value). Both headers are padded to that target.
-    _blue_hdr  = f"🔵 BLUE Zones ({blue_count})"
-    _red_hdr   = f"🔴 RED Zones ({red_count})"
-    embed.add_field(
-        name=_blue_hdr,
-        value=blue_text[:1024],
-        inline=True
-    )
-    embed.add_field(
-        name=_red_hdr,
-        value=red_text[:1024],
-        inline=True
-    )
-
-    # For compound modes, skip first table entirely if no pilots
-    _is_compound = points_order in ("2R", "2S", "2D", "2DS", "3R", "3S", "3D", "3DS", "4R", "4DS")
-    if _is_compound and not pilot_lines:
-        pass  # skip first table — no data
-    elif show_all_pilots:
-        # ── Option B: split into multiple fields, show all pilots ─────────────
-        # Add more pilots note if max_pilots was applied
-        if hidden_pilots > 0:
-            pilot_lines.append(f"*+ {hidden_pilots} more pilots*")
-
-        FIELD_LIMIT = 1020
-        chunks = []
-        current_chunk, current_len, current_count = [], 0, 0
-        _is_more_note = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
-        for line in pilot_lines:
-            line_len = len(line) + 1
-            if current_len + line_len > FIELD_LIMIT and current_chunk:
-                chunks.append((current_chunk, current_count))
-                current_chunk, current_len = [line], line_len
-                current_count = 0 if _is_more_note(line) else 1
-            else:
-                current_chunk.append(line)
-                current_len += line_len
-                if not _is_more_note(line):
-                    current_count += 1
-        if current_chunk:
-            chunks.append((current_chunk, current_count))
-        _position = 1
-        for i, (chunk_lines, chunk_count) in enumerate(chunks):
-            chunk = "\n".join(chunk_lines)
-            if i == 0:
-                cont_name = _lb_title(points_order)
-            elif chunk_count > 0:
-                # Turns Discord's field-length limit into useful info instead
-                # of a purely decorative separator: shows which rank
-                # positions this continuation field covers.
-                cont_name = f"{_lb_icon(points_order)} __Pilots #{_position}–{_position + chunk_count - 1}__"
-            else:
-                cont_name = "\u200b"
-            embed.add_field(
-                name=(_lb_title(points_order)) if i == 0 else cont_name,
-                value=("\n" + chunk) if i == 0 else chunk,
-                inline=False
-            )
-            _position += chunk_count
-    elif not (_is_compound and not pilot_lines) and points_order != "P":
-        # ── Option A (default): single field, cut at limit, show + X more ─────
-        FIELD_LIMIT = 1020
-        visible_lines, used = [], 0
-        for i, line in enumerate(pilot_lines):
-            line_len = len(line) + 1
-            # Reserve space for more pilots label
-            lines_after = len(pilot_lines) - i - 1
-            total_hidden = hidden_pilots + lines_after
-            more_label = f"\n*+ {total_hidden} more pilots*" if total_hidden > 0 else ""
-            if used + line_len + len(more_label) > FIELD_LIMIT:
-                break
-            visible_lines.append(line)
-            used += line_len
-        lines_not_shown = len(pilot_lines) - len(visible_lines)
-        total_hidden_final = hidden_pilots + lines_not_shown
-        pilots_value = "\n" + "\n".join(visible_lines)
-        if total_hidden_final > 0:
-            pilots_value += f"\n*+ {total_hidden_final} more pilots*"
-        embed.add_field(
-            name=_lb_title(points_order),
-            value=pilots_value[:1024],
-            inline=False
-        )
-
-    # ── 2x modes: add second leaderboard ─────────────────────────────────────
-    if points_order in ("2R", "2S", "2D", "2DS"):
-        if points_order == "2R":
-            second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
-                            if d.get("session_points", 0) > 0]
-            second_title = "📊 __Session Leaderboard · by Current Session__"
-            second_cont  = "\u200b"
-        elif points_order == "2S":
-            second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
-                            if d.get("credits", 0) > 0]
-            second_title = "🏆 __Pilot Leaderboard · by Rank__"
-            second_cont  = "\u200b"
-        elif points_order == "2D":
-            second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
-                            if d.get("credits", 0) > 0]
-            second_title = "🏆 __Pilot Leaderboard · by Rank__"
-            second_cont  = "\u200b"
-        else:  # 2DS: second table = session
-            second_items = [(n, d) for n, d in sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
-                            if d.get("session_points", 0) > 0]
-            second_title = "📊 __Session Leaderboard · by Current Session__"
-            second_cont  = "\u200b"
-
-        if second_items:
-            # Use max_pilots_2t + cascade surplus from first table
-            _limit_2t     = (max_pilots_2t if max_pilots_2t else max_pilots) or 0
-            _limit_2t_eff = _limit_2t + _surplus if _limit_2t else None
-            total_second  = len(second_items)
-            if _limit_2t_eff:
-                second_items = second_items[:_limit_2t_eff]
-            # Update surplus for potential 3rd table
-            _surplus      = max(0, _limit_2t_eff - len(second_items)) if _limit_2t_eff else 0
-            hidden_second = total_second - len(second_items)
-            second_lines = []
-            s_medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
-            for i, (name, data) in enumerate(second_items):
-                s_credits = int(data["credits"])
-                s_rank    = data.get("custom_rank") or get_rank(s_credits)
-                s_display = strip_callsign(name) if strip_callsign_flag else name
-                _s_short_src = s_display if len(s_display) <= 22 else s_display[:20] + '..'
-                s_short   = _safe_code_span(_s_short_src)
-                s_medal   = data.get("custom_medal") or (s_medals[i] if i < len(s_medals) else "•")
-                s_pts        = data.get("session_points", 0)
-                s_hide       = data.get("hide_credits", False)
-                s_hide_session = data.get("hide_session", False)
-                s_d_pts   = dp.get(name, 0)
-                s_show_d  = has_daily and s_d_pts > 0
-                def _sr(): return f"R: {s_credits:,}" if not s_hide else None
-                def _ss(): return f"S: {s_pts:,}" if not s_hide_session and s_pts else None
-                def _sd(): return f"D: {s_d_pts:,}" if s_show_d else None
-                def _s_tri(a, b, c):
-                    parts = [p for p in [a, b, c] if p]
-                    return f"({'  ·  '.join(parts)})" if parts else ""
-                if compact_points:
-                    # Show only this table's own data
-                    if points_order == "2R":   pts_part = f"(S: {s_pts:,})" if (not s_hide_session and s_pts) else ""
-                    elif points_order == "2S": pts_part = f"(R: {s_credits:,})" if not s_hide else ""
-                    elif points_order == "2D": pts_part = f"(R: {s_credits:,})" if not s_hide else ""
-                    else:                      pts_part = f"(S: {s_pts:,})" if (not s_hide_session and s_pts) else ""
-                elif points_order == "2R":
-                    pts_part = _s_tri(_ss(), _sr(), _sd())
-                elif points_order == "2S":
-                    pts_part = _s_tri(_sr(), _ss(), _sd())
-                elif points_order == "2D":
-                    pts_part = _s_tri(_sr(), _ss(), _sd())
-                else:  # 2DS second = session
-                    pts_part = _s_tri(_ss(), _sr(), _sd())
-                s_rank = _fit_rank(f"{_s_short_src} — ", s_rank, f" {pts_part}")
-                line = f"{s_medal} {s_short} — **{s_rank}** {pts_part}".rstrip()
-                s_block = [line]
-                # Pilot career card on second table when second table is rank-ordered
-                _2nd_is_rank = points_order in ("2S", "2D")  # 2nd table = R for these modes
-                if show_pilot_card and _2nd_is_rank:
-                    s_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
-                    if s_card:
-                        s_block.append(s_card)
-                # Session stats card on second table when second table is session-ordered
-                _2nd_is_session = points_order in ("2R", "2DS")  # 2nd table = S for these modes
-                if show_session_card and _2nd_is_session:
-                    s_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
-                    if s_sess_card:
-                        s_block.append(s_sess_card)
-                # Punishment badge on second table only for 2S (rank table)
-                # Badge on second table when second table has higher priority than first
-                # 2S: 2nd=R (R>S) ✓  |  2D: 2nd=R (R>D) ✓  |  2DS: 2nd=S (S>D) ✓  |  2R: 2nd=S (R already on 1st) ✗
-                _2nd_key = {"2S": "R", "2D": "R", "2DS": "S", "2R": "S"}.get(points_order, "")
-                _1st_priority = {"R": 0, "S": 1, "D": 2}
-                _badge_key = {"R": 0, "S": 1, "D": 2}
-                _show_on_2nd = (
-                    show_punishment and
-                    _badge_key.get(_2nd_key, 9) < _1st_priority.get(
-                        "R" if points_order == "2R" else
-                        "S" if points_order == "2S" else
-                        "D", 9
-                    )
-                )
-                if _show_on_2nd:
-                    s_ucid = data.get("ucid")
-                    if "hook_punishment" in data:
-                        s_pts_p = data["hook_punishment"]
-                    elif pp and s_ucid:
-                        s_pts_p = pp.get(s_ucid, 0)
-                    else:
-                        s_pts_p = 0
-                    s_badge = get_punishment_badge(s_pts_p, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
-                    if s_badge:
-                        s_block.append(s_badge)
-                # Same atomic-block guarantee as the other tables — never
-                # split a player's own lines across chunked fields.
-                second_lines.append("\n".join(s_block))
-            if hidden_second > 0:
-                second_lines.append(f"*+ {hidden_second} more pilots*")
-
-            # Skip if no data
-            if not second_lines:
-                pass
-            else:
-                # Split into chunks
-                FIELD_LIMIT = 1020
-                s_chunks, s_current, s_len = [], [], 0
-                s_current_count = 0
-                _is_more_note_s = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
-                for line in second_lines:
-                    ll = len(line) + 1
-                    if s_len + ll > FIELD_LIMIT and s_current:
-                        s_chunks.append((s_current, s_current_count))
-                        s_current, s_len = [line], ll
-                        s_current_count = 0 if _is_more_note_s(line) else 1
-                    else:
-                        s_current.append(line)
-                        s_len += ll
-                        if not _is_more_note_s(line):
-                            s_current_count += 1
-                if s_current:
-                    s_chunks.append((s_current, s_current_count))
-
-                _s_position = 1
-                for i, (s_chunk_lines, s_chunk_count) in enumerate(s_chunks):
-                    chunk = "\n".join(s_chunk_lines)
-                    if i == 0:
-                        s_cont_name = second_title
-                    elif s_chunk_count > 0:
-                        _s_icon = second_title.split(" ", 1)[0]
-                        s_cont_name = f"{_s_icon} __Pilots #{_s_position}–{_s_position + s_chunk_count - 1}__"
-                    else:
-                        s_cont_name = second_cont
-                    embed.add_field(
-                        name=("\n" + second_title) if i == 0 else s_cont_name,
-                        value=("\n" + chunk) if i == 0 else chunk,
-                        inline=False
-                    )
-                    _s_position += s_chunk_count
-
-    # ── 3x modes: add second and third leaderboard ───────────────────────────
-    if points_order in ("3R", "3S", "3D", "3DS", "4R", "4DS"):
-        # Define table order: [2nd_key, 3rd_key]
-        # 3R: rank / session / daily  → 2nd=session, 3rd=daily
-        # 3S: session / rank / daily  → 2nd=rank,    3rd=daily
-        # 3D: daily / rank / session  → 2nd=rank,    3rd=session
-        # 3DS: daily / session / rank → 2nd=session, 3rd=rank
-        # 4R:  rank / session / [Podium] / daily  → same 2nd/3rd as 3R, Podium
-        #      inserted after the session table finishes (see below).
-        # 4DS: daily / [Podium] / session / rank  → same 2nd/3rd as 3DS,
-        #      Podium inserted before this loop starts (see below).
-        def _sorted_by(key: str):
-            if key == "R":
-                return sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True)
-            elif key == "S":
-                return sorted(players.items(), key=lambda x: x[1].get("session_points", 0), reverse=True)
-            else:  # D
-                return sorted(players.items(), key=lambda x: dp.get(x[0], 0), reverse=True)
-
-        def _title(key: str):
-            if key == "R": return ("🏆 __Pilot Leaderboard · by Rank__", "\u200b")
-            if key == "S": return ("📊 __Session Leaderboard · by Current Session__", "\u200b")
-            return ("📅 __Daily Leaderboard · by Today's Points__", "\u200b")
-
-        order_map = {
-            "3R":  ("S", "D"),
-            "3S":  ("R", "D"),
-            "3D":  ("R", "S"),
-            "3DS": ("S", "R"),
-            "4R":  ("S", "D"),
-            "4DS": ("S", "R"),
-        }
-        second_key, third_key = order_map[points_order]
-        _lim_3 = _limit_3t if _limit_3t else max_pilots
-
-        # 4DS: Podium goes between the first table (Daily, rendered above
-        # this block) and the second table (Session) — i.e. right here,
-        # before the loop below builds anything.
-        if points_order == "4DS":
-            podium_lines_4x = _build_podium_table(
-                daily_history or {}, players, days=podium_4x_days, top=podium_4x_top, strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_4x_min3_latest_day
-            )
-            if podium_lines_4x:
-                _add_podium_field(embed, "👑", podium_lines_4x)
-
-        for tbl_key in (second_key, third_key):
-            # 4R: Podium goes between the Session table and the Daily table
-            # — inserted here, at the very start of processing third_key,
-            # so it lands in the right spot even if the Session table ended
-            # up empty/skipped above.
-            if points_order == "4R" and tbl_key == third_key:
-                podium_lines_4x = _build_podium_table(
-                    daily_history or {}, players, days=podium_4x_days, top=podium_4x_top, strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_4x_min3_latest_day
-                )
-                if podium_lines_4x:
-                    _add_podium_field(embed, "👑", podium_lines_4x)
-
-            tbl_items = _sorted_by(tbl_key)
-            # Skip daily table if no daily data
-            if tbl_key == "D" and not has_daily:
-                continue
-            # Filter out players with zero points for this table's key
-            if tbl_key == "R":
-                tbl_items = [(n, d) for n, d in tbl_items if d.get("credits", 0) > 0]
-            elif tbl_key == "S":
-                tbl_items = [(n, d) for n, d in tbl_items if d.get("session_points", 0) > 0]
-            else:  # D
-                tbl_items = [(n, d) for n, d in tbl_items if dp.get(n, 0) > 0 or d.get("daily_stats")]
-            if not tbl_items:
-                continue
-            tbl_title, tbl_cont = _title(tbl_key)
-            total_tbl = len(tbl_items)
-            _lim_3_eff = (_lim_3 + _surplus) if _lim_3 else None
-            if _lim_3_eff:
-                tbl_items = tbl_items[:_lim_3_eff]
-            _surplus   = max(0, _lim_3_eff - len(tbl_items)) if _lim_3_eff else 0
-            hidden_tbl = total_tbl - len(tbl_items)
-            tbl_lines  = []
-            t_medals   = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
-            for i, (name, data) in enumerate(tbl_items):
-                t_credits = int(data["credits"])
-                t_rank    = data.get("custom_rank") or get_rank(t_credits)
-                t_display = strip_callsign(name) if strip_callsign_flag else name
-                _t_short_src = t_display if len(t_display) <= 22 else t_display[:20] + '..'
-                t_short   = _safe_code_span(_t_short_src)
-                t_medal   = data.get("custom_medal") or (t_medals[i] if i < len(t_medals) else "•")
-                t_pts     = data.get("session_points", 0)
-                t_hide    = data.get("hide_credits", False)
-                t_hide_s  = data.get("hide_session", False)
-                t_d_pts   = dp.get(name, 0)
-                t_show_d  = has_daily and t_d_pts > 0
-                def _tr(): return f"R: {t_credits:,}" if not t_hide else None
-                def _ts(): return f"S: {t_pts:,}" if not t_hide_s and t_pts else None
-                def _td(): return f"D: {t_d_pts:,}" if t_show_d else None
-                def _t_tri(a, b, c):
-                    parts = [p for p in [a, b, c] if p]
-                    return f"({'  ·  '.join(parts)})" if parts else ""
-                if compact_points:
-                    if tbl_key == "R":   t_pts_part = f"(R: {t_credits:,})" if not t_hide else ""
-                    elif tbl_key == "S": t_pts_part = f"(S: {t_pts:,})" if (not t_hide_s and t_pts) else ""
-                    else:                t_pts_part = f"(D: {t_d_pts:,})"
-                elif tbl_key == "R":   t_pts_part = _t_tri(_tr(), _ts(), _td())
-                elif tbl_key == "S": t_pts_part = _t_tri(_ts(), _tr(), _td())
-                else:                t_pts_part = _t_tri(_td(), _tr(), _ts())
-                t_rank = _fit_rank(f"{_t_short_src} — ", t_rank, f" {t_pts_part}")
-                t_block = [f"{t_medal} {t_short} — **{t_rank}** {t_pts_part}".rstrip()]
-                # Pilot career card on third table when this table is rank-ordered
-                if show_pilot_card and tbl_key == "R":
-                    t_card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
-                    if t_card:
-                        t_block.append(t_card)
-                # Session stats card on third table when this table is session-ordered
-                if show_session_card and tbl_key == "S":
-                    t_sess_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
-                    if t_sess_card:
-                        t_block.append(t_sess_card)
-                # Daily stats card on third table when this table is daily-ordered
-                if show_daily_card and tbl_key == "D":
-                    t_daily_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
-                    if t_daily_card:
-                        t_block.append(t_daily_card)
-                # Badge on this table if its key has highest priority among remaining tables
-                # In 3x: badge goes on R if exists, else S, else D
-                _order_keys_3x = {
-                    "3R":  ("R", "S", "D"),
-                    "3S":  ("S", "R", "D"),
-                    "3D":  ("D", "R", "S"),
-                    "3DS": ("D", "S", "R"),
-                    "4R":  ("R", "S", "D"),
-                    "4DS": ("D", "S", "R"),
-                }
-                _all_keys = _order_keys_3x.get(points_order, ())
-                _priority = {"R": 0, "S": 1, "D": 2}
-                # Badge key = highest priority key that has data
-                _available = [k for k in ("R", "S", "D") if k != "D" or has_daily]
-                _badge_tbl = min(_available, key=lambda k: _priority.get(k, 9)) if _available else None
-                if show_punishment and tbl_key == _badge_tbl:
-                    t_ucid = data.get("ucid")
-                    t_pp   = data.get("hook_punishment") if "hook_punishment" in data else (pp.get(t_ucid, 0) if pp and t_ucid else 0)
-                    t_badge = get_punishment_badge(t_pp, "", data.get("punishment_icon", ""), data.get("punishment_label", ""), data.get("punishment_pre_icon", ""))
-                    if t_badge:
-                        t_block.append(t_badge)
-                # Same atomic-block guarantee as the main pilot table above —
-                # never split a player's own lines across chunked fields.
-                tbl_lines.append("\n".join(t_block))
-            if hidden_tbl > 0:
-                tbl_lines.append(f"*+ {hidden_tbl} more pilots*")
-            if not tbl_lines:
-                continue  # skip this table entirely if no data
-            FIELD_LIMIT = 1020
-            t_chunks, t_cur, t_len = [], [], 0
-            t_cur_count = 0
-            _is_more_note_t = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
-            for line in tbl_lines:
-                ll = len(line) + 1
-                if t_len + ll > FIELD_LIMIT and t_cur:
-                    t_chunks.append((t_cur, t_cur_count))
-                    t_cur, t_len = [line], ll
-                    t_cur_count = 0 if _is_more_note_t(line) else 1
-                else:
-                    t_cur.append(line)
-                    t_len += ll
-                    if not _is_more_note_t(line):
-                        t_cur_count += 1
-            if t_cur:
-                t_chunks.append((t_cur, t_cur_count))
-            _t_position = 1
-            for i, (t_chunk_lines, t_chunk_count) in enumerate(t_chunks):
-                chunk = "\n".join(t_chunk_lines)
-                if i == 0:
-                    t_cont_name = tbl_title
-                elif t_chunk_count > 0:
-                    _t_icon = tbl_title.split(" ", 1)[0]
-                    t_cont_name = f"{_t_icon} __Pilots #{_t_position}–{_t_position + t_chunk_count - 1}__"
-                else:
-                    t_cont_name = tbl_cont
-                embed.add_field(
-                    name=("\n" + tbl_title) if i == 0 else t_cont_name,
-                    value=("\n" + chunk) if i == 0 else chunk,
-                    inline=False
-                )
-                _t_position += t_chunk_count
-
-    # ── Podium — standalone mode "P" (fully config-driven) ────────────────
-    if points_order == "P":
-        podium_lines = _build_podium_table(
-            daily_history or {}, players, days=podium_days, top=podium_top,
-            strip_callsign_flag=strip_callsign_flag
-        )
-        if podium_lines:
-            _add_podium_field(embed, "👑", podium_lines)
 
     # Full-width separator — placed at the bottom to fix embed width
     # without interrupting the visual flow of the content.
@@ -2692,7 +2362,7 @@ class FH_Report(Plugin):
     def __init__(self, bot: DCSServerBot, eventlistener: Type[TEventListener] = None):
         super().__init__(bot, eventlistener)
         self._message_ids: dict = {}
-        self._cycle_index: dict = {}
+        self._layout_cycle_index: dict = {}
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
         self._message_ids_file: str = os.path.join(
@@ -3059,77 +2729,47 @@ class FH_Report(Plugin):
             else:
                 await write_bytes_to_node(node, log_file, new_content, log=self.log)
 
-    def _resolve_points_order(self, server_name: str, cfg: dict,
-                              has_daily: bool = True,
-                              has_session: bool = True,
-                              has_podium: bool = True) -> str:
-        """Parse points_order — supports comma-separated cycle list.
-        Skips daily-primary modes if has_daily=False, session-primary modes
-        if has_session=False, and the standalone "P" (Podium-only) mode if
-        has_podium=False (no daily_history recorded yet) — advancing to the
-        next valid mode in the cycle in every case. Note: "P" is the only
-        mode gated by has_podium — 4R/4DS still render their R/S/D tables
-        even with no podium data, only their internal Podium sub-block is
-        omitted (handled separately in build_embed), so they're never
-        skipped here for that reason."""
-        raw   = str(cfg.get("points_order") or "R").strip()
-        items = [x.strip() for x in raw.split(",") if x.strip()]
-        if not items:
-            return "R"
-        if len(items) == 1:
-            return items[0]
+    def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
+        """Resolve (report_layout, points_detail) straight from config.
 
-        daily_primary   = {"D", "BD", "BDS", "2D", "2DS", "3D", "3DS", "4DS"}
-        session_primary = {"S", "BS", "2S", "3S"}
-        podium_primary  = {"P"}
+        report_layout supports comma-separated rotation: "DP, SR" shows
+        "DP" one cycle, "SR" the next, back to "DP" after that, advancing
+        exactly one step per update_interval — no separate cadence
+        setting, no persistence across bot restarts (always starts back
+        at the first group on load). Any number of groups is allowed. A
+        single value (no comma) behaves exactly as before, with nothing
+        to rotate. points_detail_D/S/R are NOT part of the rotation —
+        they're global and apply the same regardless of which group is
+        showing this cycle.
 
-        # For compound modes (2x, 3x, 4x), define which data keys they use
-        # Mode skips only if ALL its data keys have no data
-        compound_keys = {
-            "2R":  ("R", "S"),
-            "2S":  ("S", "R"),
-            "2D":  ("D", "R"),
-            "2DS": ("D", "S"),
-            "3R":  ("R", "S", "D"),
-            "3S":  ("S", "R", "D"),
-            "3D":  ("D", "R", "S"),
-            "3DS": ("D", "S", "R"),
-            "4R":  ("R", "S", "D"),
-            "4DS": ("D", "S", "R"),
-        }
+        No translation happens here any more — migrate_config.py converts
+        any legacy points_order/compact_points (and the older shared
+        single-string points_detail format) into report_layout and the
+        three independent points_detail_D/points_detail_S/points_detail_R
+        keys once, permanently, in the YAML itself. points_detail is
+        returned as a dict {"D": "...", "S": "...", "R": "..."} — a role
+        with no points_detail_<role> key at all is simply absent from the
+        dict, and _render_layout_tables treats that as "own value only",
+        same as every other show_*-style feature in this plugin defaulting
+        to off. Nothing here forces a table's own letter into its string —
+        that has to be written explicitly if wanted.
+        """
+        groups = [g.strip() for g in str(cfg.get("report_layout") or "R").split(",") if g.strip()]
+        if not groups:
+            groups = ["R"]
+        if len(groups) == 1:
+            layout = groups[0]
+        else:
+            idx = self._layout_cycle_index.get(server_name, 0)
+            layout = groups[idx % len(groups)]
+            self._layout_cycle_index[server_name] = (idx + 1) % len(groups)
 
-        idx = self._cycle_index.get(server_name, 0)
-
-        for _ in range(len(items)):
-            candidate = items[idx % len(items)]
-            idx += 1
-
-            if candidate in compound_keys:
-                # Compound mode: skip only if ALL tables have no data
-                keys = compound_keys[candidate]
-                has_any = any(
-                    (k == "D" and has_daily) or
-                    (k == "S" and has_session) or
-                    (k == "R")
-                    for k in keys
-                )
-                if not has_any:
-                    continue
-            else:
-                # Simple/B/Podium mode: skip if primary key has no data
-                if not has_daily and candidate in daily_primary:
-                    continue
-                if not has_session and candidate in session_primary:
-                    continue
-                if not has_podium and candidate in podium_primary:
-                    continue
-
-            self._cycle_index[server_name] = idx % len(items)
-            return candidate
-
-        # All modes skipped — fall back to R
-        self._cycle_index[server_name] = idx % len(items)
-        return "R"
+        detail = {}
+        for role in ("D", "S", "R"):
+            raw = cfg.get(f"points_detail_{role}")
+            if raw is not None:
+                detail[role] = str(raw).strip().upper()
+        return layout, detail
 
     def _get_daily_file(self, saves_dir: str) -> str:
         """Return path to daily_snapshot.json cache file."""
@@ -3600,18 +3240,26 @@ class FH_Report(Plugin):
         if show_punishment:
             punishment_points = await self._fetch_punishment_points()
 
-        # Compute daily points first so we know if daily data exists
-        # before resolving the points_order mode. Includes 4R/4DS (their
-        # Daily table/pts_str needs this) and P (Podium's own daily_history
-        # capture-on-reset logic lives inside _compute_daily_points — if
-        # this never ran for a server using only "P", the history file
-        # would never get populated at all).
-        raw_order  = str(cfg.get("points_order") or "R").strip()
-        daily_modes = {"D", "BD", "BDS", "2D", "2DS", "BR", "BS", "2R", "2S", "3R", "3S", "3D", "3DS", "4R", "4DS", "P"}
-        needs_daily = any(m.strip() in daily_modes for m in raw_order.split(","))
+        # Compute daily points first so we know if daily data exists before
+        # rendering. Needed whenever "D" is one of the tables, or "D" is
+        # requested as extra detail on some OTHER table via its own
+        # points_detail_<role>, or "P" is present — Podium's own
+        # daily_history capture-on-reset logic lives inside
+        # _compute_daily_points, so it must run even for a Podium-only
+        # layout or the history file would never get populated at all.
+        # Intentionally checked against the RAW (un-split) report_layout
+        # string, commas included: with rotation ("DP, SR"), daily/Podium
+        # data is kept warm on every cycle regardless of which single
+        # group is actually showing this time, so nothing goes stale or
+        # has to be rebuilt in a rush the moment its group comes back up.
+        raw_layout = str(cfg.get("report_layout") or "R").strip().upper()
+        needs_daily = ("D" in raw_layout) or ("P" in raw_layout) or any(
+            "D" in str(cfg.get(f"points_detail_{role}") or "").upper()
+            for role in ("D", "S", "R")
+        )
         # Also run daily-points computation (and its campaign-restart
         # detection) whenever waypoint sorting is enabled, regardless of
-        # points_order — that's the signal used to know when to refresh
+        # report_layout — that's the signal used to know when to refresh
         # the shared waypoint cache (see sort_zones_by_waypoint below).
         needs_daily = needs_daily or _bool_cfg(cfg.get("sort_zones_by_waypoint"))
         daily_pts: dict = {}
@@ -3654,22 +3302,13 @@ class FH_Report(Plugin):
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
 
-        # Load daily_history once here (cheap, tiny file) so we can both
-        # decide whether "P" should be skipped in the cycle (no history yet
-        # = nothing to show) and reuse the same data for build_embed below
-        # without reading the file twice.
+        # Load daily_history once here (cheap, tiny file) so build_embed can
+        # reuse it below without reading the file twice. If there's no
+        # history yet, _render_layout_tables' own Podium step simply
+        # renders nothing for "P" — no separate skip-check needed here.
         daily_history_data = self._load_daily_history(saves_dir)
 
-        # Resolve points_order — skips daily-primary modes if no daily data,
-        # session-primary modes if no session data, and "P" if there's no
-        # Podium history yet — advancing to the next valid mode in the cycle
-        # instead of substituting or showing an empty table.
-        current_order = self._resolve_points_order(
-            instance_name, cfg,
-            has_daily   = bool(daily_pts) or any(daily_stats.values()),
-            has_session = has_session,
-            has_podium  = bool(daily_history_data),
-        )
+        current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
 
         # Zone ordering by waypoint number — opt-in, uses hot injection to
         # dump Foothold's in-memory WaypointList (never persisted to any
@@ -3728,13 +3367,13 @@ class FH_Report(Plugin):
             zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16))),
             max_pilots_2t       = cfg.get("max_pilots_2t") or None,
             campaign_stats      = campaign_stats,
-            points_order        = current_order,
+            report_layout       = current_layout,
+            points_detail       = current_detail,
             bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
             daily_points        = daily_pts,
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
             show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
             pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
-            compact_points      = _bool_cfg(cfg.get("compact_points")),
             show_session_card   = _bool_cfg(cfg.get("show_session_card")),
             session_card_icon   = str(cfg.get("session_card_icon") or "🔸"),
             session_stats_raw   = session_stats_raw,
@@ -3742,12 +3381,12 @@ class FH_Report(Plugin):
             daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
             daily_stats_raw     = daily_stats,
             player_cmd_hint     = player_cmd_hint,
-            daily_history       = daily_history_data if current_order in ("P", "4R", "4DS") else None,
+            daily_history       = daily_history_data if "P" in current_layout else None,
             podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7),
             podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1))),
-            podium_4x_days      = int(cfg.get("podium_4x_days") if cfg.get("podium_4x_days") is not None else 7),
-            podium_4x_top       = max(1, min(50, int(cfg.get("podium_4x_top") or 1))),
-            podium_4x_min3_latest_day = _bool_cfg(cfg.get("podium_4x_min3_latest_day")),
+            podium_combined_days      = int(cfg.get("podium_combined_days") if cfg.get("podium_combined_days") is not None else 7),
+            podium_combined_top       = max(1, min(50, int(cfg.get("podium_combined_top") or 1))),
+            podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day")),
             sort_zones_by_waypoint = sort_zones_by_wp,
             waypoint_map        = waypoint_map,
         )

@@ -27,7 +27,8 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   saves_dir      - Override Foothold saves path (default: auto-resolved from instance home)
 #
 # OPTIONAL - define in DEFAULT to apply to all servers,
-#             or override per server block.
+#             or override per server block. Listed below in the same order
+#             they appear in the DEFAULT block.
 #
 #   admin            - Who can query other players' stats with /fh_report player
 #                      (default: "Admin"). Comma-separated list where each
@@ -37,7 +38,70 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      (Discord account must be linked via /linkme).
 #                      Example:
 #                        admin: Admin, SomeSpecificUser
+#   report_layout    - Which leaderboard tables to show, and in what order (default: R)
+#                      A string built from these letters, used in any order/subset:
+#                        D = Daily Leaderboard (today's points)
+#                        P = Daily Podium (historical closing events)
+#                        S = Session Leaderboard (current session)
+#                        R = Pilot Leaderboard (by Rank)
+#                      Examples:
+#                        R        = just the Rank table (default)
+#                        DS       = Daily table, then Session table
+#                        DPS      = Daily, Podium, then Session (no Rank table)
+#                        DPSR     = Daily, Podium, Session, Rank (all four)
+#                      P only makes sense combined with at least one of D/S/R —
+#                      "P" alone shows just the Podium, nothing else.
+#                      Comma-separated = rotate between compositions, one step
+#                      per update_interval, back to the first after the last —
+#                      any number of groups is allowed. Example:
+#                        report_layout: DP, SR
+#                      shows "DP" one cycle, "SR" the next, "DP" again, and so
+#                      on. Daily/Podium data is still kept up to date every
+#                      cycle regardless of which group is currently showing.
+#                      Rotation position isn't saved across a bot restart —
+#                      it always starts at the first group again on load.
+#                      points_detail_D/S/R (below) are NOT part of the
+#                      rotation — they apply the same no matter which group
+#                      is showing.
+#                      The old points_order/compact_points values (from versions
+#                      before v12.0.0) are NOT understood here any more — they
+#                      are converted automatically, once, into report_layout/
+#                      points_detail by the install/update process (which runs
+#                      migrate_config.py against this file) — see CHANGELOG for
+#                      the exact mapping used.
+#   points_detail_D  - Exactly what the Daily table shows, in this order  (default: none)
+#   points_detail_S  - Exactly what the Session table shows, in this order (default: none)
+#   points_detail_R  - Exactly what the Rank table shows, in this order   (default: none)
+#                      Opt-in, like every other show_*-style feature below —
+#                      a table with no points_detail_<its own letter> key at
+#                      all shows only its own value, same as the old
+#                      compact_points: true. There's no points_detail_P —
+#                      Podium has no per-player value to show.
+#                      Each is a string of the letters D, S, R, in the order
+#                      you want them shown — nothing is added automatically,
+#                      not even the table's own letter, so if you want a
+#                      table to show its own value it has to be in its own
+#                      string explicitly.
+#                      Example: report_layout: DPSR
+#                        points_detail_D: DSR   → Daily table:   (D: nnn · S: nnn · R: nnn)
+#                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
+#                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
+#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#                          Manual reset (no commands in this plugin): delete
+#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
+#                          restarts cleanly at 0, it never retroactively counts
+#                          everything accumulated up to that point.
+#                          Campaign restart is also detected automatically: if both
+#                          total points and total kills drop for common players,
+#                          the daily snapshot resets on its own — no action needed.
+#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour.
+#                          Days: mon, tue, wed, thu, fri, sat, sun
+#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                            daily_reset_schedule:
+#                              thu: 6
+#                              sat: 6
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
@@ -81,86 +145,13 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
-#   points_order     - Controls leaderboard display and sort order  (default: R)
-#                      Single table modes:
-#                        R   = rank points only              (R: nnn)
-#                        S   = session points only           (S: nnn)
-#                        D   = daily points only             (D: nnn)
-#                      Combined single table (B = all three values):
-#                        BR  = sort by rank,    show R · S · D
-#                        BS  = sort by session, show S · R · D
-#                        BD  = sort by daily,   show D · R · S
-#                        BDS = sort by daily,   show D · S · R
-#                      Dual table (2 = two leaderboards):
-#                        2R  = 1st by rank / 2nd by session
-#                        2S  = 1st by session / 2nd by rank
-#                        2D  = 1st by daily / 2nd by rank
-#                        2DS = 1st by daily / 2nd by session
-#                      Triple table (3 = three leaderboards):
-#                        3R  = rank / session / daily
-#                        3S  = session / rank / daily
-#                        3D  = daily / rank / session
-#                        3DS = daily / session / rank
-#                      Quad table (4 = three leaderboards + Podium, see below):
-#                        4R  = rank / session / Podium / daily
-#                        4DS = daily / Podium / session / rank
-#                      Podium-only table (no pilot leaderboard at all):
-#                        P   = Podium only — see podium_days/podium_top below
-#                      Comma-separated = cycle through modes on each update
-#                      Example: points_order: 2S, BS, R
-#                      D modes show nothing if no daily data yet (silently skipped)
-#   compact_points   - In multi-table modes (2x, 3x), show only the primary data  (default: false)
-#                      false = each table shows all data (R · S · D)
-#                      true  = each table shows only its own sorted value (R, S, or D)
-#   podium_days      - Window of days shown in the standalone "P" mode's
-#                      Podium table                                  (default: 7)
-#                      0 = all available history (since campaign start)
-#                      A positive number = only the most recent N calendar
-#                      dates that have at least one recorded closing event.
-#                      Only affects points_order: P. The Podium icon is
-#                      fixed (👑) everywhere and is not configurable.
-#   podium_top       - Show the top N positions (1-50) for each closing
-#                      event in the standalone "P" mode's Podium table
-#                      (default: 1) — e.g. 3 shows 1st, 2nd AND 3rd place,
-#                      not just 3rd place alone.
-#                      Only affects points_order: P — see podium_days above.
-#   podium_4x_days   - Same as podium_days, but for the Podium sub-block
-#                      shown inside 4R/4DS instead of standalone "P"
-#                      (default: 7). Independent from podium_days — the two
-#                      Podium displays can be configured differently.
-#   podium_4x_top    - Same as podium_top (top N positions, 1-50), but for
-#                      4R/4DS's Podium sub-block (default: 1). Independent
-#                      from podium_top.
-#   podium_4x_min3_latest_day - Force at least the top 3 positions to show
-#                      for the single most recent closing event(s) in
-#                      4R/4DS's Podium sub-block, even if podium_4x_top is
-#                      set lower (1 or 2)                        (default: false)
-#                      false = every day strictly follows podium_4x_top
-#                      true  = the most recent date always shows at least
-#                              3 positions (both closures if that day had
-#                              two); all other days still follow
-#                              podium_4x_top exactly. Has no effect if
-#                              podium_4x_top is already 3 or higher.
-#                      Only affects 4R/4DS — the standalone "P" mode never
-#                      uses this.
-#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
-#                          Manual reset (no commands in this plugin): delete
-#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
-#                          restarts cleanly at 0, it never retroactively counts
-#                          everything accumulated up to that point.
-#                          Campaign restart is also detected automatically: if both
-#                          total points and total kills drop for common players,
-#                          the daily snapshot resets on its own — no action needed.
-#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
-#                          Only define the days that differ from daily_reset_hour.
-#                          Days: mon, tue, wed, thu, fri, sat, sun
-#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
-#                            daily_reset_schedule:
-#                              thu: 6
-#                              sat: 6
-#   max_pilots       - Max pilots shown in single-table modes (R,S,BR,BS) (default: all)
-#   max_pilots_2t    - Max pilots per table in dual-table modes (2R,2S)   (default: all)
+#   max_pilots       - Max pilots shown when report_layout has just 1 table (default: all)
+#   max_pilots_2t    - Max pilots per table when report_layout has exactly
+#                      2 tables (Podium doesn't count)                    (default: all)
 #                      Falls back to max_pilots if not set.
+#   max_pilots_3t    - Max pilots per table when report_layout has 3 or
+#                      more tables (Podium doesn't count)                 (default: all)
+#                      Falls back to max_pilots_2t, then max_pilots.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -203,6 +194,39 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      Example output:
 #                        🥇 `Pilot1` — Staff Sergeant (D: 890)
 #                        ·　🔸 1h flight · 8 kills · 1 refuel
+#   podium_days      - Window of days shown when report_layout is JUST "P"
+#                      (Podium alone, no other table)                (default: 7)
+#                      0 = all available history (since campaign start)
+#                      A positive number = only the most recent N calendar
+#                      dates that have at least one recorded closing event.
+#                      Only affects report_layout: P on its own. The Podium
+#                      icon is fixed (👑) everywhere and not configurable.
+#   podium_top       - Show the top N positions (1-50) for each closing
+#                      event when report_layout is JUST "P"
+#                      (default: 1) — e.g. 3 shows 1st, 2nd AND 3rd place,
+#                      not just 3rd place alone.
+#                      Only affects report_layout: P on its own — see
+#                      podium_days above.
+#   podium_combined_days - Same as podium_days, but for the Podium table when
+#                      "P" is combined with other letters in report_layout
+#                      (e.g. DPSR, DPS, RPSD)                        (default: 7).
+#                      Independent from podium_days — the two Podium
+#                      displays can be configured differently.
+#   podium_combined_top - Same as podium_top (top N positions, 1-50), but for
+#                      "P" combined with other letters (default: 1).
+#                      Independent from podium_top.
+#   podium_combined_min3_latest_day - Force at least the top 3 positions to show
+#                      for the single most recent closing event(s) when "P"
+#                      is combined with other letters, even if
+#                      podium_combined_top is set lower (1 or 2)  (default: false)
+#                      false = every day strictly follows podium_combined_top
+#                      true  = the most recent date always shows at least
+#                              3 positions (both closures if that day had
+#                              two); all other days still follow
+#                              podium_combined_top exactly. Has no effect if
+#                              podium_combined_top is already 3 or higher.
+#                      Only affects "P" combined with other letters — "P" on
+#                      its own never uses this.
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
@@ -241,102 +265,297 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 
 # ── All known valid variables ──────────────────────────────────────────────────
 KNOWN_VARS = {
+    "admin",
+    "report_layout",
+    "points_detail_D",
+    "points_detail_S",
+    "points_detail_R",
     "update_interval",
+    "daily_reset_hour",
+    "daily_reset_schedule",
     "bar_length",
     "bar_style_emoji",
-    "daily_reset_hour",
-    "max_pilots_3t",
     "max_zones",
     "zone_name_length",
     "slot_status",
     "sort_zones_by_waypoint",
+    "strip_callsign",
+    "max_pilots",
+    "max_pilots_2t",
+    "max_pilots_3t",
+    "show_all_pilots",
     "show_pilot_card",
     "pilot_card_icon",
     "show_session_card",
     "session_card_icon",
     "show_daily_card",
     "daily_card_icon",
+    "podium_days",
+    "podium_top",
+    "podium_combined_days",
+    "podium_combined_top",
+    "podium_combined_min3_latest_day",
     "show_punishment",
-    "strip_callsign",
-    "points_order",
-    "compact_points",
-    "show_all_pilots",
-    "max_pilots",
-    "max_pilots_2t",
     "excluded_ucids",
     "disable_updates",
+    "show_player_cmd_hint",
+    "player_cmd_hint_text",
     "saves_dir",
     "channel_id",
     "campaign_name",
-    "admin",
-    "show_player_cmd_hint",
-    "player_cmd_hint_text",
-    "podium_days",
-    "podium_top",
-    "podium_4x_days",
-    "podium_4x_top",
-    "podium_4x_min3_latest_day",
 }
 
 # ── Default values for DEFAULT block variables ─────────────────────────────────
+# Dict order here IS the output order written to the DEFAULT block — keep it
+# in sync with HEADER_COMMENT's order above.
 DEFAULTS = {
     "admin":            "Admin",
+    "report_layout":    "R",
     "update_interval":  300,
+    "daily_reset_hour": 0,
     "bar_length":       40,
     "bar_style_emoji":  False,
-    "daily_reset_hour": 0,
     "max_zones":        15,
     "zone_name_length": 16,
     "slot_status":      False,
     "sort_zones_by_waypoint": False,
+    "strip_callsign":   False,
+    "show_all_pilots":  False,
     "show_pilot_card":  False,
     "pilot_card_icon":  "🔸",
     "show_session_card": False,
     "session_card_icon": "🔸",
     "show_daily_card":  False,
     "daily_card_icon":  "🔸",
-    "show_punishment":  False,
-    "strip_callsign":   False,
-    "points_order":     "R",
-    "compact_points":   False,
-    "show_all_pilots":  False,
-    "show_player_cmd_hint":  True,
-    "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
     "podium_days":      7,
     "podium_top":       1,
-    "podium_4x_days":      7,
-    "podium_4x_top":       1,
-    "podium_4x_min3_latest_day": False,
+    "podium_combined_days":      7,
+    "podium_combined_top":       1,
+    "podium_combined_min3_latest_day": False,
+    "show_punishment":  False,
+    "show_player_cmd_hint":  True,
+    "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
 }
 
 COMMENTS = {
     "admin":            "# Comma-separated Discord role name(s) and/or username(s)",
+    "report_layout":    "# Letters D/P/S/R, any order/subset — see header",
+
     "update_interval":  "# Seconds between embed refreshes",
+    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
     "bar_length":       "# Number of squares in the progress bar",
     "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
-    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
     "max_zones":        "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
     "sort_zones_by_waypoint": "# false = sort by level/damage  |  true = sort by mission waypoint number",
+    "strip_callsign":   "",
+    "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
     "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "pilot_card_icon":  "# Emoji at the start of the pilot career card line (default: 🔸)",
     "show_session_card": "# false = disabled  |  true = show session stats card per pilot",
     "session_card_icon": "# Emoji at the start of the session stats card line (default: 🔸)",
     "show_daily_card":  "# false = disabled  |  true = show daily stats card per pilot",
     "daily_card_icon":  "# Emoji at the start of the daily stats card line (default: 🔸)",
+    "podium_days":      "# 0 = since campaign start  |  N = last N days. Only affects report_layout: P alone",
+    "podium_top":       "# 1-50, shows the top N positions each day. Only affects report_layout: P alone",
+    "podium_combined_days":      "# Same as podium_days, but when \"P\" is combined with other letters",
+    "podium_combined_top":       "# Same as podium_top, but when \"P\" is combined with other letters",
+    "podium_combined_min3_latest_day": "# false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
-    "strip_callsign":   "",
-    "points_order":     "",
-    "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
-    "podium_days":      "# 0 = since campaign start  |  N = last N days. Only affects points_order: P",
-    "podium_top":       "# 1-50, shows the top N positions each day. Only affects points_order: P",
-    "podium_4x_days":      "# Same as podium_days, but for 4R/4DS's Podium sub-block",
-    "podium_4x_top":       "# Same as podium_top, but for 4R/4DS's Podium sub-block",
-    "podium_4x_min3_latest_day": "# false = strictly follow podium_4x_top  |  true = force top 3 for the most recent day",
 }
+
+
+# ── points_order -> report_layout/points_detail_<role> correspondence table ──
+# Confirmed against the real rendering code, one legacy mode at a time, in
+# chat. Each entry maps a legacy code to (report_layout, {role: detail}) —
+# with one independent detail string PER TABLE ROLE now (not one shared
+# string), this migration is exact for every single one of these 19 codes:
+# the earlier shared-string design couldn't represent some of them exactly
+# because different legacy modes disagreed on ordering for the same role
+# (e.g. 2D wanted rank-before-session on its Daily table, 2DS wanted the
+# opposite) — a per-role dict has no such conflict. "T" (the old code-level
+# default when points_order was unset) is treated as "R": its old catch-all
+# formatting was an unintentional quirk, not a real mode.
+LEGACY_LAYOUT_MAP = {
+    "T":   ("R",    {}),
+    "R":   ("R",    {}),
+    "S":   ("S",    {}),
+    "D":   ("D",    {}),
+    "P":   ("P",    {}),
+    "BR":  ("R",    {"R": "RSD"}),
+    "BS":  ("S",    {"S": "SRD"}),
+    "BD":  ("D",    {"D": "DRS"}),
+    "BDS": ("D",    {"D": "DSR"}),
+    "2R":  ("RS",   {"R": "RSD", "S": "SRD"}),
+    "2S":  ("SR",   {"S": "SRD", "R": "RSD"}),
+    "2D":  ("DR",   {"D": "DRS", "R": "RSD"}),
+    "2DS": ("DS",   {"D": "DSR", "S": "SRD"}),
+    "3R":  ("RSD",  {"R": "RSD", "S": "SRD", "D": "DRS"}),
+    "3S":  ("SRD",  {"S": "SRD", "R": "RSD", "D": "DRS"}),
+    "3D":  ("DRS",  {"D": "DRS", "R": "RSD", "S": "SRD"}),
+    "3DS": ("DSR",  {"D": "DSR", "S": "SRD", "R": "RSD"}),
+    "4R":  ("RSPD", {"R": "RSD", "S": "SRD", "D": "DRS"}),
+    "4DS": ("DPSR", {"D": "DSR", "S": "SRD", "R": "RSD"}),
+}
+
+
+def _translate_legacy_layout(code: str, compact: bool) -> tuple[str, dict]:
+    """Translate one legacy points_order code (plus its paired
+    compact_points flag) into (report_layout, {role: detail_string}).
+    Falls back to treating an unrecognized code as an already-new-style
+    layout string with no extra detail for any role, for anyone who typed
+    the new grammar directly into the old points_order key before this
+    migration ran. compact=True always yields an empty dict — no
+    points_detail_<role> keys at all, i.e. every table shows only its own
+    value, same as the old compact_points: true."""
+    code = (code or "R").strip().upper()
+    layout, detail_map = LEGACY_LAYOUT_MAP.get(code, (code, {}))
+    if compact:
+        return layout, {}
+    return layout, dict(detail_map)
+
+
+def _find_top_level_blocks(content: str) -> list[tuple[int, int]]:
+    """Return (start, end) bounds for every top-level block in the file
+    (DEFAULT: and every real, uncommented server block)."""
+    top_level_re = re.compile(r'^\S.*$', re.MULTILINE)
+    starts = [m.start() for m in top_level_re.finditer(content)]
+    return [(s, (starts[i + 1] if i + 1 < len(starts) else len(content)))
+            for i, s in enumerate(starts)]
+
+
+def _find_kv_line(block_text: str, key: str):
+    """Search block_text for an uncommented `key: value` line. Returns the
+    match object (groups: indent, value, trailing comment) or None."""
+    return re.search(
+        rf'^([ \t]+){re.escape(key)}[ \t]*:[ \t]*([^\n#]*?)[ \t]*(#.*)?$',
+        block_text, re.MULTILINE
+    )
+
+
+def rename_legacy_keys(content: str, renames: dict) -> tuple[str, list[str]]:
+    """Straight key rename, value untouched — for cases where only the
+    NAME changed, not its meaning (e.g. podium_4x_* -> podium_combined_*).
+    Handles both live and commented-out (template example) occurrences
+    anywhere in the file with one pass per key."""
+    changes = []
+    for old_name, new_name in renames.items():
+        pattern = re.compile(rf'^([ \t]*#?[ \t]*){re.escape(old_name)}([ \t]*:)', re.MULTILINE)
+        new_content, n = pattern.subn(rf'\1{new_name}\2', content)
+        if n:
+            changes.append(f"{old_name} -> {new_name} ({n} occurrence(s))")
+        content = new_content
+    return content, changes
+
+
+def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
+    """Find every legacy layout-related key — `points_order` (+ its paired
+    `compact_points`), and/or the older shared single-string
+    `points_detail` from before the per-table split — anywhere in the
+    file (DEFAULT or any server block), and rewrite them into
+    report_layout + points_detail_D/points_detail_S/points_detail_R at
+    the same spot, removing every legacy/intermediate key. If a block
+    already defines report_layout explicitly, that value is respected —
+    only the detail is (re)computed for whichever of its roles don't
+    already have their own points_detail_<role> key. Returns
+    (new_content, change_descriptions)."""
+    changes = []
+    edits = []  # (start, end, replacement text), applied back-to-front
+
+    for block_start, block_end in _find_top_level_blocks(content):
+        block_text = content[block_start:block_end]
+
+        po_m = _find_kv_line(block_text, "points_order")
+        pd_m = _find_kv_line(block_text, "points_detail")  # older shared single-string form
+        if po_m is None and pd_m is None:
+            continue  # nothing legacy in this block
+
+        cp_m = _find_kv_line(block_text, "compact_points")
+        rl_m = _find_kv_line(block_text, "report_layout")
+        compact = bool(cp_m) and cp_m.group(2).strip().lower() in ("true", "1")
+
+        if po_m is not None:
+            po_layout, po_detail_map = _translate_legacy_layout(po_m.group(2).strip(), compact)
+        else:
+            po_layout, po_detail_map = None, {}
+
+        final_layout = rl_m.group(2).strip() if rl_m is not None else po_layout
+        if not final_layout:
+            continue
+        active_roles = [c for c in final_layout.upper() if c in "RSD"]
+
+        # Which roles already have their OWN points_detail_<role> key in
+        # this block? Those are left completely untouched.
+        existing_detail_roles = {
+            role for role in active_roles
+            if _find_kv_line(block_text, f"points_detail_{role}") is not None
+        }
+
+        if pd_m is not None:
+            # Older shared single-string points_detail — distribute it
+            # per active role exactly as the old shared-string engine
+            # actually behaved (own letter forced first, then whatever
+            # else was in the string), so this specific migration step
+            # is a byte-for-byte behavioural match of what was showing
+            # before, for anyone who already adopted that intermediate
+            # format.
+            old_shared = pd_m.group(2).strip().strip('"').strip("'")
+            if old_shared:
+                detail_map = {
+                    r: r + "".join(c for c in old_shared.upper() if c != r)
+                    for r in active_roles if r not in existing_detail_roles
+                }
+            else:
+                detail_map = {}
+        else:
+            detail_map = {r: v for r, v in po_detail_map.items()
+                          if r in active_roles and r not in existing_detail_roles}
+
+        new_lines = ""
+        if rl_m is None:
+            indent = (po_m or pd_m).group(1)
+            new_lines += f"{indent}report_layout: {final_layout}\n"
+        for role in ("D", "S", "R"):
+            if role in detail_map:
+                indent = (po_m or pd_m).group(1)
+                new_lines += f'{indent}points_detail_{role}: "{detail_map[role]}"\n'
+
+        summary_bits = []
+        if rl_m is None:
+            summary_bits.append(f"report_layout: {final_layout}")
+        summary_bits += [f"points_detail_{r}: {v}" for r, v in detail_map.items()]
+        changes.append(
+            (f"points_order: {po_m.group(2).strip()} -> " if po_m else "points_detail (shared) -> ")
+            + (", ".join(summary_bits) if summary_bits else "(removed, no replacement needed)")
+        )
+
+        # Replace points_order's line with the new lines (or, if there was
+        # no points_order, replace the old shared points_detail's line).
+        # Then separately delete compact_points and — if BOTH points_order
+        # and an old shared points_detail existed together — the leftover
+        # points_detail line too.
+        primary_m = po_m if po_m is not None else pd_m
+        edits.append((
+            block_start + primary_m.start(),
+            block_start + primary_m.end() + (1 if content[block_start + primary_m.end():block_start + primary_m.end() + 1] == "\n" else 0),
+            new_lines
+        ))
+        for m in (cp_m, (pd_m if po_m is not None and pd_m is not None else None)):
+            if m is None:
+                continue
+            m_start = block_start + m.start()
+            m_end   = block_start + m.end()
+            m_end   = m_end + 1 if content[m_end:m_end + 1] == "\n" else m_end
+            edits.append((m_start, m_end, ""))
+
+    edits.sort(key=lambda e: e[0], reverse=True)
+    for start, end, repl in edits:
+        content = content[:start] + repl + content[end:]
+
+    return content, changes
 
 
 def main():
@@ -373,6 +592,68 @@ def main():
         print("  Converted legacy 0/1 values to true/false:")
         for item in bool_converted:
             print(f"    {item}")
+
+    # ── 1b. Translate legacy points_order/compact_points (DEFAULT and any
+    # server block) into report_layout/points_detail, wherever they appear.
+    # Must run before the DEFAULT-block reconstruction below, so the newly
+    # written report_layout/points_detail lines are picked up as regular
+    # DEFAULTS-recognized keys with no further special-casing needed.
+    content, layout_changes = migrate_layout_variables(content)
+    if layout_changes:
+        print("  Migrated legacy points_order/compact_points:")
+        for item in layout_changes:
+            print(f"    {item}")
+
+    # ── 1c. Rename podium_4x_* -> podium_combined_* (name-only change, the
+    # old name only made sense next to the retired 4R/4DS codes).
+    content, podium_rename_changes = rename_legacy_keys(content, {
+        "podium_4x_days": "podium_combined_days",
+        "podium_4x_top": "podium_combined_top",
+        "podium_4x_min3_latest_day": "podium_combined_min3_latest_day",
+    })
+    if podium_rename_changes:
+        print("  Renamed:")
+        for item in podium_rename_changes:
+            print(f"    {item}")
+
+    # Cosmetic: commented-out example lines (server-block templates showing
+    # "#  points_order: R" for the admin to uncomment) aren't live values,
+    # so migrate_layout_variables above correctly leaves them alone — but
+    # they'd otherwise keep teaching the deprecated syntax forever. Refresh
+    # just these two known example lines to the new grammar.
+    commented_examples_updated = False
+    new_content = re.sub(
+        r'^#[ \t]*compact_points[ \t]*:[ \t]*false[ \t]*\n',
+        '',
+        content, flags=re.MULTILINE
+    )
+    if new_content != content:
+        commented_examples_updated = True
+    content = new_content
+    new_content = re.sub(
+        r'^(#[ \t]*)points_order[ \t]*:[ \t]*R[ \t]*$',
+        r'\1report_layout: R\n#  points_detail_R: SRD',
+        content, flags=re.MULTILINE
+    )
+    if new_content != content:
+        commented_examples_updated = True
+    content = new_content
+    new_content = content.replace(
+        "# options below only affect points_order: P",
+        '# options below only affect report_layout: P alone'
+    )
+    if new_content != content:
+        commented_examples_updated = True
+    content = new_content
+    new_content = content.replace(
+        "# options below only affect 4R/4DS",
+        '# options below only affect "P" combined w/ other letters'
+    )
+    if new_content != content:
+        commented_examples_updated = True
+    content = new_content
+    if commented_examples_updated:
+        print("  Refreshed commented-out example lines to the new syntax.")
 
     # ── 2. Find DEFAULT block (after bool conversion) ──────────────────────────
     default_match = re.search(r"^DEFAULT:\s*\n((?:[ \t]+.*\n|#.*\n|\n)*)", content, re.MULTILINE)
@@ -459,17 +740,30 @@ def main():
     # daily_reset_hour, not wherever extra_lines would otherwise place it.
     schedule_start = None
     for idx, l in enumerate(extra_lines):
-        if re.match(r"^[ \t]*daily_reset_schedule\s*:", l):
+        if re.match(r"^[ \t]*#?[ \t]*daily_reset_schedule\s*:", l):
             schedule_start = idx
             break
+    def _visual_indent(line: str) -> int:
+        # Strip at most one leading '#' (and its own indent) before
+        # measuring indent, so a fully-commented block (every line
+        # prefixed with '#') still nests correctly by the indentation of
+        # what follows the '#', not the '#' character itself.
+        stripped = line.rstrip("\n")
+        lead = len(stripped) - len(stripped.lstrip(" "))
+        rest = stripped[lead:]
+        if rest.startswith("#"):
+            rest = rest[1:]
+            return lead + (len(rest) - len(rest.lstrip(" ")))
+        return lead
+
     if schedule_start is not None:
-        base_indent  = len(extra_lines[schedule_start]) - len(extra_lines[schedule_start].lstrip(" "))
+        base_indent  = _visual_indent(extra_lines[schedule_start])
         schedule_end = schedule_start + 1
         while schedule_end < len(extra_lines):
             nxt = extra_lines[schedule_end]
             if not nxt.strip():
                 break
-            nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+            nxt_indent = _visual_indent(nxt)
             if nxt_indent > base_indent:
                 schedule_end += 1
             else:
