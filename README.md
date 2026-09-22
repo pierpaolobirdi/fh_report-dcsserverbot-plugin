@@ -53,21 +53,26 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 
 ### Options reference
 
+Listed in the same order they appear in `fh_report.yaml` itself:
+
 | Option | Default | Description |
 |---|---|---|
+| `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
+| `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
+| `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
 | `update_interval` | `300` | Seconds between embed refreshes |
+| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
+| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
 | `bar_length` | `40` | Number of squares in the progress bar |
 | `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
 | `max_zones` | `15` | Max zones per column. Omit for all |
 | `zone_name_length` | `16` | Max characters for zone names (8–24, clamped) |
 | `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
+| `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
-| `points_order` | `R` | Leaderboard mode — see [Leaderboard](#leaderboard) |
-| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
-| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
-| `max_pilots` | all | Max pilots in single-table modes |
-| `max_pilots_2t` | all | Max pilots per table in dual-table modes. Falls back to `max_pilots` |
-| `max_pilots_3t` | `6` | Max pilots per table in triple-table modes. Falls back to `max_pilots_2t` |
+| `max_pilots` | all | Max pilots when `report_layout` has just 1 table |
+| `max_pilots_2t` | all | Max pilots per table when `report_layout` has exactly 2 tables. Falls back to `max_pilots` |
+| `max_pilots_3t` | all | Max pilots per table when `report_layout` has 3 or more tables. Falls back to `max_pilots_2t`, then `max_pilots` |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
@@ -75,22 +80,26 @@ All configuration lives in `config/plugins/fh_report.yaml`. The `DEFAULT` sectio
 | `session_card_icon` | `🔸` | Emoji shown at the start of the session stats card line |
 | `show_daily_card` | `false` | `true` = show daily combat stats card per pilot |
 | `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
+| `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
+| `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
-| `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
+| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs-disable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
-| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs--disable_updates) below |
-| `saves_dir` | auto | Override Foothold saves path. Only needed for non-standard locations |
+| `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 
 ### Example config
 
 ```yaml
 DEFAULT:
+  report_layout: DPSR
+  points_detail_D: SR
+  points_detail_S: RD
+  points_detail_R: SD
   update_interval: 300
   bar_length: 40
   strip_callsign: true
-  points_order: 3DS, BS, BR
   show_pilot_card: true
   show_punishment: true
 
@@ -139,29 +148,57 @@ Only the first 5 upgrade slots are shown. Higher-numbered slots serve other purp
 
 ## Leaderboard
 
-### Points display (`points_order`)
+### Report layout (`report_layout`)
 
-Comma-separated values cycle through modes on each update: `points_order: 3DS, BS, BR`
+Which leaderboard tables to show, and in what order, is built from four letters — use any subset, in any order:
 
-Modes with Daily (`D`) are skipped when no daily data exists yet. Session modes are skipped when no session data exists.
+| Letter | Table | Sorted by |
+|---|---|---|
+| `D` | Daily Leaderboard | Today's points |
+| `P` | Daily Podium — historical closing events, see [Daily Podium](#daily-podium) | — |
+| `S` | Session Leaderboard | Current session points |
+| `R` | Pilot Leaderboard | Career rank |
 
-| Mode | Tables | Sorted by | Shows |
-|---|---|---|---|
-| `R` | 1 | Rank | `(R: nnn)` |
-| `S` | 1 | Session | `(S: nnn)` |
-| `D` | 1 | Daily | `(D: nnn)` |
-| `BR` | 1 | Rank | `(R · S · D)` |
-| `BS` | 1 | Session | `(S · R · D)` |
-| `BD` | 1 | Daily | `(D · R · S)` |
-| `BDS` | 1 | Daily | `(D · S · R)` |
-| `2R` | 2 | Rank / Session | — |
-| `2S` | 2 | Session / Rank | — |
-| `2D` | 2 | Daily / Rank | — |
-| `2DS` | 2 | Daily / Session | — |
-| `3R` | 3 | Rank / Session / Daily | — |
-| `3S` | 3 | Session / Rank / Daily | — |
-| `3D` | 3 | Daily / Rank / Session | — |
-| `3DS` | 3 | Daily / Session / Rank | — |
+Examples:
+
+```yaml
+report_layout: R        # just the Rank table (the default)
+report_layout: DS       # Daily table, then Session table
+report_layout: DPS      # Daily, Podium, then Session — no Rank table at all
+report_layout: DPSR     # all four, Daily first
+```
+
+`P` only makes sense combined with at least one of `D`/`S`/`R` — `P` on its own shows just the Podium and nothing else (see [Daily Podium](#daily-podium)). A `D` table is silently skipped on a cycle with no daily data yet.
+
+**Rotating between compositions** — comma-separate any number of them to cycle through, one step per `update_interval`, wrapping back to the first after the last:
+
+```yaml
+report_layout: DP, SR
+```
+
+Shows `DP` one cycle, `SR` the next, `DP` again, and so on — no separate cadence setting, and it always restarts at the first group after a bot restart. Daily/Podium data is kept up to date every cycle regardless of which group happens to be showing.
+
+### Extra data per table (`points_detail_D` / `points_detail_S` / `points_detail_R`)
+
+By default each table shows only its own value — e.g. the Session table shows just `(S: nnn)`. To show more, list the letters you want (`D`/`S`/`R`) in the order you want them, per table:
+
+```yaml
+report_layout: DPSR
+points_detail_D: SR   # Daily table   → (D: nnn · S: nnn · R: nnn)
+points_detail_S: RD   # Session table → (S: nnn · R: nnn · D: nnn)
+points_detail_R: SD   # Rank table    → (R: nnn · S: nnn · D: nnn)
+```
+
+Nothing is added automatically — not even the table's own letter — so if you want a table's own value shown, its own letter has to be in its own string. This also means you can do things that weren't possible before, like a Session table sorted by session activity but displaying only Rank:
+
+```yaml
+report_layout: S
+points_detail_S: R    # → (R: nnn), the table's own session value is omitted on purpose
+```
+
+These two settings are global — they apply the same regardless of which `report_layout` group is currently showing, if you're rotating between several.
+
+> **Upgrading from an older version?** Your existing `points_order` / `compact_points` config is converted to `report_layout` / `points_detail_D`/`S`/`R` automatically the first time you run `install.cmd` — see the [Changelog](#changelog) for the exact mapping. Nothing to do by hand.
 
 ### Callsign stripping (`strip_callsign: true`)
 
@@ -197,16 +234,16 @@ Modes with Daily (`D`) are skipped when no daily data exists yet. Session modes 
 
 ### Pilot career card (`show_pilot_card: true`)
 
-Requires Foothold v4.5 or later. Shows a career stats line below each pilot in rank-ordered tables only. Data sourced from Foothold_Ranks.lua — historical career totals, not session or daily stats. Values of zero are omitted. If all values are zero the card is not shown.
+Requires Foothold v4.5 or later. Shows a career stats line below each pilot in the Rank table only (the `R` letter in `report_layout`). Data sourced from Foothold_Ranks.lua — historical career totals, not session or daily stats. Values of zero are omitted. If all values are zero the card is not shown.
 
 The icon preceding the card line is configurable via `pilot_card_icon` (default: 🔸).
 
 ```
 🥇 `Pilot1` — Colonel (R: 241,500)
-·　🔸 129h fixed · 13h helo · 47 kills · 23 traps · 12 refuels · 3 deaths
+·　🔸 129h Fixed · 13h Helo · 47 Kills · 23 Traps · 12k lbs · 3 Deaths
 🥈 `Pilot2` — Lieutenant Colonel (R: 198,320)
-·　🔸 89h fixed · 31 kills
-·　⚖️ `Pilot2` JAG indictment filed (32 p.p.) 🔨🔨🔨
+·　🔸 89h Fixed · 31 Kills
+·　⚖️ JAG indictment filed (32 p.p.) 🔨🔨🔨
 ```
 
 Stats shown:
@@ -219,7 +256,7 @@ Stats shown:
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 
-Similar cards showing combat stats for the current session or the current day, shown only on session-ordered or daily-ordered tables respectively. Data comes from the campaign save file (playerStats), not from career totals.
+Similar cards showing combat stats for the current session or the current day, shown only on the Session table (`S`) or Daily table (`D`) respectively. Data comes from the campaign save file (playerStats), not from career totals.
 
 ```
 🥇 `Pilot1` — Staff Sergeant (S: 11,357)
@@ -247,9 +284,9 @@ A read-only slash command that shows a single player's full stats as a private (
 - **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
 
-The embed shows, in order: UCID, Rank/Session/Daily Points, Last seen, Daily Stats (full detail, only non-zero fields, delta since the last reset), Session Stats (full detail for the current session), Career Stats (from `Foothold_Ranks.lua`), and current mission status.
+The embed shows, in order: UCID, Last seen, Daily Stats (full detail, only non-zero fields, delta since the last reset), Session Stats (full detail for the current session), Career Stats (from `Foothold_Ranks.lua`), and current mission status. Rank/Session/Daily points are shown directly in each section's title (e.g. `Session Stats (S: 10,971)`) rather than as a separate block.
 
-Unlike the compact cards on the main campaign embed, Daily Stats and Session Stats here show **every individual stat key**, not just the summarized categories — nothing is capped or dropped. Fields are sorted in a fixed order: missions (any key containing "mission") → achievements → air → helo → SAM → infantry → ground units → structure → ship → pilot rescues → refuels → any other/unrecognized stat key → deaths always last.
+Unlike the compact cards on the main campaign embed, Daily Stats and Session Stats here show **every individual stat key**, not just the summarized categories — nothing is capped or dropped. Fields are sorted in a fixed order: missions (any key containing "mission") → achievements → air → helo → SAM → infantry → ground units → structure → ship → pilot rescues → refuels → any other/unrecognized stat key → deaths always last. A couple of stats get friendlier labels/units to avoid confusion: Foothold's own `Flight time` counter (limited to helicopters and a few transport aircraft — see the Career Stats note above) shows as **Transport Flight Time: Xh Ym**, and `Refueling` shows as a plain event count (**N events**) rather than a bare number.
 
 ### Who can look up other players (`admin`)
 
@@ -302,7 +339,7 @@ If the same Foothold instance is reachable from more than one `fh_report` instal
 
 Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing FH_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
 
-What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `points_order`, `bar_style_emoji`, etc.) every time either one refreshes.
+What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `report_layout`, `bar_style_emoji`, etc.) every time either one refreshes.
 
 To avoid that, set `disable_updates: true` on every duplicate copy except the one that should actually be in control:
 
@@ -314,6 +351,88 @@ DCS_Server:
 ```
 
 When `disable_updates: true`, that instance skips the server entirely on every cycle — no file reads, no posts, no edits — as if it weren't listed in the config at all. Omitting the option (or leaving it `false`) is the normal, default behavior.
+
+---
+
+## Daily Podium
+
+A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), FH_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/daily_history.json`) — no database, no manual steps.
+
+### Seeing it in the main embed (`P` combined with other letters)
+
+Add `P` anywhere in `report_layout` alongside `D`/`S`/`R` — everything else works exactly the same, just with the Podium table inserted at that position:
+
+```yaml
+report_layout: DPSR
+podium_combined_top: 1
+podium_combined_min3_latest_day: true
+```
+
+```
+📅 __Daily Leaderboard · by Today's Points__
+🥇 `Pilot1` — Piloto por Instinto (D: 650)
+·　🔸 1 Msn · 2 Ach · 2 Air · 1 SAM · 5 Ground
+
+👑 __Daily Podium__
+__22/08/2026__
+🥇 `Pilot1` — Piloto por Instinto — 1,607 pts
+🥈 `Pilot2` — Batman — 1,105 pts
+🥉 `Pilot3` — Senior Airman — 480 pts
+__21/08/2026__
+🥇 `Pilot4` — Piloto por Instinto — 2,725 pts
+
+📊 __Session Leaderboard · by Current Session__
+🥇 `Pilot4` — Piloto por Instinto (S: 20,897)
+...
+
+🏆 __Pilot Leaderboard · by Rank__
+🥇 `Pilot1` — Second Lieutenant (R: 62,339)
+...
+```
+
+Here `podium_combined_top: 1` means every day normally shows only the champion — but `podium_combined_min3_latest_day: true` forces yesterday specifically to show the top 3, so the most recent day gets extra detail while older days stay compact. Ranks shown are always current (not frozen from that day), and pull from custom ranks set in `fh_hook.yaml` just like every other table. A day with a campaign restart shows `(Session End)` next to its date.
+
+### A dedicated Podium-only table (`P` on its own)
+
+Use `report_layout: P` for a standalone table with no pilot leaderboard at all — useful if you want a wider window of history without crowding the main leaderboard, optionally rotating it in alongside other compositions:
+
+```yaml
+report_layout: DPSR, P
+podium_days: 14
+podium_top: 3
+```
+
+### Looking further back (`/fh_report player` → `/fh_report podium`)
+
+For anything beyond what fits in the embed, `/fh_report podium` looks up any date range and any position (1st through 50th) on demand:
+
+```
+/fh_report podium date_from:2026-08-01 date_to:2026-08-22 top:3
+```
+
+Returns an ephemeral report listing whoever held those positions on each day in that range.
+
+### Options reference
+
+| Option | Default | Description |
+|---|---|---|
+| `podium_days` | `7` | Days shown when `report_layout` is `P` on its own. `0` = since campaign start |
+| `podium_top` | `1` | Top N positions shown per day when `report_layout` is `P` on its own (1-50) |
+| `podium_combined_days` | `7` | Same as `podium_days`, but when `P` is combined with other letters |
+| `podium_combined_top` | `1` | Same as `podium_top`, but when `P` is combined with other letters |
+| `podium_combined_min3_latest_day` | `false` | Force at least the top 3 for the most recent day when `P` is combined with other letters, even if `podium_combined_top` is lower |
+
+---
+
+## Zone ordering by mission waypoint (`sort_zones_by_waypoint`)
+
+By default, zones in each column are sorted by level and slot damage. Turning this on instead orders them by their mission waypoint number — BLUE zones highest-first, RED zones lowest-first — so the columns read like a front-line progression. Zones without a waypoint assigned fall to the end of the active list, same place suspended zones already sit.
+
+```yaml
+sort_zones_by_waypoint: true
+```
+
+This needs a one-time cache shared with FH_Control (if installed) and only refreshes automatically when needed (missing cache, or a detected campaign restart) — never on every update, and only while the mission is actually running. Until that cache is available, zones fall back to the normal level-based sort automatically.
 
 ---
 
