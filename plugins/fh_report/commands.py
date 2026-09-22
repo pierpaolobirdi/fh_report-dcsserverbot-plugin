@@ -61,13 +61,6 @@ async def _do_script(server, lua: str) -> None:
     await server.send_to_dcs({"command": "do_script", "script": lua})
 
 
-async def _force_save(server) -> None:
-    """Force Foothold to flush memory to .lua files before we read them."""
-    await _do_script(server, "bc:saveToDisk()")
-    import asyncio as _asyncio
-    await _asyncio.sleep(1.5)
-
-
 class _UpdateReadCache:
     """Reuse remote file reads within one server's current update only.
 
@@ -566,6 +559,8 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
 
 _unsupported_version_warned: set[str] = set()
 _unmatched_instance_warned: set[str] = set()
+_unmatched_instance_since: dict[str, float] = {}
+_UNMATCHED_INSTANCE_GRACE_SECONDS = 120  # tolerate remote-node startup races
 
 
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
@@ -2439,21 +2434,37 @@ class FH_Report(Plugin):
         raw          = self.locals or {}
         default_cfg  = raw.get("DEFAULT") or {}
 
-        # Warn (once per key) about any fh_report.yaml server block whose key
-        # doesn't match any currently-registered DCSServerBot instance name —
-        # a common config mistake (e.g. copying the "DCS_Server" example
-        # verbatim instead of the actual instance name from nodes.yaml) that
+        # Warn about any fh_report.yaml server block whose key doesn't match
+        # any currently-registered DCSServerBot instance name — a common
+        # config mistake (e.g. copying the "DCS_Server" example verbatim
+        # instead of the actual instance name from nodes.yaml) that
         # otherwise fails completely silently: the loop below just skips it
         # forever with no log trace at all, and the mismatch was previously
         # only ever surfaced by the /fh_report player command's own check.
+        #
+        # Gated by a grace period (not warned on first sight) because in a
+        # large multi-node cluster, remote agent nodes can take a while to
+        # register their servers with the central bot after startup — the
+        # very first updater cycle can easily run before all of them have
+        # checked in, which would otherwise log a permanent false-positive
+        # warning (the one-shot version never re-checks) for an instance
+        # that's actually fine seconds later. A key self-heals (its "first
+        # seen unmatched" clock resets) the moment it matches again, so a
+        # genuinely broken key still gets warned about, just not instantly.
         live_instance_names = {server.instance.name for server in self.bot.servers.values()}
+        now_ts = datetime.now(timezone.utc).timestamp()
         configured_server_count = 0
         for cfg_key in raw.keys():
             if cfg_key == "DEFAULT":
                 continue
             if cfg_key in live_instance_names:
+                _unmatched_instance_since.pop(cfg_key, None)
+                _unmatched_instance_warned.discard(cfg_key)
                 if raw.get(cfg_key):
                     configured_server_count += 1
+                continue
+            first_seen = _unmatched_instance_since.setdefault(cfg_key, now_ts)
+            if (now_ts - first_seen) < _UNMATCHED_INSTANCE_GRACE_SECONDS:
                 continue
             if cfg_key not in _unmatched_instance_warned:
                 _unmatched_instance_warned.add(cfg_key)
@@ -2806,9 +2817,14 @@ class FH_Report(Plugin):
         is itself the signal that we're on an unreachable remote path."""
         path = self._get_history_file(saves_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Written most-recent-date-first purely for readability when someone
+        # opens the file by hand — _build_podium_table always re-sorts dates
+        # itself when reading, so this ordering has zero effect on what's
+        # actually displayed.
+        sorted_data = dict(sorted(data.items(), key=lambda kv: kv[0], reverse=True))
         await write_bytes_to_node(
             node, path,
-            json.dumps(data, indent=2).encode("utf-8"),
+            json.dumps(sorted_data, indent=2).encode("utf-8"),
             log=self.log
         )
 
@@ -3592,8 +3608,13 @@ class FH_Report(Plugin):
         node = srv.node
 
         try:
-            if srv.status in HOT_STATES:
-                await _force_save(srv)
+            # No longer forcing bc:saveToDisk() here — per @leka1986: Foothold
+            # already autosaves every 60s on its own, and a forced save is a
+            # genuinely heavy write (all AI state, loadouts, positions, the
+            # director state — thousands of lines), not a cheap one. Forcing
+            # it on every /fh_report player call cost real server resources
+            # for at most 60s of extra freshness — not worth it. We just read
+            # whatever Foothold's own autosave cycle already wrote.
             persistence_file = await find_persistence_file(saves_dir, node)
             if not persistence_file:
                 await interaction.followup.send(
