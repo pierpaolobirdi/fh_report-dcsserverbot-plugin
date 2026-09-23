@@ -18,7 +18,7 @@ from typing import Type
 import discord
 from discord import app_commands
 from discord.ext import tasks
-from core import Plugin, TEventListener, utils, Status, Group
+from core import Plugin, TEventListener, utils, Status, Group, Server
 from services.bot import DCSServerBot
 
 
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "12.0.0"
+FH_REPORT_RELEASE = "12.1.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2221,6 +2221,55 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     return embed
 
 
+# ── Server selection for /fh_report commands ──────────────────────────────────
+class _FHServerTransformer(utils.ServerTransformer):
+    """DCSServerBot's own ServerTransformer (as recommended by Special K),
+    reused unchanged — it shows each server's PUBLIC name (server.name,
+    never the internal nodes.yaml instance name), hides servers still
+    registering (Status.UNREGISTERED), honours managed_by permissions, and
+    pre-suggests the server mapped to the current channel. The only thing
+    added here is a filter so the list shows just servers that actually
+    have an FH_Report block in fh_report.yaml (the core transformer only
+    supports status/maintenance filters, so e.g. a non-Foothold server
+    would otherwise appear too). The plugin instance is reached through
+    interaction.command.binding (the cog the command is bound to)."""
+
+    async def autocomplete(self, interaction: discord.Interaction,
+                           current: str) -> list[app_commands.Choice[str]]:
+        choices = await super().autocomplete(interaction, current)
+        plugin = getattr(interaction.command, "binding", None)
+        if plugin is None or not hasattr(plugin, "_configured_instances"):
+            return choices
+        configured = set(plugin._configured_instances())
+
+        def _is_fh(name: str) -> bool:
+            srv = interaction.client.servers.get(name)
+            return bool(srv) and srv.instance.name in configured
+
+        filtered = [c for c in choices if _is_fh(c.value)]
+        if filtered or current:
+            return filtered
+
+        # super() short-circuits an empty input to the server mapped to the
+        # current channel — if that one has no FH_Report block, rebuild the
+        # full list ourselves (same rules as the core loop) instead of
+        # leaving the admin with nothing to pick from.
+        is_admin = self.is_admin(interaction)
+        out: list[app_commands.Choice[str]] = []
+        for name, srv in interaction.client.servers.items():
+            if srv.status == Status.UNREGISTERED:
+                continue
+            if srv.instance.name not in configured:
+                continue
+            if (is_admin and srv.locals.get('managed_by') and
+                    not utils.check_roles(srv.locals.get('managed_by'), interaction.user)):
+                continue
+            out.append(app_commands.Choice(name=name, value=name))
+            if len(out) == 25:
+                break
+        return out
+
+
 # ── Optional private hook ─────────────────────────────────────────────────────
 import importlib.util as _iutil
 import os as _os
@@ -3469,19 +3518,96 @@ class FH_Report(Plugin):
         cfg.update(raw.get(instance_name) or {})
         return cfg
 
-    def _resolve_server_from_channel(self, interaction: discord.Interaction) -> str | None:
-        """Auto-detect which configured instance owns the channel the command
-        was invoked in, by matching interaction.channel_id against each
-        instance's configured channel_id. Falls back to the single configured
-        instance if there's only one. Returns None if ambiguous/not found."""
+    def _allowed_command_channels(self, instance_name: str) -> set[str]:
+        """The set of channel IDs (as strings) where /fh_report commands may
+        be used for this instance: its own report channel_id, plus any
+        extra channels listed in commands_channel_id (comma-separated
+        string or YAML list — either is accepted)."""
+        cfg = self._merged_cfg(instance_name)
+        allowed = set()
+        own = cfg.get("channel_id")
+        if own:
+            allowed.add(str(own))
+        extra = cfg.get("commands_channel_id")
+        if isinstance(extra, str):
+            allowed.update(x.strip() for x in extra.split(",") if x.strip())
+        elif isinstance(extra, list):
+            allowed.update(str(x).strip() for x in extra if str(x).strip())
+        elif extra:
+            allowed.add(str(extra))
+        return allowed
+
+    def _public_server_name(self, instance_name: str) -> str:
+        """Public (DCS) server name for a configured instance — what users
+        actually know it as. Never falls back to the internal nodes.yaml
+        instance name, which users have no reason to recognise."""
+        srv = self._get_server_by_instance(instance_name)
+        return srv.name if srv else "this server"
+
+    def _resolve_server(self, interaction: discord.Interaction,
+                        server_param) -> tuple[str | None, str | None]:
+        """Resolve which configured instance a command applies to, and
+        enforce that instance's channel restriction. Returns
+        (instance_name, error_message) — exactly one is None.
+
+        server_param may be: a Server object (from _FHServerTransformer on
+        the command itself), a plain string holding the server's PUBLIC
+        name (interaction.namespace during autocomplete carries the raw,
+        untransformed value), or None (option not filled in). Either way,
+        the internal instance name is only ever used as the config lookup
+        key, never shown to the user.
+
+        These are two independent questions, decided separately:
+
+        1. WHICH instance? Only ambiguous with more than one configured —
+           the channel is deliberately never used to guess between several
+           (two instances could easily end up sharing a channel in
+           commands_channel_id, which would make auto-detection
+           ambiguous/wrong), so the `server` option is required instead.
+           With exactly one instance configured, there's nothing to guess
+           and no need to ask.
+
+        2. IS THIS CHANNEL ALLOWED for that instance? Governed purely by
+           whether commands_channel_id is set for it — regardless of
+           whether there's 1 instance configured or several:
+             - not set at all  -> any channel is allowed (today's default,
+               unchanged, for anyone who hasn't opted into restricting it)
+             - set             -> only that instance's own channel_id, or
+               one of the channels listed in commands_channel_id
+        """
         configured = self._configured_instances()
-        for instance_name in configured:
-            cfg = self._merged_cfg(instance_name)
-            if str(cfg.get("channel_id") or "") == str(interaction.channel_id):
-                return instance_name
+        if not configured:
+            return None, "❌ FH_Report has no servers configured."
+
         if len(configured) == 1:
-            return configured[0]
-        return None
+            server_name = configured[0]
+        else:
+            if not server_param:
+                return None, (
+                    "❌ More than one server is configured — please choose one "
+                    "from the `server` option list."
+                )
+            if isinstance(server_param, str):
+                srv = self.bot.servers.get(server_param)
+                if srv is None:
+                    return None, (
+                        f"❌ Unknown server **{server_param}** — please choose one "
+                        f"from the `server` option list."
+                    )
+            else:
+                srv = server_param
+            if srv.instance.name not in configured:
+                return None, f"❌ FH_Report isn't configured for **{srv.name}**."
+            server_name = srv.instance.name
+
+        cfg = self._merged_cfg(server_name)
+        if cfg.get("commands_channel_id") and str(interaction.channel_id) not in self._allowed_command_channels(server_name):
+            return None, (
+                f"❌ This command for **{self._public_server_name(server_name)}** can't be "
+                f"used in this channel. Run it in the channel where its embed is posted, "
+                f"or in one of its configured `commands_channel_id` channels."
+            )
+        return server_name, None
 
     def _is_admin(self, interaction: discord.Interaction, server_name: str) -> bool:
         """True if the calling user matches any entry in the 'admin' config —
@@ -3507,7 +3633,12 @@ class FH_Report(Plugin):
     async def _autocomplete_report_player(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
-        server_name = self._resolve_server_from_channel(interaction)
+        # With multiple instances configured, `server` is a separate
+        # parameter on this same command — if the admin has already
+        # picked/typed it in this invocation, discord.py exposes that via
+        # interaction.namespace before the command itself even runs.
+        server_param = getattr(interaction.namespace, "server", None)
+        server_name, _ = self._resolve_server(interaction, server_param)
         if not server_name:
             return []
         # Non-admins never get name suggestions — they can only query themselves,
@@ -3569,28 +3700,30 @@ class FH_Report(Plugin):
 
     @fh_report.command(name="player", description="Show a player's rank, session and career stats (read-only).")
     @app_commands.describe(
-        player_name="Player name — admin only. Leave empty to see your own stats."
+        player_name="Player name — admin only. Leave empty to see your own stats.",
+        server="Which server — only needed if more than one is configured."
     )
     @app_commands.autocomplete(player_name=_autocomplete_report_player)
     async def player(self, interaction: discord.Interaction,
-                     player_name: str | None = None):
+                     player_name: str | None = None,
+                     server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
         ephemeral = utils.get_ephemeral(interaction)
         await interaction.response.defer(ephemeral=ephemeral)
 
-        # Auto-detect the server from the channel this command was run in —
-        # each configured instance posts its embed to a specific channel_id.
-        server = self._resolve_server_from_channel(interaction)
-        if not server:
-            await interaction.followup.send(
-                "❌ Couldn't determine which server this channel belongs to. "
-                "Run this command in the channel where FH_Report posts the campaign embed.",
-                ephemeral=True)
+        # Single configured instance: resolves to it from ANY channel, as
+        # always. With more than one, `server` must be given explicitly
+        # (channel alone is never used to guess between several — see
+        # _resolve_server), and the channel used must be that instance's
+        # own report channel or one of its commands_channel_id entries.
+        server, err = self._resolve_server(interaction, server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
             return
 
         srv = self._get_server_by_instance(server)
         if srv is None:
             await interaction.followup.send(
-                f"❌ Server **`{server}`** not found among configured DCSServerBot instances.",
+                f"❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
                 ephemeral=True)
             return
 
@@ -3618,7 +3751,7 @@ class FH_Report(Plugin):
             persistence_file = await find_persistence_file(saves_dir, node)
             if not persistence_file:
                 await interaction.followup.send(
-                    f"❌ No Foothold save file found for **`{server}`**.", ephemeral=True)
+                    f"❌ No Foothold save file found for **{self._public_server_name(server)}**.", ephemeral=True)
                 return
             ranks_file = os.path.join(saves_dir, "Foothold_Ranks.lua")
 
@@ -3643,7 +3776,7 @@ class FH_Report(Plugin):
                 match = next((n for n, d in players.items() if d.get("ucid") == target_ucid), None)
                 if match is None:
                     await interaction.followup.send(
-                        f"❌ No campaign stats found for that player on **`{server}`** yet.",
+                        f"❌ No campaign stats found for that player on **{self._public_server_name(server)}** yet.",
                         ephemeral=True)
                     return
             if match is None:
@@ -3657,7 +3790,7 @@ class FH_Report(Plugin):
                     )
                 if match is None:
                     await interaction.followup.send(
-                        f"❌ Player **{_safe_code_span(player_name)}** not found in **`{server}`**.\n"
+                        f"❌ Player **{_safe_code_span(player_name)}** not found in **{self._public_server_name(server)}**.\n"
                         f"Check the exact name (case-sensitive autocomplete is available).",
                         ephemeral=True)
                     return
@@ -3686,7 +3819,7 @@ class FH_Report(Plugin):
             match = next((n for n, d in players.items() if d.get("ucid") == own_ucid), None)
             if match is None:
                 await interaction.followup.send(
-                    f"❌ No campaign stats found for you on **`{server}`** yet — "
+                    f"❌ No campaign stats found for you on **{self._public_server_name(server)}** yet — "
                     f"fly a mission first, then try again.",
                     ephemeral=True)
                 return
@@ -3756,11 +3889,11 @@ class FH_Report(Plugin):
 
         # Mission status — read-only wording (no "changes applied")
         if srv.status == Status.RUNNING:
-            mission_status = f"🟢 **{server}** Mission running."
+            mission_status = f"🟢 **{self._public_server_name(server)}** Mission running."
         elif srv.status == Status.PAUSED:
-            mission_status = f"⏸️ **{server}** Mission paused."
+            mission_status = f"⏸️ **{self._public_server_name(server)}** Mission paused."
         else:
-            mission_status = f"⏹️ **{server}** Mission not running."
+            mission_status = f"⏹️ **{self._public_server_name(server)}** Mission not running."
 
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
@@ -3773,25 +3906,24 @@ class FH_Report(Plugin):
     @app_commands.describe(
         date_from="Start date (YYYY-MM-DD)",
         date_to="End date (YYYY-MM-DD)",
-        top="Show the top N positions for each day (1-50)"
+        top="Show the top N positions for each day (1-50)",
+        server="Which server — only needed if more than one is configured."
     )
     async def podium(self, interaction: discord.Interaction,
-                     date_from: str, date_to: str, top: app_commands.Range[int, 1, 50]):
+                     date_from: str, date_to: str, top: app_commands.Range[int, 1, 50],
+                     server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
         ephemeral = utils.get_ephemeral(interaction)
         await interaction.response.defer(ephemeral=ephemeral)
 
-        server = self._resolve_server_from_channel(interaction)
-        if not server:
-            await interaction.followup.send(
-                "❌ Couldn't determine which server this channel belongs to. "
-                "Run this command in the channel where FH_Report posts the campaign embed.",
-                ephemeral=True)
+        server, err = self._resolve_server(interaction, server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
             return
 
         srv = self._get_server_by_instance(server)
         if srv is None:
             await interaction.followup.send(
-                f"❌ Server **`{server}`** not found among configured DCSServerBot instances.",
+                f"❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
                 ephemeral=True)
             return
 
@@ -3832,7 +3964,7 @@ class FH_Report(Plugin):
 
         if not filtered_history:
             await interaction.followup.send(
-                f"No history found for **`{server}`** between `{date_from}` and `{date_to}`.",
+                f"No history found for **{self._public_server_name(server)}** between `{date_from}` and `{date_to}`.",
                 ephemeral=True)
             return
 

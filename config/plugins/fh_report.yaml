@@ -12,8 +12,33 @@
 #   campaign_name  - Name displayed in the embed title and footer
 #
 # OPTIONAL per server:
-#   saves_dir      - Override Foothold saves path (default: auto-resolved from instance home)
+#   saves_dir           - Override Foothold saves path (default: auto-resolved from instance home)
+#   commands_channel_id - Extra channel(s) (besides channel_id itself) where
+#                         /fh_report player and /fh_report podium may be used
+#                         for THIS server. Comma-separated list, or a YAML list.
+#                         Two independent things, decided separately:
+#                           - WHICH CHANNELS are allowed — governed purely by
+#                             whether this is set for the server in question,
+#                             regardless of how many servers you have
+#                             configured overall:
+#                               not set at all -> any channel is allowed
+#                                                 (today's default)
+#                               set            -> only channel_id itself, or
+#                                                 one of these
+#                           - WHETHER you must specify `server` on the
+#                             command — only needed if you have MORE THAN
+#                             ONE server configured at all (the channel is
+#                             never used to guess between several, since two
+#                             servers could end up sharing a
+#                             commands_channel_id by mistake). With exactly
+#                             one server configured, there's nothing to
+#                             guess and `server` is never asked for.
+#                         Example:
+#                           commands_channel_id:
+#                             - 1234567890123456789
+#                             - 1234567890123456780
 #
+
 # OPTIONAL - define in DEFAULT to apply to all servers,
 #             or override per server block. Listed below in the same order
 #             they appear in the DEFAULT block.
@@ -291,6 +316,9 @@ DCS_Server:                             # instance name from nodes.yaml
   campaign_name: "Operation — FootHold"  # Foot embed
 #  admin: Admin, SomeSpecificUser        # default: "Admin" if omitted
 #  saves_dir:                           # auto-resolved — override only if needed
+#  commands_channel_id:                 # extra channel(s) allowed for /fh_report player & podium
+#    - 1234567890123456789
+#    - 1234567890123456780
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300
@@ -333,6 +361,9 @@ DCS_Server:                             # instance name from nodes.yaml
 #  campaign_name: "Operation — FootHold 2"
 #  admin: Admin, SomeSpecificUser
 #  saves_dir:
+#  commands_channel_id:
+#    - 1234567890123456789
+#    - 1234567890123456780
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300

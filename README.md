@@ -88,6 +88,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
+| `commands_channel_id` | none | *(per server only)* Extra channel(s) allowed to run `/fh_report player`/`podium` for this server, besides its own report channel — see [Multiple servers](#multiple-servers-server--commands_channel_id) below |
 
 ### Example config
 
@@ -280,7 +281,7 @@ A read-only slash command that shows a single player's full stats as a private (
 /fh_report player player_name:Pilot1
 ```
 
-- Run it in the channel where FH_Report posts the campaign embed — the server is detected automatically from that channel, no need to specify it.
+- With a single server configured, this works from **any channel** — no need to specify it. With more than one server configured, see [Multiple servers](#multiple-servers-server--commands_channel_id) below.
 - **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
 
@@ -305,6 +306,23 @@ Type /fh_report player to see your own stats.
 ```
 
 Disable with `show_player_cmd_hint: false`, or customize the wording with `player_cmd_hint_text`.
+
+### Multiple servers (`server` / `commands_channel_id`)
+
+This applies to both `/fh_report player` and `/fh_report podium`.
+
+- **One server configured**: nothing to do — both commands work from any channel, and there's nothing to specify.
+- **More than one server configured**: a `server` option (with autocomplete) appears on both commands, and you must fill it in — the channel is never used to guess which server you mean, since two servers could otherwise end up sharing a channel by mistake. This is required regardless of which channel you're running the command from, even the report channel itself.
+
+By default, both commands can be run from **any channel**, for any number of servers. To restrict that, set `commands_channel_id` per server — a list of extra channels (besides that server's own report channel) where its commands are allowed:
+
+```yaml
+commands_channel_id:
+  - 1234567890123456789
+  - 1234567890123456780
+```
+
+Once set for a server, its commands only work from its own report channel or one of these — from anywhere else, the bot replies with an error instead. This is independent of how many servers you have configured; it's evaluated per server.
 
 ---
 
@@ -410,7 +428,7 @@ For anything beyond what fits in the embed, `/fh_report podium` looks up any dat
 /fh_report podium date_from:2026-08-01 date_to:2026-08-22 top:3
 ```
 
-Returns an ephemeral report listing whoever held those positions on each day in that range.
+Returns an ephemeral report listing whoever held those positions on each day in that range. If you have more than one server configured, add `server:` — see [Multiple servers](#multiple-servers-server--commands_channel_id) above.
 
 ### Options reference
 
