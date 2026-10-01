@@ -20,7 +20,10 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   If Foothold saves are in a non-standard location, override with saves_dir.
 #
 # REQUIRED per server:
-#   channel_id     - Discord channel ID where the embed will be posted
+#   channel_id     - Discord channel ID where the embed will be posted. A
+#                    single value, either written directly or as a one-item
+#                    YAML list (same two styles accepted by
+#                    commands_channel_id below) — it's always one channel
 #   campaign_name  - Name displayed in the embed title and footer
 #
 # OPTIONAL per server:

@@ -8,7 +8,10 @@
 #   If Foothold saves are in a non-standard location, override with saves_dir.
 #
 # REQUIRED per server:
-#   channel_id     - Discord channel ID where the embed will be posted
+#   channel_id     - Discord channel ID where the embed will be posted. A
+#                    single value, either written directly or as a one-item
+#                    YAML list (same two styles accepted by
+#                    commands_channel_id below) — it's always one channel
 #   campaign_name  - Name displayed in the embed title and footer
 #
 # OPTIONAL per server:
@@ -339,19 +342,19 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots: 20
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
-  show_all_pilots: false
+#  show_all_pilots: false
 #  show_pilot_card: false
-  pilot_card_icon: 🔸
+#  pilot_card_icon: 🔸
 #  show_session_card: false
-  session_card_icon: 🔸
+#  session_card_icon: 🔸
 #  show_daily_card: false
-  daily_card_icon: 🔸
+#  daily_card_icon: 🔸
 #  podium_days: 7                        # options below only affect report_layout: P alone
 #  podium_top: 1
 #  podium_combined_days: 7                      # options below only affect "P" combined w/ other letters
 #  podium_combined_top: 1
 #  podium_combined_min3_latest_day: false
-  show_punishment: false
+#  show_punishment: false
 #  excluded_ucids:
 #    - abcdef1234567890abcdef1234567890   # UCID to hide
 #  show_player_cmd_hint: true
@@ -384,15 +387,15 @@ DCS_Server:                             # instance name from nodes.yaml
 #  max_pilots: 20
 #  max_pilots_2t: 8
 #  max_pilots_3t: 6
-  show_all_pilots: false
+#  show_all_pilots: false
 #  show_pilot_card: false
-  pilot_card_icon: 🔸
+#  pilot_card_icon: 🔸
 #  podium_days: 7
 #  podium_top: 1
 #  podium_combined_days: 7
 #  podium_combined_top: 1
 #  podium_combined_min3_latest_day: false
-  show_punishment: false
+#  show_punishment: false
 #  excluded_ucids:
 #  show_player_cmd_hint: true
 #  player_cmd_hint_text: "Type /fh_report player to see your own stats."

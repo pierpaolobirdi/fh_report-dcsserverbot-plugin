@@ -1698,6 +1698,18 @@ def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
     return sorted(stats.items(), key=lambda kv: rank(kv[0]))
 
 
+def _single_channel_id(value):
+    """Accept channel_id as either a scalar or a one-item YAML list — it's
+    always meant to be a single channel, but someone copying the list
+    style used by commands_channel_id would otherwise crash the
+    int(channel_id) conversion (seen in practice: a YAML list comes back
+    as a CommentedSeq, not an int). A list with more than one entry uses
+    just the first."""
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
 def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: int = 1024) -> None:
     """Add a monospace ```code block``` table as one or more embed fields,
     splitting on line boundaries whenever it would exceed Discord's
@@ -3602,7 +3614,7 @@ class FH_Report(Plugin):
             # channel. Skip entirely: no read, no post, no edit.
             return
 
-        channel_id    = cfg.get("channel_id")
+        channel_id    = _single_channel_id(cfg.get("channel_id"))
         if not channel_id:
             self.log.warning(f"FH_Report [{instance_name}]: channel_id not configured.")
             return
@@ -3896,7 +3908,7 @@ class FH_Report(Plugin):
         string or YAML list — either is accepted)."""
         cfg = self._merged_cfg(instance_name)
         allowed = set()
-        own = cfg.get("channel_id")
+        own = _single_channel_id(cfg.get("channel_id"))
         if own:
             allowed.add(str(own))
         extra = cfg.get("commands_channel_id")
