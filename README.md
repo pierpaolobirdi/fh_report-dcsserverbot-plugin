@@ -169,7 +169,9 @@ report_layout: DPS      # Daily, Podium, then Session — no Rank table at all
 report_layout: DPSR     # all four, Daily first
 ```
 
-`P` only makes sense combined with at least one of `D`/`S`/`R` — `P` on its own shows just the Podium and nothing else (see [Daily Podium](#daily-podium)). A `D` table is silently skipped on a cycle with no daily data yet.
+`P` only makes sense combined with at least one of `D`/`S`/`R` — `P` on its own shows just the Podium and nothing else (see [Daily Podium](#daily-podium)).
+
+`report_layout: none` shows no tables at all — just the campaign progress bar and the BLUE/RED bases. It can also be one of the groups in a rotation (e.g. `DPS, none`). A `D` table is silently skipped on a cycle with no daily data yet.
 
 **Rotating between compositions** — comma-separate any number of them to cycle through, one step per `update_interval`, wrapping back to the first after the last:
 
@@ -285,9 +287,9 @@ A read-only slash command that shows a single player's full stats as a private (
 - **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
 
-The embed shows, in order: UCID, Last seen, Daily Stats (full detail, only non-zero fields, delta since the last reset), Session Stats (full detail for the current session), Career Stats (from `Foothold_Ranks.lua`), and current mission status. Rank/Session/Daily points are shown directly in each section's title (e.g. `Session Stats (S: 10,971)`) rather than as a separate block.
+The embed shows, in order: UCID, Last seen, a combined Session + Daily stats table, Career Stats (from `Foothold_Ranks.lua`), and current mission status. Session and Daily points are shown directly in the combined table's title (e.g. `Session Stats (S: 10,971)` / `Daily (D: 890)`).
 
-Unlike the compact cards on the main campaign embed, Daily Stats and Session Stats here show **every individual stat key**, not just the summarized categories — nothing is capped or dropped. Fields are sorted in a fixed order: missions (any key containing "mission") → achievements → air → helo → SAM → infantry → ground units → structure → ship → pilot rescues → refuels → any other/unrecognized stat key → deaths always last. A couple of stats get friendlier labels/units to avoid confusion: Foothold's own `Flight time` counter (limited to helicopters and a few transport aircraft — see the Career Stats note above) shows as **Transport Flight Time: Xh Ym**, and `Refueling` shows as a plain event count (**N events**) rather than a bare number.
+Unlike the compact cards on the main campaign embed, this table shows **every individual stat key** side by side for Session and Daily, not just the summarized categories — nothing is capped or dropped (a `-` means no value on that side). Rows are sorted in a fixed order: mission objectives first (generic ones like CAP/SEAD/CAS mission, and map-specific ones such as "Destroy enemy Bridge" — anything that isn't one of Foothold's standard non-mission stats counts as a mission) → achievements → air → helo → SAM → infantry → ground units → structure → ship → pilot rescues → refuels → any other/unrecognized stat key → deaths always last. A couple of stats get friendlier labels/units to avoid confusion: Foothold's own `Flight time` counter (limited to helicopters and a few transport aircraft — see the Career Stats note above) shows as **Transport Flight Time: Xh Ym**, and `Refueling` shows as a plain event count (**N events**) rather than a bare number.
 
 ### Who can look up other players (`admin`)
 
