@@ -742,6 +742,15 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
         return False
 
 
+async def _read_json(node, path: str) -> dict:
+    """Read a JSON file through `node` (works for remote agent nodes too).
+    Returns {} if missing or unreadable."""
+    try:
+        return json.loads((await node.read_file(path)).decode("utf-8"))
+    except Exception:
+        return {}
+
+
 async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     """Proactively verify that write_bytes_to_node actually works for this
     instance, once per bot session — instead of only discovering a write
@@ -828,129 +837,96 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
 
 async def deduplicate_ranks(ranks_file: str, persistence_file, node,
                             ranks_source: bytes | None = None) -> bool:
-    """Detect and fix duplicate player entries in Foothold_Ranks.lua caused by
-    callsign changes. The entry with a UCID in ucidToName is canonical; its
-    name is cleaned via strip_callsign(). Credits and lastSeen are merged.
+    """Detect and fix duplicate player entries in an OLD-format (name-keyed)
+    Foothold_Ranks.lua caused by callsign changes. The entry with a UCID in
+    ucidToName is canonical: it keeps its whole block (career included),
+    renamed via strip_callsign(), with credits summed and lastSeen maxed
+    across the duplicates. The UCID-keyed format (playerIdentityVersion set)
+    can't contain such duplicates, so it's skipped outright.
     Returns True if any fix was applied and the file was rewritten."""
 
     if ranks_source is None:
         ranks_source = await node.read_file(ranks_file)
-    ranks_data           = ranks_source.decode("utf-8")
-    _original_ranks_data = ranks_data  # snapshot for the pre-write collision check below
+    original = ranks_source.decode("utf-8")
+    if _ranks_version(original) is not None:
+        return False
+    players_block = _lua_table(original, _RANKS_PLAYERS_RE)
+    if players_block is None:
+        return False
 
-    # ── ucidToName: build ucid → raw_name ────────────────────────────────
-    ucid_to_raw: dict[str, str] = {}
-    for m in re.finditer(r"\[['\"]([a-f0-9]{32})['\"]\]=['\"]([^'\"]+)['\"]", ranks_data):
-        ucid_to_raw[m.group(1)] = m.group(2)
+    credits_re   = r"(\[[\x27\x22]credits[\x27\x22]\]\s*=\s*)([\d.]+)"
+    last_seen_re = r"(\[[\x27\x22]lastSeen[\x27\x22]\]\s*=\s*)([\d.]+)"
 
-    # ── players block: parse name → {credits, lastSeen} via brace counting ─
-    players_data: dict[str, dict] = {}
-    pos = 0
-    while pos < len(ranks_data):
-        km = re.search(r"\[['\"]([^'\"]+)['\"]\]=\{", ranks_data[pos:])
-        if not km:
-            break
-        name      = km.group(1)
-        brace_pos = pos + km.end() - 1
-        depth     = 1
-        j         = brace_pos + 1
-        while j < len(ranks_data) and depth > 0:
-            if ranks_data[j] == "{":   depth += 1
-            elif ranks_data[j] == "}": depth -= 1
-            j += 1
-        block = ranks_data[brace_pos + 1:j - 1]
-        cr_m  = re.search(r'[\x27\x22]credits[\x27\x22]\]\s*=\s*([\d.]+)', block)
-        ls_m  = re.search(r'[\x27\x22]lastSeen[\x27\x22]\]\s*=\s*([\d.]+)', block)
+    entries: dict[str, dict] = {}
+    for name, block in _lua_entries(players_block, _ANY_KEY):
+        cr_m = re.search(credits_re, block)
         if cr_m and len(name) >= 2:
-            players_data[name] = {
-                "credits":  float(cr_m.group(1)),
-                "lastSeen": float(ls_m.group(1)) if ls_m else 0.0,
+            ls_m = re.search(last_seen_re, block)
+            entries[name] = {
+                "credits":  float(cr_m.group(2)),
+                "lastSeen": float(ls_m.group(2)) if ls_m else 0.0,
+                "block":    block,
             }
-        pos = pos + km.start() + 1
 
-    # ── Group by strip_callsign base name ─────────────────────────────────
     base_to_raws: dict[str, list] = {}
-    for raw in players_data:
-        base = strip_callsign(raw)
-        base_to_raws.setdefault(base, []).append(raw)
-
+    for raw in entries:
+        base_to_raws.setdefault(strip_callsign(raw), []).append(raw)
     duplicates = {b: r for b, r in base_to_raws.items() if len(r) > 1}
     if not duplicates:
         return False
 
-    raw_to_ucid = {v: k for k, v in ucid_to_raw.items()}
+    raw_to_ucid = {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, original)}
+    ranks_data  = original
     modified    = False
 
     for base_name, raw_names in duplicates.items():
         names_with_ucid = [n for n in raw_names if n in raw_to_ucid]
 
-        # Only treat this as "one real person renamed" if EXACTLY ONE raw
-        # name in the group still has a live UCID mapping — the others are
-        # then genuinely orphaned leftovers from a past callsign change,
-        # safe to fold into the live one. If MORE than one raw name has its
-        # own current UCID, these are actually different real players who
-        # simply share the same stripped base name (e.g. a squadron tag
-        # like "82 TF AA") — merging them would silently combine two
-        # distinct players' credits and delete one of their identities.
-        # Confirmed with real data: this exact case (two separate live
-        # UCIDs both ending in "| 82 TF AA") was actually happening.
+        # Only a rename if EXACTLY ONE raw name still has a live UCID — the
+        # others are orphaned leftovers. Several live UCIDs sharing a
+        # stripped base name (e.g. two "... | 82 TF AA" pilots) are distinct
+        # players and must never be merged.
         if len(names_with_ucid) != 1:
             if len(names_with_ucid) > 1:
-                import logging as _lg3
-                _lg3.getLogger(__name__).debug(
+                log.debug(
                     f"FH_Report: deduplicate_ranks: '{base_name}' has "
                     f"{len(names_with_ucid)} raw names each with their own "
                     f"live UCID ({names_with_ucid}) — treating as distinct "
-                    f"players who share a stripped base name, not a rename. "
-                    f"Skipping merge."
+                    f"players who share a stripped base name. Skipping merge."
                 )
             continue
         name_with_ucid = names_with_ucid[0]
 
         canonical     = strip_callsign(name_with_ucid)
         ucid          = raw_to_ucid[name_with_ucid]
-        total_credits = sum(players_data[n]["credits"]  for n in raw_names)
-        max_last_seen = max(players_data[n]["lastSeen"] for n in raw_names)
-        lua_cr        = str(int(total_credits)) if total_credits == int(total_credits) else str(total_credits)
+        total_credits = sum(entries[n]["credits"] for n in raw_names)
+        max_last_seen = max(entries[n]["lastSeen"] for n in raw_names)
 
-        # ── Remove each raw entry using brace counting ────────────────────
+        # ── Remove each raw entry ─────────────────────────────────────────
         for raw in raw_names:
-            found = False
-            for q in ('"', "'"):
-                key = f"[{q}{raw}{q}]="
-                idx = ranks_data.find(key)
-                if idx == -1:
-                    continue
-                bs = ranks_data.find("{", idx)
-                if bs == -1:
-                    continue
-                depth = 1
-                k     = bs + 1
-                while k < len(ranks_data) and depth > 0:
-                    if ranks_data[k] == "{":   depth += 1
-                    elif ranks_data[k] == "}": depth -= 1
-                    k += 1
-                # Include leading whitespace on the line
-                line_start = ranks_data.rfind("\n", 0, idx)
-                start_pos  = line_start + 1 if line_start >= 0 else idx
-                # Include trailing comma and newline
-                end_pos = k
-                while end_pos < len(ranks_data) and ranks_data[end_pos] in (",", "\r", "\n", " "):
-                    end_pos += 1
-                ranks_data = ranks_data[:start_pos] + ranks_data[end_pos:]
-                found = True
-                break
-            if not found:
-                import logging as _lg2
-                _lg2.getLogger(__name__).warning(
-                    f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove"
-                )
+            m = re.search(r"\[[\x27\x22]" + re.escape(raw) + r"[\x27\x22]\]\s*=\s*\{", ranks_data)
+            if not m:
+                log.warning(f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
+                continue
+            _, end_pos = _lua_block(ranks_data, m.end() - 1)
+            line_start = ranks_data.rfind("\n", 0, m.start())
+            start_pos  = line_start + 1 if line_start >= 0 else m.start()
+            while end_pos < len(ranks_data) and ranks_data[end_pos] in (",", " ", "\r"):
+                end_pos += 1
+            if end_pos < len(ranks_data) and ranks_data[end_pos] == "\n":
+                end_pos += 1
+            ranks_data = ranks_data[:start_pos] + ranks_data[end_pos:]
 
-        # ── Insert canonical entry ────────────────────────────────────────
-        new_entry  = f'  ["{canonical}"]=\n    ["credits"]={lua_cr},\n    ["lastSeen"]={max_last_seen},\n  ,\n'
-        new_entry  = '  ["' + canonical + '"]={\n    ["credits"]=' + lua_cr + ',\n    ["lastSeen"]=' + str(max_last_seen) + ',\n  },\n'
-        insert_pat = r'(RankSave\[[\'\"]players[\'\"]\]\s*=\s*\{)'
-        ranks_data = re.sub(insert_pat, r'\1\n' + new_entry, ranks_data, count=1)
+        # ── Insert canonical entry (keeps career and any other fields) ────
+        inner = entries[name_with_ucid]["block"]
+        inner = re.sub(credits_re, lambda mm: mm.group(1) + _lua_num_str(total_credits), inner, count=1)
+        if re.search(last_seen_re, inner):
+            inner = re.sub(last_seen_re, lambda mm: mm.group(1) + _lua_num_str(max_last_seen), inner, count=1)
+        else:
+            inner = inner.rstrip() + f'\n    ["lastSeen"]={_lua_num_str(max_last_seen)},\n  '
+        new_entry  = '  ["' + canonical + '"]={' + inner + '},\n'
+        ranks_data = re.sub(r'(RankSave\[[\'\"]players[\'\"]\]\s*=\s*\{)',
+                            lambda mm: mm.group(1) + "\n" + new_entry, ranks_data, count=1)
 
         # ── Update ucidToName ─────────────────────────────────────────────
         for q in ('"', "'"):
@@ -960,8 +936,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
                 break
 
         modified = True
-        import logging as _lg
-        _lg.getLogger(__name__).info(
+        log.info(
             f"FH_Report: merged duplicate entries {raw_names} -> '{canonical}' "
             f"(credits: {total_credits}, lastSeen: {max_last_seen})"
         )
@@ -973,16 +948,14 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     # this file in the meantime, and skip this cycle's write rather than
     # risk clobbering a newer version — the next cycle will simply retry.
     recheck = (await node.read_file(ranks_file)).decode("utf-8")
-    if recheck != _original_ranks_data:
-        import logging as _lg2
-        _lg2.getLogger(__name__).warning(
+    if recheck != original:
+        log.warning(
             f"FH_Report: {ranks_file} changed since read (likely written by "
             f"Foothold) — skipping deduplication this cycle, will retry next."
         )
         return False
 
-    import logging as _lg2
-    return await write_bytes_to_node(node, ranks_file, ranks_data.encode("utf-8"), log=_lg2.getLogger(__name__))
+    return await write_bytes_to_node(node, ranks_file, ranks_data.encode("utf-8"), log=log)
 
 
 def _is_numeric_segment(s: str) -> bool:
@@ -2577,68 +2550,6 @@ def _credits_after_penalty(current_credits: float, steps: int) -> float:
     return float(_PENALTY_THRESHOLDS[new_idx] + 1)
 
 
-def _set_rank_credits_lua(ranks: str, player_name: str, value: float) -> str:
-    """Write credits for player_name in Foothold_Ranks.lua content string.
-    Accepts both single and double quoted keys. Returns modified content."""
-    start = ranks.find(f"['{player_name}']")
-    if start == -1:
-        start = ranks.find(f'["{player_name}"]')
-    if start == -1:
-        return ranks
-    bs = ranks.find("{", start)
-    if bs == -1:
-        return ranks
-    depth = 0
-    for i in range(bs, len(ranks)):
-        c = ranks[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                block     = ranks[bs:i + 1]
-                lua_val   = str(int(value)) if float(value) == int(value) else str(value)
-                new_block = re.sub(
-                    r"(\[['\"']credits['\"']\]\s*=\s*)(-?\d+(?:\.\d+)?)",
-                    rf"\g<1>{lua_val}", block, count=1
-                )
-                return ranks[:bs] + new_block + ranks[i + 1:]
-    return ranks
-
-
-def _set_campaign_points_lua(lua: str, player_name: str, value: float) -> str:
-    """Write Points for player_name in Foothold campaign lua content string."""
-    ps_start = lua.find("zonePersistance['playerStats']")
-    if ps_start == -1:
-        ps_start = lua.find('zonePersistance["playerStats"]')
-    if ps_start == -1:
-        return lua
-    section = lua[ps_start:]
-    p_start = section.find(f"['{player_name}']")
-    if p_start == -1:
-        p_start = section.find(f'["{player_name}"]')
-    if p_start == -1:
-        return lua
-    bs = section.find("{", p_start)
-    depth = 0
-    for i in range(bs, len(section)):
-        c = section[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                abs_start = ps_start + bs
-                abs_end   = ps_start + i + 1
-                block     = lua[abs_start:abs_end]
-                lua_val   = str(int(value)) if float(value) == int(value) else str(value)
-                new_block = re.sub(
-                    r"(\[['\"']Points['\"']\]\s*=\s*)(-?\d+(?:\.\d+)?)",
-                    rf"\g<1>{lua_val}", block, count=1
-                )
-                return lua[:abs_start] + new_block + lua[abs_end:]
-    return lua
-
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
 class FH_Report(Plugin):
@@ -2844,28 +2755,36 @@ class FH_Report(Plugin):
         if not saves_dir:
             saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
 
-        # ── Load Foothold files ───────────────────────────────────────────
-        persistence_file = await find_persistence_file(saves_dir, node)
+        # ── Load Foothold files (both on-disk formats supported) ──────────
+        reader           = _UpdateReadCache(node)
+        persistence_file = await find_persistence_file(saves_dir, reader)
         ranks_file       = os.path.join(saves_dir, "Foothold_Ranks.lua")
         try:
-            ranks_data = (await node.read_file(ranks_file)).decode("utf-8")
+            ranks_data = (await reader.read_file(ranks_file)).decode("utf-8")
+            players    = await parse_ranks(ranks_file, [], reader)
         except FileNotFoundError:
             self.log.warning(f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found, skipping inactivity check.")
             return
+        ranks_by_ucid = _ranks_version(ranks_data) is not None
+
         camp_data = None
+        camp_points: dict[str, tuple[str, float]] = {}   # ucid -> (playerStats entry key, Points)
         if persistence_file:
             try:
-                camp_data = (await node.read_file(persistence_file)).decode("utf-8")
+                camp_data = (await reader.read_file(persistence_file)).decode("utf-8")
             except FileNotFoundError:
                 pass
+        if camp_data:
+            campaign_stats, _, camp_name_to_ucid = await parse_player_stats(persistence_file, reader)
+            camp_by_ucid = _stats_version(camp_data) is not None
+            for name, pts in campaign_stats.items():
+                ucid = camp_name_to_ucid.get(name) or (players.get(name) or {}).get("ucid")
+                if ucid:
+                    camp_points[ucid] = (ucid if camp_by_ucid else name, float(pts))
 
-        # ── Build ucid→name map from RankSave["ucidToName"] ─────────────
-        ucid_to_name: dict[str, str] = {}
-        for m in re.finditer(r"\[[\'\"]([a-f0-9]{32})[\'\"]\]=[\'\"]([^\'\"]+)[\'\"]", ranks_data):
-            ucid_to_name[m.group(1)] = m.group(2)
-
+        ucid_to_name = {d["ucid"]: n for n, d in players.items() if d.get("ucid")}
         if not ucid_to_name:
-            self.log.debug(f"FH_Report [{instance_name}]: no ucidToName entries found, skipping.")
+            self.log.debug(f"FH_Report [{instance_name}]: no players with a known UCID found, skipping.")
             return
 
         # ── Load penalty state JSON ───────────────────────────────────────
@@ -2882,18 +2801,16 @@ class FH_Report(Plugin):
         camp_modified   = False
         log_lines: list[str] = []
 
-        # ── Fetch last_seen for all UCIDs from DCSSB DB ───────────────────
-        last_seen_map: dict[str, datetime | None] = {}
+        # ── Fetch last_seen for all UCIDs from DCSSB DB (one query) ──────
         try:
             async with self.apool.connection() as conn:
-                for ucid in ucid_to_name:
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "SELECT MAX(hop_off) FROM statistics WHERE player_ucid = %s",
-                            (ucid,)
-                        )
-                        row = await cur.fetchone()
-                        last_seen_map[ucid] = row[0] if row and row[0] else None
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT player_ucid, MAX(hop_off) FROM statistics "
+                        "WHERE player_ucid = ANY(%s) GROUP BY player_ucid",
+                        (list(ucid_to_name),)
+                    )
+                    last_seen_map = {row[0]: row[1] for row in await cur.fetchall() if row[1]}
         except Exception as e:
             self.log.error(f"FH_Report [{instance_name}]: DB error fetching last_seen: {e}")
             return
@@ -2904,21 +2821,16 @@ class FH_Report(Plugin):
             last_seen = last_seen_map.get(ucid)
             if last_seen is None:
                 continue
-            # Ensure timezone-aware
             if last_seen.tzinfo is None:
                 last_seen = last_seen.replace(tzinfo=timezone.utc)
             days_inactive = (now_utc - last_seen).days
             if days_inactive < 10:
                 # Active player — reset their penalty state if any
-                if ucid in penalty_state:
-                    del penalty_state[ucid]
+                penalty_state.pop(ucid, None)
                 continue
 
             steps_needed = _inactivity_steps(days_inactive)
-
-            # Check if we already applied this level of penalty
-            prev = penalty_state.get(ucid, {})
-            prev_steps = prev.get("steps_applied", 0)
+            prev_steps   = penalty_state.get(ucid, {}).get("steps_applied", 0)
             if steps_needed <= prev_steps:
                 # Update days but don't re-penalize
                 penalty_state[ucid] = {
@@ -2930,63 +2842,28 @@ class FH_Report(Plugin):
                 continue
 
             # New penalty threshold crossed — apply the delta
-            delta_steps = steps_needed - prev_steps
-
-            # Get current credits from Foothold_Ranks.lua
-            credit_m = None
-            start = ranks_data.find(f"['{player_name}']")
-            if start == -1:
-                start = ranks_data.find(f'["{player_name}"]')
-            if start != -1:
-                bs = ranks_data.find("{", start)
-                if bs != -1:
-                    block_end = ranks_data.find("}", bs)
-                    block = ranks_data[bs:block_end + 1]
-                    credit_m = re.search(r"\[[\'\"]credits[\'\"]\]\s*=\s*([\d.]+)", block)
-
-            if not credit_m:
-                continue
-
-            current_credits = float(credit_m.group(1))
+            delta_steps     = steps_needed - prev_steps
+            current_credits = float(players[player_name]["credits"])
             new_credits     = _credits_after_penalty(current_credits, steps_needed)
-
             if new_credits >= current_credits:
                 continue  # Nothing to deduct
 
-            # ── Write Foothold_Ranks.lua ──────────────────────────────────
-            ranks_data     = _set_rank_credits_lua(ranks_data, player_name, new_credits)
+            # ── Foothold_Ranks.lua credits ────────────────────────────────
+            ranks_key  = ucid if ranks_by_ucid else player_name
+            ranks_data = _set_lua_entry_number(ranks_data, _RANKS_PLAYERS_RE, ranks_key, "credits", new_credits)
             ranks_modified = True
 
-            # ── Deduct campaign Points if needed ─────────────────────────
+            # ── Campaign Points: only reduced when new_credits < Points ──
             camp_points_deducted = 0.0
-            if camp_data and new_credits < current_credits:
-                # Get current campaign Points for this player
-                pts_m = None
-                ps_start = camp_data.find("zonePersistance['playerStats']")
-                if ps_start == -1:
-                    ps_start = camp_data.find('zonePersistance["playerStats"]')
-                if ps_start != -1:
-                    section = camp_data[ps_start:]
-                    p_start = section.find(f"['{player_name}']")
-                    if p_start == -1:
-                        p_start = section.find(f'["{player_name}"]')
-                    if p_start != -1:
-                        bs2 = section.find("{", p_start)
-                        be2 = section.find("}", bs2)
-                        block2 = section[bs2:be2 + 1]
-                        pts_m = re.search(r"\[[\'\"]Points[\'\"]\]\s*=\s*([\d.]+)", block2)
+            if ucid in camp_points:
+                camp_key, current_points = camp_points[ucid]
+                if new_credits < current_points:
+                    delta      = current_credits - new_credits
+                    new_points = max(0.0, current_points - delta)
+                    camp_data  = _set_lua_entry_number(camp_data, _PLAYER_STATS_RE, camp_key, "Points", new_points)
+                    camp_modified = True
+                    camp_points_deducted = current_points - new_points
 
-                if pts_m:
-                    current_points = float(pts_m.group(1))
-                    # Only touch Points if new_credits < current Points
-                    if new_credits < current_points:
-                        delta          = current_credits - new_credits
-                        new_points     = max(0.0, current_points - delta)
-                        camp_data      = _set_campaign_points_lua(camp_data, player_name, new_points)
-                        camp_modified  = True
-                        camp_points_deducted = current_points - new_points
-
-            # ── Update penalty state ──────────────────────────────────────
             penalty_state[ucid] = {
                 "name":          player_name,
                 "last_checked":  today_str,
@@ -2994,17 +2871,16 @@ class FH_Report(Plugin):
                 "steps_applied": steps_needed,
             }
 
-            # ── Build log line ────────────────────────────────────────────
             ts  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            log = (
+            line = (
                 f"{ts} | {ucid} | {player_name} | "
                 f"{days_inactive} days inactive | -{delta_steps} rank level(s) | "
                 f"{int(current_credits):,} → {int(new_credits):,} credits"
             )
             if camp_points_deducted > 0:
-                log += f" | campaign Points -{int(camp_points_deducted):,}"
-            log_lines.append(log)
-            self.log.info(f"FH_Report [{instance_name}]: inactivity penalty: {log}")
+                line += f" | campaign Points -{int(camp_points_deducted):,}"
+            log_lines.append(line)
+            self.log.info(f"FH_Report [{instance_name}]: inactivity penalty: {line}")
 
         # ── Write modified Lua files back to node ─────────────────────────
         if ranks_modified:
@@ -3085,21 +2961,14 @@ class FH_Report(Plugin):
         record of each day's top-10, keyed by date (YYYY-MM-DD)."""
         return os.path.join(saves_dir, ".fhc", "daily_history.json")
 
-    def _load_daily_history(self, saves_dir: str) -> dict:
+    async def _load_daily_history(self, saves_dir: str, node) -> dict:
         """Load daily history from disk. Returns {date_str: [event, ...]},
         where each event is {"campaign_restart": bool, "top": [{"name","points"[,"ucid"]}, ...]}
         ("ucid" present on entries written from v12.1.1 on).
         A date can have more than one event if a campaign restart happened
         on the same calendar day as the normal daily rollover — both are
         kept, never overwritten."""
-        path = self._get_history_file(saves_dir)
-        if os.path.exists(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return json.load(f)
-            except (ValueError, OSError):
-                pass
-        return {}
+        return await _read_json(node, self._get_history_file(saves_dir))
 
     async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
         """Save daily history to disk atomically, via write_bytes_to_node
@@ -3123,20 +2992,13 @@ class FH_Report(Plugin):
             log=self.log
         )
 
-    def _load_daily_snapshot(self, saves_dir: str) -> dict:
+    async def _load_daily_snapshot(self, saves_dir: str, node) -> dict:
         """Load daily_snapshot.json from disk, exactly as stored (since
         12.2.0: one block per player under their UCID — see
         _pack_daily_snapshot). Callers needing the internal per-field shape
         pass it through _unpack_daily_snapshot, which also accepts the older
         formats. Returns {} if missing or unreadable."""
-        path = self._get_daily_file(saves_dir)
-        if os.path.exists(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return json.load(f)
-            except (ValueError, OSError):
-                pass
-        return {}
+        return await _read_json(node, self._get_daily_file(saves_dir))
 
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
         """Save daily snapshot to disk atomically, via write_bytes_to_node
@@ -3174,7 +3036,8 @@ class FH_Report(Plugin):
                               name_to_ucid: dict | None = None,
                               names_by_id: dict | None = None,
                               live_names: set | None = None,
-                              snap: dict | None = None) -> tuple[dict, dict, bool]:
+                              snap: dict | None = None,
+                              persist: bool = True) -> tuple[dict, dict, bool]:
         """Compute today's points and today's combat stats for each player by
         comparing current campaign values against the snapshot taken at reset_hour UTC.
         Returns (daily_pts, daily_stats, campaign_restarted):
@@ -3189,7 +3052,10 @@ class FH_Report(Plugin):
         which re-keys the stored baseline to current IDs every cycle (this is
         also what converts a pre-12.2.0 name-keyed file, with no separate
         migration step). `snap` lets the caller pass the file it already read
-        this cycle, so it's read only once.
+        this cycle, so it's read only once. persist=False computes the same
+        figures purely in memory — no daily_history/daily_snapshot writes —
+        so read-only callers (/fh_report player) never race the updater,
+        which stays the only writer.
 
         Manual reset: this plugin has no commands. To manually reset the daily
         counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
@@ -3222,7 +3088,7 @@ class FH_Report(Plugin):
         today_str = now_utc.strftime("%Y-%m-%d")
 
         if snap is None:
-            snap = self._load_daily_snapshot(saves_dir)
+            snap = await self._load_daily_snapshot(saves_dir, node)
         snap_on_disk = snap          # exactly what's on disk, to skip no-op writes below
         snap = _unpack_daily_snapshot(snap)
         if snap:
@@ -3319,9 +3185,9 @@ class FH_Report(Plugin):
                 if name not in closing_daily and val > 0:
                     closing_daily[name] = val
 
-            if closing_daily:
+            if closing_daily and persist:
                 top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
-                history    = self._load_daily_history(saves_dir)
+                history    = await self._load_daily_history(saves_dir, node)
                 # Store each player's UCID alongside the name it had that day,
                 # so the Podium can later show their CURRENT name and rank
                 # even after a rename (names alone can't be matched reliably
@@ -3467,7 +3333,7 @@ class FH_Report(Plugin):
         # points (e.g. an empty server) every cycle would otherwise rewrite
         # an identical file, over the network for remote nodes.
         new_snap = _pack_daily_snapshot(new_snap, live_names)
-        if new_snap != snap_on_disk:
+        if persist and new_snap != snap_on_disk:
             await self._save_daily_snapshot(saves_dir, new_snap, node)
 
         return daily, daily_stats, campaign_restarted
@@ -3615,7 +3481,7 @@ class FH_Report(Plugin):
         # Read daily_snapshot.json only when the daily computation will run
         # (it's also what keeps its name->UCID history up to date) — and then
         # only once per cycle, shared with _compute_daily_points below.
-        daily_snap = self._load_daily_snapshot(saves_dir) if needs_daily else {}
+        daily_snap = await self._load_daily_snapshot(saves_dir, node) if needs_daily else {}
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         live_names = set(campaign_stats) | set(session_stats_raw)
@@ -3640,7 +3506,7 @@ class FH_Report(Plugin):
         # reuse it below without reading the file twice. If there's no
         # history yet, _render_layout_tables' own Podium step simply
         # renders nothing for "P" — no separate skip-check needed here.
-        daily_history_data = self._load_daily_history(saves_dir)
+        daily_history_data = await self._load_daily_history(saves_dir, source_node)
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
 
@@ -4114,7 +3980,7 @@ class FH_Report(Plugin):
         # file's data by player ID, then re-key it by the Foothold_Ranks.lua
         # name the roster (and `match`) uses. The callsign-stripped name
         # comparison is kept only as a fallback for UCID-less saves.
-        daily_snap = self._load_daily_snapshot(saves_dir)   # read once per cycle
+        daily_snap = await self._load_daily_snapshot(saves_dir, node)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         u2rn     = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
@@ -4143,7 +4009,8 @@ class FH_Report(Plugin):
         daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
-            name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap)
+            name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap,
+            persist=False)
         d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
@@ -4227,7 +4094,7 @@ class FH_Report(Plugin):
         node = srv.node
 
         try:
-            history = self._load_daily_history(saves_dir)
+            history = await self._load_daily_history(saves_dir, node)
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading daily history:\n```{e}```", ephemeral=True)
             return
@@ -4259,7 +4126,7 @@ class FH_Report(Plugin):
         podium_lines = _build_podium_table(
             filtered_history, players, days=0, top=top,
             strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")),
-            name_to_ucid=_unpack_daily_snapshot(self._load_daily_snapshot(saves_dir)).get("name_to_ucid") or {}
+            name_to_ucid=_unpack_daily_snapshot(await self._load_daily_snapshot(saves_dir, node)).get("name_to_ucid") or {}
         )
         if not podium_lines:
             await interaction.followup.send(
