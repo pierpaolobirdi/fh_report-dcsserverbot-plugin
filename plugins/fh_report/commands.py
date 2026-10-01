@@ -6,13 +6,16 @@ with front-line status and pilot leaderboard. No database required.
 
 from __future__ import annotations
 
-import glob
+import asyncio
+import calendar
+import importlib.util
 import json
 import logging
 import os
 import re
-import asyncio
-from datetime import datetime, timezone, timedelta
+import tempfile
+import time
+from datetime import datetime, timezone
 from typing import Type
 
 import discord
@@ -252,14 +255,18 @@ def _slot_display_counts(total_slots: int, active_slots: int) -> tuple[int, int]
     return display_total, display_active
 
 
-def get_rank(credits: float) -> str:
+def _rank_index(credits: float) -> int:
     rank_idx = 0
     for i, threshold in enumerate(RANK_THRESHOLDS):
         if credits >= threshold:
             rank_idx = i
         else:
             break
-    return RANK_NAMES[rank_idx]
+    return rank_idx
+
+
+def get_rank(credits: float) -> str:
+    return RANK_NAMES[_rank_index(credits)]
 
 
 async def find_persistence_file(saves_dir: str, node) -> str | None:
@@ -673,8 +680,6 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
        update DCSServerBot to 3.0.4.28+ (as of writing, on the 'dev'
        branch) rather than a bare, confusing OS error.
     """
-    import tempfile
-
     # ── Attempt 1: new-style node.write_file(target, source, overwrite) ──
     tmp_local_path = None
     try:
@@ -969,6 +974,9 @@ def _is_numeric_segment(s: str) -> bool:
     return numeric / len(s) > 0.49
 
 
+_CALLSIGN_RE = re.compile(r'^[A-Z][A-Z0-9]* \d+[-_]\d+\s*', re.IGNORECASE)
+
+
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
     Handles separators (|, /, backslash, ,, ' - ') and callsign patterns
@@ -995,9 +1003,7 @@ def strip_callsign(name: str) -> str:
 
     # Step 2 — remove leading callsign pattern: WORD(s) N-N
     # e.g. "UZI 1-1 zarpa" → "zarpa", but not "[MA] Leka" or "132nd Kimkiller"
-    import re as _re
-    callsign_pattern = _re.compile(r'^[A-Z][A-Z0-9]* \d+[-_]\d+\s*', _re.IGNORECASE)
-    stripped = callsign_pattern.sub('', name).strip()
+    stripped = _CALLSIGN_RE.sub('', name).strip()
     # Only apply if result is not empty
     if stripped:
         name = stripped
@@ -1154,6 +1160,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
     blocks: list[list[str]] = []
     name_to_ucid = name_to_ucid or {}
     ucid_to_current = {d.get("ucid"): (n, d) for n, d in players.items() if d.get("ucid")}
+    players_by_base = _stripped_index(players)
     for date_idx, date_str in enumerate(dates_desc):
         is_latest_day  = (date_idx == 0)
         effective_top  = max(top, 3) if (is_latest_day and min3_latest_day) else top
@@ -1200,10 +1207,9 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     # that Foothold_Ranks.lua (and therefore `players`)
                     # carries, or vice versa. Last resort: callsign-stripped
                     # comparison, same as the Session/Daily leaderboards.
-                    for p_name, p_data in players.items():
-                        if strip_callsign(p_name) == strip_callsign(name):
-                            current_name, player_data = p_name, p_data
-                            break
+                    p_name = players_by_base.get(strip_callsign(name))
+                    if p_name is not None:
+                        current_name, player_data = p_name, players[p_name]
                 # Current name if the player could be identified; otherwise
                 # (excluded, or no longer in Foothold_Ranks.lua) the name
                 # stored for that day, without a rank.
@@ -1343,6 +1349,16 @@ def _trim_embed(embed: discord.Embed) -> discord.Embed:
     return embed
 
 
+def _fmt_compact(n: int) -> str:
+    """Format a number compactly: <1000 exact, then k / M with 1 decimal
+    (stripped if .0) — keeps long values like fuel lbs from widening lines."""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+
+
 def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     """Build a one-line pilot career card from career stats dict.
     CAREER_STAT IDs (Foothold v4.5):
@@ -1367,18 +1383,6 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
             return f"{hours}h"
         minutes = max(1, seconds // 60)  # at least 1m if there's any time
         return f"{minutes}m"
-
-    def _fmt_compact(n: int) -> str:
-        """Format a number compactly: <1000 exact, 1k-999k with 1 decimal
-        (stripped if .0), >=1M in millions likewise. Used to keep long values
-        (e.g. fuel in lbs) from making the line too wide."""
-        if n < 1000:
-            return str(n)
-        if n < 1_000_000:
-            s = f"{n / 1000:.1f}".rstrip("0").rstrip(".")
-            return f"{s}k"
-        s = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
-        return f"{s}M"
 
     parts = []
     fixed_str = _fmt_time(fixed_s)
@@ -1662,8 +1666,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     # ── Last seen ───────────────────────────────────────────────────────
     embed.add_field(name="\u200b", value="▬" * 32, inline=False)
     if last_seen is not None:
-        import calendar as _cal
-        ts = int(_cal.timegm(last_seen.timetuple()))
+        ts = int(calendar.timegm(last_seen.timetuple()))
         activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
     else:
         activity_line = "- **Last seen:** —"
@@ -1704,13 +1707,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if career.get(CAREER_TRAPS, 0) > 0:
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
-        fuel_lbs = int(career[CAREER_FUEL_LBS])
-        from math import trunc as _trunc
-        _fuel_str = str(fuel_lbs) if fuel_lbs < 1000 else (
-            f"{fuel_lbs/1000:.1f}".rstrip("0").rstrip(".") + "k" if fuel_lbs < 1_000_000 else
-            f"{fuel_lbs/1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
-        )
-        career_lines.append(f"- **Fuel Received:** {_fuel_str} lbs")
+        career_lines.append(f"- **Fuel Received:** {_fmt_compact(int(career[CAREER_FUEL_LBS]))} lbs")
     if career.get(CAREER_DEATHS, 0) > 0:
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
@@ -1751,6 +1748,7 @@ _ROLE_TITLES = {
     "R": "🏆 __Pilot Leaderboard · by Rank__",
 }
 _ROLE_ICONS = {"D": "📅", "S": "📊", "R": "🏆"}
+_TABLE_MEDALS = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
 
 
 def _emit_table_field(embed: discord.Embed, title: str, icon: str,
@@ -1912,7 +1910,6 @@ def _render_layout_tables(
         surplus = max(0, limit_eff - len(items)) if limit_eff else 0
         hidden = total_items - len(items)
 
-        medals = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
         lines = []
         for i, (name, data) in enumerate(items):
             credits = int(data["credits"])
@@ -1920,7 +1917,7 @@ def _render_layout_tables(
             display = strip_callsign(name) if strip_callsign_flag else name
             short_src = display if len(display) <= 22 else display[:20] + '..'
             short   = _safe_code_span(short_src)
-            medal   = data.get("custom_medal") or (medals[i] if i < len(medals) else "•")
+            medal   = data.get("custom_medal") or (_TABLE_MEDALS[i] if i < len(_TABLE_MEDALS) else "•")
 
             s_pts        = data.get("session_points", 0)
             d_pts        = dp.get(name, 0)
@@ -1974,6 +1971,49 @@ def _render_layout_tables(
             badge_role_done = True  # only the first table of this role gets badges
 
         _emit_table_field(embed, _ROLE_TITLES[role], _ROLE_ICONS[role], lines, hidden, show_all_pilots)
+
+
+def _stripped_index(d: dict) -> dict:
+    """{strip_callsign(key): first key with that stripped form} — lets
+    callsign-insensitive lookups run in O(1) instead of rescanning `d`."""
+    idx: dict = {}
+    for k in d:
+        idx.setdefault(strip_callsign(k), k)
+    return idx
+
+
+def _zone_lines(side_zones: list, full: str, empty: str, max_zones: int | None,
+                zone_name_length: int, slot_status: bool, waypoint_map: dict | None,
+                wp_desc: bool, use_true_max: bool) -> list[str]:
+    """One side's zone list: active zones first (by waypoint number when a
+    waypoint map is given — BLUE descending, RED ascending — else by
+    level+slots), suspended zones last. BLUE draws against its true max slot
+    count (unlocked-but-unbuilt slots show as empty symbols)."""
+    by_level = lambda z: (z["level"], z.get("active_slots", 0))
+    active    = [z for z in side_zones if not z.get("suspended")]
+    suspended = sorted((z for z in side_zones if z.get("suspended")), key=lambda z: z["level"], reverse=True)
+    if waypoint_map:
+        with_wp = sorted((z for z in active if z["name"] in waypoint_map),
+                         key=lambda z: waypoint_map[z["name"]], reverse=wp_desc)
+        active  = with_wp + sorted((z for z in active if z["name"] not in waypoint_map),
+                                   key=by_level, reverse=True)
+    else:
+        active = sorted(active, key=by_level, reverse=True)
+    ordered = active + suspended
+    shown   = ordered[:max_zones] if max_zones else ordered
+
+    lines = []
+    for z in shown:
+        if slot_status and not z.get("suspended"):
+            total = (z.get("true_max") or z["level"]) if use_true_max else z["level"]
+            n_total, n_active = _slot_display_counts(total, z.get("active_slots", z["level"]))
+            stars = full * n_active + empty * (n_total - n_active)
+        else:
+            stars = full * min(z["level"], 5)
+        lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
+    if max_zones and len(ordered) > max_zones:
+        lines.append(f"*+ {len(ordered) - max_zones} more bases*")
+    return lines
 
 
 def build_embed(zones: dict, players: dict, campaign_name: str,
@@ -2045,63 +2085,12 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         )
         progress     = f"```ansi\n{pct_blue}% {bar_ansi} {pct_red}%\n```"
 
-    # BLUE zones — actives first sorted by level+slots (or by waypoint number
-    # if sort_zones_by_waypoint is enabled), suspended last
-    blue_active    = [z for z in zones["blue"] if not z.get("suspended")]
-    blue_suspended = [z for z in zones["blue"] if z.get("suspended")]
-    if sort_zones_by_waypoint and waypoint_map:
-        _blue_with_wp    = [z for z in blue_active if z["name"] in waypoint_map]
-        _blue_without_wp = [z for z in blue_active if z["name"] not in waypoint_map]
-        _blue_with_wp    = sorted(_blue_with_wp, key=lambda z: waypoint_map[z["name"]], reverse=True)
-        _blue_without_wp = sorted(_blue_without_wp, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
-        blue_active      = _blue_with_wp + _blue_without_wp
-    else:
-        blue_active    = sorted(blue_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
-    blue_suspended = sorted(blue_suspended, key=lambda z: z["level"], reverse=True)
-    blue_sorted    = blue_active + blue_suspended
-    limit          = max_zones if max_zones else len(blue_sorted)
-    blue_lines     = []
-    for z in blue_sorted[:limit]:
-        lvl = min(z["level"], 5)
-        if slot_status and not z.get("suspended"):
-            _blue_total = z.get("true_max") or z["level"]
-            display_lvl, display_active = _slot_display_counts(_blue_total, z.get("active_slots", z["level"]))
-            stars = "🔹" * display_active + "◇" * (display_lvl - display_active)
-        else:
-            stars  = "🔹" * lvl
-        blue_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
-    if max_zones and len(blue_sorted) > max_zones:
-        blue_lines.append(f"*+ {len(blue_sorted) - max_zones} more bases*")
-    blue_lines.append(".")
-    blue_text = "\n".join(blue_lines) if blue_lines else "—"
-
-    # RED zones — actives first sorted by level+slots (or by waypoint number
-    # if sort_zones_by_waypoint is enabled), suspended last
-    red_active    = [z for z in zones["red"] if not z.get("suspended")]
-    red_suspended = [z for z in zones["red"] if z.get("suspended")]
-    if sort_zones_by_waypoint and waypoint_map:
-        _red_with_wp    = [z for z in red_active if z["name"] in waypoint_map]
-        _red_without_wp = [z for z in red_active if z["name"] not in waypoint_map]
-        _red_with_wp    = sorted(_red_with_wp, key=lambda z: waypoint_map[z["name"]])
-        _red_without_wp = sorted(_red_without_wp, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
-        red_active      = _red_with_wp + _red_without_wp
-    else:
-        red_active    = sorted(red_active, key=lambda z: (z["level"], z.get("active_slots", 0)), reverse=True)
-    red_suspended = sorted(red_suspended, key=lambda z: z["level"], reverse=True)
-    red_sorted    = red_active + red_suspended
-    limit         = max_zones if max_zones else len(red_sorted)
-    red_lines     = []
-    for z in red_sorted[:limit]:
-        lvl = min(z["level"], 5)
-        if slot_status and not z.get("suspended"):
-            display_lvl, display_active = _slot_display_counts(z["level"], z.get("active_slots", z["level"]))
-            stars = "🔺" * display_active + "△" * (display_lvl - display_active)
-        else:
-            stars  = "🔺" * lvl
-        red_lines.append(f"`{z['name'][:zone_name_length]}` {stars}")
-    if max_zones and len(red_sorted) > max_zones:
-        red_lines.append(f"*+ {len(red_sorted) - max_zones} more bases*")
-    red_text = "\n".join(red_lines) if red_lines else "—"
+    blue_text = "\n".join(_zone_lines(zones["blue"], "🔹", "◇", max_zones, zone_name_length, slot_status,
+                            waypoint_map if sort_zones_by_waypoint else None, wp_desc=True,
+                            use_true_max=True) + ["."])
+    red_text  = "\n".join(_zone_lines(zones["red"], "🔺", "△", max_zones, zone_name_length, slot_status,
+                            waypoint_map if sort_zones_by_waypoint else None, wp_desc=False,
+                            use_true_max=False)) or "—"
 
     # Embed + zone fields are created here (moved up from just before the
     # tables section) so the report_layout engine below can add its own
@@ -2114,61 +2103,38 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         ),
         color=0x3498DB
     )
-    # Force both column headers to the same fixed width so the embed always
-    # reaches maximum width regardless of zone count digits or content length.
-    # The target is the longer of the two headers + 44 spaces + dot (same as
-    # the manually tuned RED value). Both headers are padded to that target.
-    _blue_hdr  = f"🔵 BLUE Zones ({blue_count})"
-    _red_hdr   = f"🔴 RED Zones ({red_count})"
-    embed.add_field(
-        name=_blue_hdr,
-        value=blue_text[:1024],
-        inline=True
-    )
-    embed.add_field(
-        name=_red_hdr,
-        value=red_text[:1024],
-        inline=True
-    )
+    embed.add_field(name=f"🔵 BLUE Zones ({blue_count})", value=blue_text[:1024], inline=True)
+    embed.add_field(name=f"🔴 RED Zones ({red_count})", value=red_text[:1024], inline=True)
 
     # Pilot leaderboard — apply session stats and ordering
     cs   = campaign_stats or {}
     srs  = session_stats_raw or {}
     drs  = daily_stats_raw or {}
 
-    # Add session_points to each player
-    # Skip if hook already set session_points (hook value takes priority)
+    # Attach session points / raw session stats / raw daily stats to each
+    # player (hook-provided values take priority). Exact name first, then
+    # the first callsign-stripped match.
+    cs_idx, srs_idx, drs_idx = _stripped_index(cs), _stripped_index(srs), _stripped_index(drs)
     for name, data in players.items():
+        base = strip_callsign(name)
         if "session_points" not in data:
             s_pts = cs.get(name, 0)
-            if s_pts == 0:
-                for cs_name, cs_pts in cs.items():
-                    if strip_callsign(cs_name) == strip_callsign(name):
-                        s_pts = cs_pts
-                        break
+            if s_pts == 0 and base in cs_idx:
+                s_pts = cs[cs_idx[base]]
             data["session_points"] = s_pts
-        # Attach raw session stats (kills/missions) for the session card
         if "session_stats" not in data:
             raw = srs.get(name)
-            if raw is None:
-                for srs_name, srs_val in srs.items():
-                    if strip_callsign(srs_name) == strip_callsign(name):
-                        raw = srs_val
-                        break
+            if raw is None and base in srs_idx:
+                raw = srs[srs_idx[base]]
             data["session_stats"] = raw or {}
-        # Attach raw daily stats (kills/missions delta) for the daily card
         if "daily_stats" not in data:
             draw = drs.get(name)
-            if draw is None:
-                for drs_name, drs_val in drs.items():
-                    if strip_callsign(drs_name) == strip_callsign(name):
-                        draw = drs_val
-                        break
+            if draw is None and base in drs_idx:
+                draw = drs[drs_idx[base]]
             data["daily_stats"] = draw or {}
 
     dp          = daily_points or {}  # {name: daily_pts}
-    drs_check   = daily_stats_raw or {}
-    has_daily   = bool(dp) or any(drs_check.values())
+    has_daily   = bool(dp) or any(drs.values())
 
     _render_layout_tables(
         embed=embed, report_layout=report_layout, points_detail=points_detail,
@@ -2190,8 +2156,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     # Full-width separator — placed at the bottom to fix embed width
     # without interrupting the visual flow of the content.
     try:
-        from core import utils as _dcssb_utils
-        _ruler_name = _dcssb_utils.print_ruler(ruler_length=34)
+        _ruler_name = utils.print_ruler(ruler_length=34)
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
@@ -2489,21 +2454,17 @@ class _FHServerTransformer(utils.ServerTransformer):
 
 
 # ── Optional private hook ─────────────────────────────────────────────────────
-import importlib.util as _iutil
-import os as _os
-
 def _load_hook():
-    _hook_path = _os.path.join(_os.path.dirname(__file__), "fh_hook.py")
-    if not _os.path.exists(_hook_path):
+    hook_path = os.path.join(os.path.dirname(__file__), "fh_hook.py")
+    if not os.path.exists(hook_path):
         return None, False
     try:
-        _spec = _iutil.spec_from_file_location("fh_hook", _hook_path)
-        _mod  = _iutil.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        return _mod, True
+        spec = importlib.util.spec_from_file_location("fh_hook", hook_path)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, True
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"FH_Report: fh_hook load error: {e}")
+        log.warning(f"FH_Report: fh_hook load error: {e}")
         return None, False
 
 _fh_hook, _HAS_HOOK = _load_hook()
@@ -2521,10 +2482,6 @@ def _bool_cfg(value) -> bool:
     return False
 
 
-# ── Rank thresholds (for penalty step calculation) ────────────────────────────
-# Must match RANK_THRESHOLDS defined earlier.
-_PENALTY_THRESHOLDS = RANK_THRESHOLDS  # reference, not copy
-
 # ── Inactivity penalty: days → escalones a bajar ─────────────────────────────
 # 10d→1, 20d→3, 30d→5, 40d→7 ...  formula: steps = (days//10)*2 - 1, min 0
 def _inactivity_steps(days: int) -> int:
@@ -2539,15 +2496,24 @@ def _credits_after_penalty(current_credits: float, steps: int) -> float:
     or 0 if steps exceed their current rank index."""
     if steps <= 0:
         return current_credits
-    # Find current rank index
-    rank_idx = 0
-    for i, t in enumerate(_PENALTY_THRESHOLDS):
-        if current_credits >= t:
-            rank_idx = i
-    new_idx = max(0, rank_idx - steps)
+    new_idx = max(0, _rank_index(current_credits) - steps)
     if new_idx == 0:
         return 0.0
-    return float(_PENALTY_THRESHOLDS[new_idx] + 1)
+    return float(RANK_THRESHOLDS[new_idx] + 1)
+
+
+def _reset_hour_today(cfg: dict) -> int:
+    """daily_reset_hour, overridden by today's entry in daily_reset_schedule."""
+    schedule = cfg.get("daily_reset_schedule") or {}
+    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).weekday()]
+    if today in schedule:
+        return int(schedule[today])
+    return int(cfg.get("daily_reset_hour") or 0)
+
+
+async def _resolve_saves_dir(server, cfg: dict) -> str:
+    """Configured saves_dir, else <missions dir>/Saves (same as Pretense)."""
+    return cfg.get("saves_dir") or os.path.join(await server.get_missions_dir(), "Saves")
 
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
@@ -2603,7 +2569,6 @@ class FH_Report(Plugin):
     def _load_message_ids(self) -> dict:
         if os.path.exists(self._message_ids_file):
             try:
-                import json
                 with open(self._message_ids_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except (ValueError, OSError):
@@ -2612,7 +2577,6 @@ class FH_Report(Plugin):
 
     def _save_message_ids(self) -> None:
         try:
-            import json
             with open(self._message_ids_file, "w", encoding="utf-8") as f:
                 json.dump(self._message_ids, f, indent=2)
         except OSError as e:
@@ -2622,7 +2586,6 @@ class FH_Report(Plugin):
 
     @tasks.loop(seconds=300)
     async def updater(self):
-        import time
         now = time.monotonic()
         # Anti-burst: detect PC suspension (elapsed >> interval)
         interval = self.updater.seconds or 300
@@ -2637,7 +2600,6 @@ class FH_Report(Plugin):
         self._last_update = now
 
         raw          = self.locals or {}
-        default_cfg  = raw.get("DEFAULT") or {}
 
         # Warn about any fh_report.yaml server block whose key doesn't match
         # any currently-registered DCSServerBot instance name — a common
@@ -2688,12 +2650,9 @@ class FH_Report(Plugin):
         for server in self.bot.servers.values():
             try:
                 instance_name = server.instance.name
-                srv_cfg = raw.get(instance_name)
-                if not srv_cfg:
+                if not raw.get(instance_name):
                     continue
-                # Merge DEFAULT + instance overrides fresh each cycle (like Pretense)
-                cfg = dict(default_cfg)
-                cfg.update(srv_cfg)
+                cfg = self._merged_cfg(instance_name)
                 if processed_server_count > 0:
                     await asyncio.sleep(stagger_seconds)
                 processed_server_count += 1
@@ -2714,15 +2673,12 @@ class FH_Report(Plugin):
         """Check all configured servers for inactive pilots every 6 hours.
         Only runs if inactivity_penalty: 1 is set in fh_report.yaml."""
         raw         = self.locals or {}
-        default_cfg = raw.get("DEFAULT") or {}
         for server in self.bot.servers.values():
             try:
                 instance_name = server.instance.name
-                srv_cfg = raw.get(instance_name)
-                if not srv_cfg:
+                if not raw.get(instance_name):
                     continue
-                cfg = dict(default_cfg)
-                cfg.update(srv_cfg)
+                cfg = self._merged_cfg(instance_name)
                 if not int(cfg.get("inactivity_penalty") or 0):
                     continue
                 await self._run_inactivity_check(server, cfg)
@@ -2751,9 +2707,7 @@ class FH_Report(Plugin):
         """
         instance_name = server.instance.name
         node          = server.node
-        saves_dir     = cfg.get("saves_dir")
-        if not saves_dir:
-            saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
+        saves_dir     = await _resolve_saves_dir(server, cfg)
 
         # ── Load Foothold files (both on-disk formats supported) ──────────
         reader           = _UpdateReadCache(node)
@@ -3381,11 +3335,7 @@ class FH_Report(Plugin):
             self.log.warning(f"FH_Report [{instance_name}]: channel {channel_id} not found.")
             return
 
-        # Resolve saves_dir — prefer explicit config, fall back to get_missions_dir()
-        # exactly as Pretense does: os.path.join(await server.get_missions_dir(), 'Saves')
-        saves_dir = cfg.get("saves_dir")
-        if not saves_dir:
-            saves_dir = os.path.join(await server.get_missions_dir(), "Saves")
+        saves_dir = await _resolve_saves_dir(server, cfg)
 
         source_node = server.node
         node = _UpdateReadCache(source_node)
@@ -3432,8 +3382,8 @@ class FH_Report(Plugin):
         if _HAS_HOOK:
             try:
                 players = _fh_hook.post_process(players, cfg, instance_name, campaign_stats)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
 
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
@@ -3486,21 +3436,11 @@ class FH_Report(Plugin):
             daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
-            reset_hour    = int(cfg.get("daily_reset_hour") or 0)
-            # Override with day-specific hour if daily_reset_schedule is defined
-            schedule      = cfg.get("daily_reset_schedule") or {}
-            if schedule:
-                day_keys  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-                today_key = day_keys[datetime.now(timezone.utc).weekday()]
-                if today_key in schedule:
-                    reset_hour = int(schedule[today_key])
+            reset_hour = _reset_hour_today(cfg)
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
                 name_to_ucid, names_by_id, live_names, daily_snap)
-
-        # Detect if session data exists (any player with session_points > 0)
-        has_session = any(d.get("session_points", 0) > 0 for d in players.values())
 
         # Load daily_history once here (cheap, tiny file) so build_embed can
         # reuse it below without reading the file twice. If there's no
@@ -3816,12 +3756,10 @@ class FH_Report(Plugin):
         if srv is None:
             return []
         cfg       = self._merged_cfg(server_name)
-        saves_dir = cfg.get("saves_dir")
-        if not saves_dir:
-            try:
-                saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
-            except Exception:
-                return []
+        try:
+            saves_dir = await _resolve_saves_dir(srv, cfg)
+        except Exception:
+            return []
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
             ranks_file     = os.path.join(saves_dir, "Foothold_Ranks.lua")
@@ -3873,7 +3811,7 @@ class FH_Report(Plugin):
         srv = self._get_server_by_instance(server)
         if srv is None:
             await interaction.followup.send(
-                f"❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
                 ephemeral=True)
             return
 
@@ -3885,9 +3823,7 @@ class FH_Report(Plugin):
             return
 
         cfg       = self._merged_cfg(server)
-        saves_dir = cfg.get("saves_dir")
-        if not saves_dir:
-            saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
+        saves_dir = await _resolve_saves_dir(srv, cfg)
         node = srv.node
 
         try:
@@ -3987,25 +3923,19 @@ class FH_Report(Plugin):
         cs_disp  = _by_display_name(campaign_by_id, players, names_by_id, u2rn)
         srs_disp = _by_display_name(session_by_id, players, names_by_id, u2rn)
 
+        match_base = strip_callsign(match)
+
         def _lookup(by_name: dict, default):
             if match in by_name:
                 return by_name[match]
-            for k, v in by_name.items():
-                if strip_callsign(k) == strip_callsign(match):
-                    return v
-            return default
+            k = _stripped_index(by_name).get(match_base)
+            return by_name[k] if k is not None else default
 
         s_pts   = _lookup(cs_disp, 0)
         s_stats = _lookup(srs_disp, None) or {}
 
         # Daily points — reuse the same snapshot-based computation as the embed
-        reset_hour = int(cfg.get("daily_reset_hour") or 0)
-        schedule   = cfg.get("daily_reset_schedule") or {}
-        if schedule:
-            day_keys  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-            today_key = day_keys[datetime.now(timezone.utc).weekday()]
-            if today_key in schedule:
-                reset_hour = int(schedule[today_key])
+        reset_hour = _reset_hour_today(cfg)
         daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
@@ -4070,7 +4000,7 @@ class FH_Report(Plugin):
         srv = self._get_server_by_instance(server)
         if srv is None:
             await interaction.followup.send(
-                f"❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
                 ephemeral=True)
             return
 
@@ -4088,9 +4018,7 @@ class FH_Report(Plugin):
             return
 
         cfg       = self._merged_cfg(server)
-        saves_dir = cfg.get("saves_dir")
-        if not saves_dir:
-            saves_dir = os.path.join(await srv.get_missions_dir(), "Saves")
+        saves_dir = await _resolve_saves_dir(srv, cfg)
         node = srv.node
 
         try:
@@ -4146,4 +4074,4 @@ class FH_Report(Plugin):
 
 async def setup(bot: DCSServerBot):
     await bot.add_cog(FH_Report(bot))
-    logging.getLogger(__name__).info(f"  => FH_Report v{FH_REPORT_RELEASE} loaded.")
+    log.info(f"  => FH_Report v{FH_REPORT_RELEASE} loaded.")
