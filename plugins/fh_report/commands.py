@@ -1889,8 +1889,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     embed = discord.Embed(
         title=f"📡  {campaign_name}",
         description=(f"**Front Status — {timestamp}**\n\n"
-                     "⏸️ **Campaign not started yet** — waiting for the Foothold mission "
-                     "to create its save files."),
+                     "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
         color=0x95A5A6
     )
     if players and "R" in (report_layout or "").upper():
