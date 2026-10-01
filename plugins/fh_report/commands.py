@@ -111,29 +111,6 @@ def _lua_num_str(value: float) -> str:
     return str(int(value)) if float(value) == int(value) else str(value)
 
 
-def _set_lua_entry_number(text: str, section_pattern: str, entry_key: str,
-                          field: str, value: float) -> str:
-    """Set the first `[field]=<number>` inside entry `[entry_key]={...}` of
-    the table matched by `section_pattern`. Returns `text` unchanged if the
-    section, entry or field isn't found."""
-    sm = re.search(section_pattern, text)
-    if not sm:
-        return text
-    sec_open = sm.end() - 1
-    sec_inner, _ = _lua_block(text, sec_open)
-    em = re.search(r"\[[\"']" + re.escape(entry_key) + r"[\"']\]\s*=\s*\{", sec_inner)
-    if not em:
-        return text
-    e_open = sec_open + 1 + em.end() - 1
-    _, e_end = _lua_block(text, e_open)
-    lua_val = _lua_num_str(value)
-    new_block = re.sub(
-        r"(\[[\"']" + re.escape(field) + r"[\"']\]\s*=\s*)-?\d+(?:\.\d+)?",
-        lambda m: m.group(1) + lua_val, text[e_open:e_end], count=1
-    )
-    return text[:e_open] + new_block + text[e_end:]
-
-
 _RANKS_PLAYERS_RE  = r"RankSave\[[\"']players[\"']\]\s*=\s*\{"
 _PLAYER_STATS_RE   = r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{"
 _UCID_TO_NAME_RE   = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]"
@@ -255,18 +232,14 @@ def _slot_display_counts(total_slots: int, active_slots: int) -> tuple[int, int]
     return display_total, display_active
 
 
-def _rank_index(credits: float) -> int:
+def get_rank(credits: float) -> str:
     rank_idx = 0
     for i, threshold in enumerate(RANK_THRESHOLDS):
         if credits >= threshold:
             rank_idx = i
         else:
             break
-    return rank_idx
-
-
-def get_rank(credits: float) -> str:
-    return RANK_NAMES[_rank_index(credits)]
+    return RANK_NAMES[rank_idx]
 
 
 async def find_persistence_file(saves_dir: str, node) -> str | None:
@@ -760,7 +733,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     """Proactively verify that write_bytes_to_node actually works for this
     instance, once per bot session — instead of only discovering a write
     problem the next time something genuinely needs correcting (a callsign
-    dedup, an inactivity penalty), which could be a long wait and would
+    dedup), which could be a long wait and would
     otherwise surface the failure at an inconvenient, hard-to-reproduce
     moment. Writes, reads back, then deletes a tiny throwaway file directly
     under saves_dir — never touches anything Foothold itself owns, and
@@ -2482,26 +2455,6 @@ def _bool_cfg(value) -> bool:
     return False
 
 
-# ── Inactivity penalty: days → escalones a bajar ─────────────────────────────
-# 10d→1, 20d→3, 30d→5, 40d→7 ...  formula: steps = (days//10)*2 - 1, min 0
-def _inactivity_steps(days: int) -> int:
-    if days < 10:
-        return 0
-    return (days // 10) * 2 - 1
-
-
-def _credits_after_penalty(current_credits: float, steps: int) -> float:
-    """Return new credits after dropping `steps` rank levels.
-    The player lands at threshold[rank_index - steps] + 1,
-    or 0 if steps exceed their current rank index."""
-    if steps <= 0:
-        return current_credits
-    new_idx = max(0, _rank_index(current_credits) - steps)
-    if new_idx == 0:
-        return 0.0
-    return float(RANK_THRESHOLDS[new_idx] + 1)
-
-
 def _reset_hour_today(cfg: dict) -> int:
     """daily_reset_hour, overridden by today's entry in daily_reset_schedule."""
     schedule = cfg.get("daily_reset_schedule") or {}
@@ -2551,16 +2504,8 @@ class FH_Report(Plugin):
             self.log.warning(interval_warning)
         self.updater.change_interval(seconds=interval)
         utils.safe_start(self.updater)
-        # Start inactivity checker only if at least one server has it enabled
-        any_penalty = any(
-            v.get("inactivity_penalty") for k, v in raw.items()
-            if isinstance(v, dict) and k != "DEFAULT"
-        )
-        if any_penalty:
-            utils.safe_start(self.inactivity_checker)
 
     async def cog_unload(self) -> None:
-        await utils.safe_cancel(self.inactivity_checker)
         await utils.safe_cancel(self.updater)
         await super().cog_unload()
 
@@ -2665,204 +2610,6 @@ class FH_Report(Plugin):
     @updater.before_loop
     async def before_updater(self):
         await self.bot.wait_until_ready()
-
-    # ── Inactivity penalty task ───────────────────────────────────────────
-
-    @tasks.loop(hours=6)
-    async def inactivity_checker(self):
-        """Check all configured servers for inactive pilots every 6 hours.
-        Only runs if inactivity_penalty: 1 is set in fh_report.yaml."""
-        raw         = self.locals or {}
-        for server in self.bot.servers.values():
-            try:
-                instance_name = server.instance.name
-                if not raw.get(instance_name):
-                    continue
-                cfg = self._merged_cfg(instance_name)
-                if not int(cfg.get("inactivity_penalty") or 0):
-                    continue
-                await self._run_inactivity_check(server, cfg)
-            except Exception as e:
-                self.log.error(
-                    f"FH_Report [{server.instance.name}]: inactivity check error: {e}",
-                    exc_info=True
-                )
-
-    @inactivity_checker.before_loop
-    async def before_inactivity_checker(self):
-        await self.bot.wait_until_ready()
-
-    async def _run_inactivity_check(self, server, cfg: dict) -> None:
-        """Apply inactivity credit penalties for one server instance.
-
-        Penalty scale (days without connecting → rank levels dropped):
-          10d → 1   20d → 3   30d → 5   40d → 7  ...  formula: (days//10)*2-1
-
-        Credits are deducted so the player lands at threshold[rank-steps]+1.
-        Campaign Points are only reduced when new_credits < current Points,
-        and are reduced by the same delta (last points to be removed).
-
-        State is persisted in saves_dir/.fhc/inactivity_penalties.json (UCID-keyed).
-        All actions are logged to saves_dir/.fhc/inactivity_log.txt.
-        """
-        instance_name = server.instance.name
-        node          = server.node
-        saves_dir     = await _resolve_saves_dir(server, cfg)
-
-        # ── Load Foothold files (both on-disk formats supported) ──────────
-        reader           = _UpdateReadCache(node)
-        persistence_file = await find_persistence_file(saves_dir, reader)
-        ranks_file       = os.path.join(saves_dir, "Foothold_Ranks.lua")
-        try:
-            ranks_data = (await reader.read_file(ranks_file)).decode("utf-8")
-            players    = await parse_ranks(ranks_file, [], reader)
-        except FileNotFoundError:
-            self.log.warning(f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found, skipping inactivity check.")
-            return
-        ranks_by_ucid = _ranks_version(ranks_data) is not None
-
-        camp_data = None
-        camp_points: dict[str, tuple[str, float]] = {}   # ucid -> (playerStats entry key, Points)
-        if persistence_file:
-            try:
-                camp_data = (await reader.read_file(persistence_file)).decode("utf-8")
-            except FileNotFoundError:
-                pass
-        if camp_data:
-            campaign_stats, _, camp_name_to_ucid = await parse_player_stats(persistence_file, reader)
-            camp_by_ucid = _stats_version(camp_data) is not None
-            for name, pts in campaign_stats.items():
-                ucid = camp_name_to_ucid.get(name) or (players.get(name) or {}).get("ucid")
-                if ucid:
-                    camp_points[ucid] = (ucid if camp_by_ucid else name, float(pts))
-
-        ucid_to_name = {d["ucid"]: n for n, d in players.items() if d.get("ucid")}
-        if not ucid_to_name:
-            self.log.debug(f"FH_Report [{instance_name}]: no players with a known UCID found, skipping.")
-            return
-
-        # ── Load penalty state JSON ───────────────────────────────────────
-        fhc_dir      = os.path.join(saves_dir, ".fhc")
-        penalty_file = os.path.join(fhc_dir, "inactivity_penalties.json")
-        log_file     = os.path.join(fhc_dir, "inactivity_log.txt")
-        try:
-            penalty_state = json.loads((await node.read_file(penalty_file)).decode("utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            penalty_state = {}
-
-        today_str       = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        ranks_modified  = False
-        camp_modified   = False
-        log_lines: list[str] = []
-
-        # ── Fetch last_seen for all UCIDs from DCSSB DB (one query) ──────
-        try:
-            async with self.apool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT player_ucid, MAX(hop_off) FROM statistics "
-                        "WHERE player_ucid = ANY(%s) GROUP BY player_ucid",
-                        (list(ucid_to_name),)
-                    )
-                    last_seen_map = {row[0]: row[1] for row in await cur.fetchall() if row[1]}
-        except Exception as e:
-            self.log.error(f"FH_Report [{instance_name}]: DB error fetching last_seen: {e}")
-            return
-
-        now_utc = datetime.now(timezone.utc)
-
-        for ucid, player_name in ucid_to_name.items():
-            last_seen = last_seen_map.get(ucid)
-            if last_seen is None:
-                continue
-            if last_seen.tzinfo is None:
-                last_seen = last_seen.replace(tzinfo=timezone.utc)
-            days_inactive = (now_utc - last_seen).days
-            if days_inactive < 10:
-                # Active player — reset their penalty state if any
-                penalty_state.pop(ucid, None)
-                continue
-
-            steps_needed = _inactivity_steps(days_inactive)
-            prev_steps   = penalty_state.get(ucid, {}).get("steps_applied", 0)
-            if steps_needed <= prev_steps:
-                # Update days but don't re-penalize
-                penalty_state[ucid] = {
-                    "name":           player_name,
-                    "last_checked":   today_str,
-                    "days_inactive":  days_inactive,
-                    "steps_applied":  prev_steps,
-                }
-                continue
-
-            # New penalty threshold crossed — apply the delta
-            delta_steps     = steps_needed - prev_steps
-            current_credits = float(players[player_name]["credits"])
-            new_credits     = _credits_after_penalty(current_credits, steps_needed)
-            if new_credits >= current_credits:
-                continue  # Nothing to deduct
-
-            # ── Foothold_Ranks.lua credits ────────────────────────────────
-            ranks_key  = ucid if ranks_by_ucid else player_name
-            ranks_data = _set_lua_entry_number(ranks_data, _RANKS_PLAYERS_RE, ranks_key, "credits", new_credits)
-            ranks_modified = True
-
-            # ── Campaign Points: only reduced when new_credits < Points ──
-            camp_points_deducted = 0.0
-            if ucid in camp_points:
-                camp_key, current_points = camp_points[ucid]
-                if new_credits < current_points:
-                    delta      = current_credits - new_credits
-                    new_points = max(0.0, current_points - delta)
-                    camp_data  = _set_lua_entry_number(camp_data, _PLAYER_STATS_RE, camp_key, "Points", new_points)
-                    camp_modified = True
-                    camp_points_deducted = current_points - new_points
-
-            penalty_state[ucid] = {
-                "name":          player_name,
-                "last_checked":  today_str,
-                "days_inactive": days_inactive,
-                "steps_applied": steps_needed,
-            }
-
-            ts  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            line = (
-                f"{ts} | {ucid} | {player_name} | "
-                f"{days_inactive} days inactive | -{delta_steps} rank level(s) | "
-                f"{int(current_credits):,} → {int(new_credits):,} credits"
-            )
-            if camp_points_deducted > 0:
-                line += f" | campaign Points -{int(camp_points_deducted):,}"
-            log_lines.append(line)
-            self.log.info(f"FH_Report [{instance_name}]: inactivity penalty: {line}")
-
-        # ── Write modified Lua files back to node ─────────────────────────
-        if ranks_modified:
-            await write_bytes_to_node(node, ranks_file, ranks_data.encode("utf-8"), log=self.log)
-
-        if camp_modified and persistence_file:
-            await write_bytes_to_node(node, persistence_file, camp_data.encode("utf-8"), log=self.log)
-
-        # ── Write penalty state JSON ──────────────────────────────────────
-        await write_bytes_to_node(
-            node, penalty_file,
-            json.dumps(penalty_state, indent=2, ensure_ascii=False).encode("utf-8"),
-            log=self.log
-        )
-
-        # ── Append to log file ────────────────────────────────────────────
-        if log_lines:
-            try:
-                existing = b""
-                try:
-                    existing = await node.read_file(log_file)
-                except FileNotFoundError:
-                    pass
-                new_content = existing + "\n".join(log_lines).encode("utf-8") + b"\n"
-            except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: failed to read inactivity log: {e}")
-            else:
-                await write_bytes_to_node(node, log_file, new_content, log=self.log)
 
     def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
         """Resolve (report_layout, points_detail) straight from config.

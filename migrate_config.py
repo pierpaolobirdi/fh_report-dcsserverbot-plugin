@@ -484,6 +484,24 @@ def rename_legacy_keys(content: str, renames: dict) -> tuple[str, list[str]]:
     return content, changes
 
 
+# Keys whose feature was removed from FH_Report entirely — deleted from
+# DEFAULT and every server block (live or commented-out), not just flagged.
+RETIRED_KEYS = {
+    "inactivity_penalty": "inactivity penalty moved out of FH_Report",
+}
+
+
+def remove_retired_keys(content: str) -> tuple[str, list[str]]:
+    """Delete every line setting a RETIRED_KEYS key (scalar values only)."""
+    changes = []
+    for key, reason in RETIRED_KEYS.items():
+        pattern = re.compile(rf'^[ \t]*#?[ \t]*{re.escape(key)}[ \t]*:.*\n?', re.MULTILINE)
+        content, n = pattern.subn('', content)
+        if n:
+            changes.append(f"{key} ({n} occurrence(s)) — {reason}")
+    return content, changes
+
+
 def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
     """Find every legacy layout-related key — `points_order` (+ its paired
     `compact_points`), and/or the older shared single-string
@@ -647,6 +665,13 @@ def main():
     if podium_rename_changes:
         print("  Renamed:")
         for item in podium_rename_changes:
+            print(f"    {item}")
+
+    # ── 1d. Remove keys of features retired from FH_Report ──────────────────
+    content, retired_changes = remove_retired_keys(content)
+    if retired_changes:
+        print("  Removed retired variables:")
+        for item in retired_changes:
             print(f"    {item}")
 
     # Cosmetic: commented-out example lines (server-block templates showing
