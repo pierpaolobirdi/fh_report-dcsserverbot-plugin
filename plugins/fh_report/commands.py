@@ -130,17 +130,9 @@ def _stats_version(content: str) -> int | None:
 
 
 class _UpdateReadCache:
-    """Reuse remote file reads within one server's current update only.
-
-    Several parse steps in one update cycle (parse_zones, parse_ranks,
-    parse_player_stats) read the same persistence file independently. This
-    wrapper memoizes read_file() results for the lifetime of a single
-    _update_server() call so the same path is only fetched once from the
-    node, cutting down redundant I/O — especially relevant when the node is
-    remote. It intentionally does NOT persist across update cycles, so it
-    can never serve data older than the current cycle. Call invalidate()
-    right after writing a file this cache may have already read, so a
-    later read in the same cycle doesn't return the stale pre-write copy.
+    """Memoizes read_file() for one update cycle (or one slash command) so
+    several parsers reading the same file only fetch it once from the node.
+    Never outlives that scope; call invalidate() after writing a cached path.
     """
 
     def __init__(self, node):
@@ -160,13 +152,9 @@ class _UpdateReadCache:
 
 
 def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str | None]:
-    """Validate DEFAULT.update_interval from fh_report.yaml.
-
-    A misconfigured value of zero, negative, or non-numeric would otherwise
-    make the periodic updater loop run flat-out (or crash outright), so this
-    falls back to `default` and returns a warning message for the caller to
-    log — rather than either silently misbehaving or refusing to load the
-    whole plugin over one bad config value.
+    """DEFAULT.update_interval, falling back to `default` (with a warning
+    message for the caller to log) if it's non-numeric or <= 0 — such a
+    value would otherwise spin the updater loop flat-out or crash it.
     """
     configured = (raw.get("DEFAULT") or {}).get("update_interval", default)
     try:
@@ -208,18 +196,10 @@ def _fmt_num(v: float) -> str:
 
 
 def _slot_display_counts(total_slots: int, active_slots: int) -> tuple[int, int]:
-    """Returns (display_total, display_active) — how many of the 5 drawable
-    slot symbols to show, and how many of those should render as active.
-
-    With 5 or fewer real slots (total_slots), this is a direct 1:1 count,
-    same as before. With more than 5 real slots, the 5 symbols instead
-    represent a PROPORTION of real progress: display_active =
-    round((active_slots / total_slots) * 5), using standard round-half-up
-    (0.5 always rounds up, not Python's built-in banker's rounding which
-    would round 2.5 down to 2). This avoids a zone with, say, 6 of 9 slots
-    active looking visually identical to one with 9 of 9 (both would
-    otherwise show as "5 filled") — the 5 symbols now reflect real progress
-    proportionally instead of just being silently capped."""
+    """(display_total, display_active) for the 5 drawable slot symbols.
+    Up to 5 real slots map 1:1. Above that, the active count is shown as a
+    proportion of 5 (round-half-up), so 6/9 and 9/9 don't both look full.
+    """
     if total_slots <= 5:
         display_total  = total_slots
         display_active = min(active_slots, total_slots)
@@ -244,10 +224,11 @@ def get_rank(credits: float) -> str:
 
 
 async def find_persistence_file(saves_dir: str, node) -> str | None:
-    """Read the active Foothold persistence file path from foothold.status.
-    Falls back to most recently modified foothold_*.lua if status file not found.
-    Uses server.node.read_file() / list_directory() to support remote nodes in
-    a DCSSB cluster (Master reads files from agent disks transparently)."""
+    """Active Foothold save: the file named in foothold.status (basename
+    only — the stored path may be a Windows path invalid on this host),
+    else the newest-named foothold_*.lua in saves_dir. Reads go through
+    `node` so remote agent nodes work.
+    """
     status_file = os.path.join(saves_dir, "foothold.status")
     try:
         data = await node.read_file(status_file)
@@ -261,13 +242,8 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
             await node.read_file(path)
             return path
         except OSError:
-            # Covers FileNotFoundError (file genuinely missing) and
-            # TimeoutError (remote agent-node RPC read timed out — reported
-            # by Special K; TimeoutError is a subclass of OSError in Python,
-            # same as FileNotFoundError, so this one except now catches
-            # both uniformly). Either way, fall through to the
-            # list_directory fallback below rather than crashing the whole
-            # update cycle with an unhandled exception.
+            # FileNotFoundError or TimeoutError (remote RPC read timed out) — both
+            # OSError: fall back to the directory listing below.
             pass
     except OSError:
         pass
@@ -300,12 +276,8 @@ async def parse_zones(filepath: str, node) -> dict:
         )
     ]
 
-    # BLUE-only extra-slot mechanic (mirrors ZoneCommander:addExtraSlot):
-    # every blue zone can get +1 extra slot unlocked per-zone, and if this
-    # mission-wide flag is also true, a SECOND extra slot becomes available
-    # too (max = 1 + (globalExtraUnlock and 1 or 0), from zoneCommander.lua).
-    # RED has its own separate mechanic (left untouched here) — this is
-    # deliberately blue-specific, not a generic per-side computation.
+    # BLUE-only extra slots (ZoneCommander:addExtraSlot): +1 per zone, +1 more
+    # when globalExtraUnlock is true. RED has its own mechanic, not handled here.
     gxu_m = re.search(r'globalExtraUnlock"?\]\s*=\s*(true|false)', content)
     global_extra_unlock = (gxu_m.group(1) == "true") if gxu_m else False
 
@@ -370,12 +342,8 @@ async def parse_zones(filepath: str, node) -> dict:
 
         info = {"name": zone, "level": level, "active_slots": active_slots, "suspended": suspended}
         if side == 2:
-            # BLUE true max = base slots (randomUpgradesBlue's own entry
-            # count for THIS zone) + the extra-slot allowance above. This
-            # can exceed `level` when a slot has been unlocked/purchased
-            # but hasn't finished building yet, or simply hasn't been
-            # started — those should still show as an empty (not-yet-filled)
-            # symbol rather than not being drawn at all.
+            # BLUE true max = randomUpgradesBlue entries + extra-slot allowance. Can
+            # exceed `level` (unlocked but unbuilt slots draw as empty symbols).
             ru_key2 = '"randomUpgradesBlue"' if '"randomUpgradesBlue"' in block else "'randomUpgradesBlue'"
             rub_start = block.find(f'[{ru_key2}]={{')
             base_slots = 0
@@ -392,28 +360,15 @@ async def parse_zones(filepath: str, node) -> dict:
 
 
 async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
-    """Parse playerStats from Foothold persistence file.
-    Returns (campaign_stats, session_stats_raw, name_to_ucid):
-      campaign_stats    = {player_name: points}  (unchanged contract)
-      session_stats_raw = {player_name: {stat_key: value}} — used for the
-                           session card (show_session_card). Excludes
-                           Points/Points spent.
-      name_to_ucid      = {player_name: ucid}
+    """Parse playerStats from a Foothold save. Returns
+    (campaign_stats {name: Points}, session_stats_raw {name: {stat: value}}
+    without Points, name_to_ucid {name: ucid}).
 
-    Foothold 4.9.1+ restructured playerStats to be keyed by UCID directly
-    (with "name" and a nested "stats" sub-table inside each block),
-    replacing the older name-keyed structure with stats stored inline.
-    zonePersistance["playerStatsIdentityVersion"] tells us which is
-    present:
-      nil -> old format (name-keyed, stats inline, no UCID info at all in
-             this file — name_to_ucid comes back empty, caller falls back
-             to cross-referencing Foothold_Ranks.lua)
-      1   -> new format (UCID-keyed; name_to_ucid is built for free from
-             the block's own keys, no separate lookup table needed)
-      anything else -> a future format not understood yet; skip this file
-             and warn once rather than risk misparsing it.
-    Same one-time-migration guarantee as parse_ranks (see its docstring) —
-    no migration logic needed on our side, just per-read format detection."""
+    zonePersistance["playerStatsIdentityVersion"] selects the format:
+      nil -> old name-keyed format (UCIDs only from an optional ucidToName)
+      1   -> 4.9.1+ UCID-keyed format with "name" and a nested "stats" table
+      other -> unknown future format: skipped, warned once.
+    """
     try:
         data = await node.read_file(filepath)
         content = data.decode("utf-8")
@@ -473,13 +428,11 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
 
 
 async def hot_write_waypoints(server) -> None:
-    """Inject Lua that dumps the mission's in-memory WaypointList table
-    (zone name -> waypoint number suffix, set from the .miz's trigger zone
-    flavorText at mission load — never persisted to any Foothold save file)
-    to saves_dir/.fhc/fhc_waypoints.lua. Same technique and same shared file
-    as FH_Control's _hot_write_waypoints, so both plugins benefit from
-    whichever one triggers it first on a given server. No-op if WaypointList
-    isn't defined in the mission (not every Foothold map sets it up)."""
+    """Inject Lua that dumps the mission's in-memory WaypointList (zone ->
+    waypoint suffix, never saved by Foothold) to saves_dir/.fhc/fhc_waypoints.lua.
+    Same file and technique as FH_Control, so either plugin can refresh it.
+    No-op if the mission doesn't define WaypointList.
+    """
     lua = (
         "if WaypointList and lfs and io then "
         "  lfs.mkdir(lfs.writedir() .. [[Missions/Saves/.fhc]]) "
@@ -500,13 +453,10 @@ async def hot_write_waypoints(server) -> None:
 
 
 async def load_waypoint_list(saves_dir: str, node) -> dict:
-    """Read fhc_waypoints.lua (written by hot_write_waypoints, possibly by
-    FH_Control instead of us — same shared file). Returns {zone_name: wp_number}
-    with the numeric part already extracted from the raw suffix string
-    (e.g. "3" or "WP3" -> 3). Zones with a non-numeric or missing suffix are
-    omitted from the returned dict entirely — callers treat 'not in dict' as
-    'no waypoint assigned'. Returns {} if the file doesn't exist or fails to
-    parse, which is a normal/expected state (mission never dumped it yet)."""
+    """{zone_name: waypoint number} from fhc_waypoints.lua (written by us or
+    FH_Control). Zones without a numeric suffix are omitted; a missing or
+    unreadable file returns {}.
+    """
     path = os.path.join(saves_dir, ".fhc", "fhc_waypoints.lua")
     try:
         raw = (await node.read_file(path)).decode("utf-8", errors="ignore")
@@ -528,27 +478,16 @@ _UNMATCHED_INSTANCE_GRACE_SECONDS = 120  # tolerate remote-node startup races
 
 
 async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
-    """Parse Foothold_Ranks.lua. Returns pilot dict sorted by credits desc,
-    keyed by name (unchanged contract) regardless of which on-disk format
-    was used. Pilots whose UCID is in excluded_ucids are omitted.
+    """Parse Foothold_Ranks.lua into {name: {credits, ucid, career}}, sorted
+    by credits desc, skipping excluded_ucids.
 
-    Foothold 4.9.1+ restructured this file to key RankSave["players"] by
-    UCID directly (with "name" nested inside each block), replacing the
-    older name-keyed structure + separate RankSave["ucidToName"] lookup
-    table. Confirmed with Leka: RankSave["playerIdentityVersion"] (NOT the
-    unrelated, pre-existing RankSave["version"], which tracks career-rank
-    data separately) tells us which structure is present:
-      nil       -> old format (name-keyed, needs ucidToName to resolve UCID)
-      1 or 2    -> new format (UCID-keyed; name/credits/career live inside
-                   each UCID's own block — no ucidToName needed at all)
-      anything else -> a future format we don't understand yet; skip this
-                   file entirely rather than risk misparsing it, and warn
-                   once that FH_Report needs updating.
-    Foothold itself migrates an old-format file to the new one exactly
-    once, in memory, the first time it loads with an updated Foothold —
-    every subsequent save is internally consistent for whichever version
-    it reports, so a per-read version check here is sufficient; FH_Report
-    never needs to perform or track any migration of its own."""
+    RankSave["playerIdentityVersion"] selects the format (not RankSave["version"],
+    which tracks career data):
+      nil    -> old name-keyed format, UCID via the ucidToName table
+      1 or 2 -> 4.9.1+ UCID-keyed format with "name" inside each block
+      other  -> unknown future format: skipped, warned once.
+    Foothold migrates the file itself once, so per-read detection is enough.
+    """
     data = await node.read_file(filepath)
     content = data.decode("utf-8")
 
@@ -607,20 +546,12 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
-
-# Tracks which target file paths have already logged a write-failure
-# warning, so repeated failures (e.g. every ~5min cycle on a remote-agent
-# instance running an older DCSServerBot) log a clear explanation ONCE,
-# then drop to debug-level noise instead of spamming ERROR forever.
-# Cleared automatically the next time a write to that same path succeeds.
+# Paths whose write failure was already logged at ERROR (then DEBUG until
+# a write to that path succeeds again).
 _dedup_write_warned: set[str] = set()
 
-# Logged once, globally, the first time we detect the installed
-# DCSServerBot predates the new node.write_file(target, source, overwrite)
-# API (3.0.4.28+) — separate from _dedup_write_warned, which tracks
-# per-file write FAILURES. This one just informs that an update would
-# unlock full remote-node compatibility, even while the local fallback
-# below is working fine for this (local) instance.
+# One-time INFO that DCSServerBot predates node.write_file(target, source,
+# overwrite) (3.0.4.28+); the local fallback still works for local nodes.
 _old_dcssb_api_warned = False
 
 # Tracks which saves_dir paths have already had their one-time write
@@ -630,29 +561,12 @@ _write_self_tested: set[str] = set()
 
 
 async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> bool:
-    """Write arbitrary content to `target_path` on `node`, working correctly
-    whether that node is the local/master node or a genuinely remote agent
-    node, with a safe fallback for older DCSServerBot installs.
-
-    Priority order:
-    1. New-style node.write_file(target, source, overwrite) — added in
-       DCSServerBot 3.0.4.28 (confirmed with Special K). `source` here is a
-       LOCAL file path (not a URL, not raw bytes) — DCSSB itself handles
-       copying it to the target node (shutil.copy2 for local, or via its
-       internal file-transfer mechanism for remote). We write our content
-       to a local temp file first, then hand that path to node.write_file().
-       This is the only path that can reach a genuinely remote node.
-    2. If that fails — either because the installed DCSSB predates this
-       API (old signature is write_file(filename, url, overwrite), so
-       calling with target=/source= keyword args raises TypeError), or for
-       any other reason — fall back to a plain local open()/os.replace()
-       write. This only ever reaches the local/master node's own
-       filesystem, but is proven reliable there on any DCSSB version.
-    3. If BOTH fail, this is almost certainly a genuinely remote node on a
-       DCSServerBot version that doesn't have the new write_file yet —
-       nothing we do locally can reach it. Logs a clear one-time hint to
-       update DCSServerBot to 3.0.4.28+ (as of writing, on the 'dev'
-       branch) rather than a bare, confusing OS error.
+    """Write `data` to `target_path` on `node`, local or remote.
+    1. node.write_file(target, source, overwrite) — DCSServerBot 3.0.4.28+,
+       the only path that reaches a remote agent node (source is a local temp file).
+    2. Fallback: local atomic write (older DCSServerBot, local node only).
+    If both fail it's almost certainly a remote node on an old DCSServerBot:
+    log one clear hint to update instead of a bare OS error.
     """
     # ── Attempt 1: new-style node.write_file(target, source, overwrite) ──
     tmp_local_path = None
@@ -667,11 +581,7 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
         elif log:
             log.debug(f"FH_Report: node.write_file (new API) returned {status!r} for {target_path}")
     except TypeError:
-        # Old DCSSB signature (filename, url, overwrite) doesn't accept
-        # target=/source= keyword args — this install predates the new API.
-        # The local fallback below still works fine for local/master-node
-        # instances, but inform once (not a failure — just a heads-up) that
-        # updating DCSServerBot would unlock full remote-node compatibility.
+        # Old signature (filename, url, overwrite): pre-3.0.4.28 DCSServerBot.
         global _old_dcssb_api_warned
         if not _old_dcssb_api_warned:
             _old_dcssb_api_warned = True
@@ -731,32 +641,12 @@ async def _read_json(node, path: str) -> dict:
 
 
 async def run_write_self_test(node, saves_dir: str, log=None) -> None:
-    """Proactively verify that write_bytes_to_node actually works for this
-    instance, once per bot session — instead of only discovering a write
-    problem the next time something genuinely needs correcting (a callsign
-    dedup), which could be a long wait and would
-    otherwise surface the failure at an inconvenient, hard-to-reproduce
-    moment. Writes, reads back, then deletes a tiny throwaway file directly
-    under saves_dir — never touches anything Foothold itself owns, and
-    matches deduplicate_ranks's own write location (our most frequent real
-    write), rather than saves_dir/.fhc/ (which wouldn't exist yet for an
-    instance that hasn't triggered daily-tracking's own .fhc creation, and
-    would leave a needless empty folder behind for instances that never
-    do). Reuses the exact same write_bytes_to_node() path real writes use,
-    so this exercises precisely the mechanism we care about, not a
-    separate/parallel check.
-
-    Before attempting anything, actively confirms the save folder itself
-    exists (a read, via list_directory — never assumed from the write
-    failing). If the mission/server has simply never run yet, Foothold
-    hasn't created saves_dir at all, and ANY write into it — ours included —
-    would fail with a plain "path not found", which is not a real write
-    problem at all. That specific, confirmed case is logged at DEBUG (not
-    ERROR) and is NOT marked as tested, so it retries on a later cycle once
-    the folder actually exists. Any other failure while checking (timeout,
-    permission, etc.) is inconclusive — it does NOT get treated as "folder
-    missing", since that could silently mask a real write problem; the
-    self-test proceeds normally in that case instead."""
+    """Once per bot session and saves_dir, write/read back/delete a tiny
+    test file through write_bytes_to_node, so a write problem shows up at
+    startup rather than at the next real correction. If saves_dir doesn't
+    exist yet (mission never run) it's logged at DEBUG and retried later;
+    any other check failure is inconclusive and the test runs anyway.
+    """
     if saves_dir in _write_self_tested:
         return
 
@@ -804,10 +694,8 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         if log:
             log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
 
-    # Best-effort cleanup — only works for local/master nodes (no confirmed
-    # remote-delete API exists on `node`, and we don't invent one just for
-    # this). A leftover test file on a genuinely remote node is harmless;
-    # not worth a whole new mechanism just to remove it there too.
+    # Best-effort cleanup, local nodes only (no remote delete API); a leftover
+    # test file on a remote node is harmless.
     try:
         os.remove(test_path)
     except OSError:
@@ -816,13 +704,13 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
 
 async def deduplicate_ranks(ranks_file: str, persistence_file, node,
                             ranks_source: bytes | None = None) -> bool:
-    """Detect and fix duplicate player entries in an OLD-format (name-keyed)
-    Foothold_Ranks.lua caused by callsign changes. The entry with a UCID in
-    ucidToName is canonical: it keeps its whole block (career included),
-    renamed via strip_callsign(), with credits summed and lastSeen maxed
-    across the duplicates. The UCID-keyed format (playerIdentityVersion set)
-    can't contain such duplicates, so it's skipped outright.
-    Returns True if any fix was applied and the file was rewritten."""
+    """Merge duplicate entries in an OLD-format (name-keyed) Foothold_Ranks.lua
+    caused by callsign changes. The entry with a UCID in ucidToName is
+    canonical: it keeps its whole block (career included), renamed via
+    strip_callsign(), with credits summed and lastSeen maxed. The UCID-keyed
+    format can't have such duplicates and is skipped.
+    Returns True if the file was rewritten.
+    """
 
     if ranks_source is None:
         ranks_source = await node.read_file(ranks_file)
@@ -861,10 +749,8 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     for base_name, raw_names in duplicates.items():
         names_with_ucid = [n for n in raw_names if n in raw_to_ucid]
 
-        # Only a rename if EXACTLY ONE raw name still has a live UCID — the
-        # others are orphaned leftovers. Several live UCIDs sharing a
-        # stripped base name (e.g. two "... | 82 TF AA" pilots) are distinct
-        # players and must never be merged.
+        # A rename only if EXACTLY ONE raw name has a live UCID. Several live UCIDs
+        # sharing a stripped name (e.g. two "... | 82 TF AA") are different players.
         if len(names_with_ucid) != 1:
             if len(names_with_ucid) > 1:
                 log.debug(
@@ -953,14 +839,12 @@ _CALLSIGN_RE = re.compile(r'^[A-Z][A-Z0-9]* \d+[-_]\d+\s*', re.IGNORECASE)
 
 @functools.lru_cache(maxsize=4096)
 def strip_callsign(name: str) -> str:
-    """Remove flight callsign prefix from pilot name.
-    Handles separators (|, /, backslash, ,, ' - ') and callsign patterns
-    (WORD N-N or WORD N_N — Foothold uses either as the flight/slot
-    separator, e.g. "UZI 1_4 Silver").
-    Preserves squadron tags like [MA] at the start.
-    When two or more | separators are present and the last segment is mainly
-    numeric (slot number like 307, 305A), the second-to-last segment is used
-    instead — e.g. 'GUNSTAR 11 | DRCHOW | 307' → 'DRCHOW'."""
+    """Remove the flight callsign prefix from a pilot name.
+    Splits on |, /, backslash, comma or ' - ' (keeping the last part) and
+    drops a leading 'WORD N-N' / 'WORD N_N' callsign. Squadron tags like
+    [MA] are kept. With '|' separators and a mainly numeric last segment
+    (slot number), the second-to-last is used: 'GUNSTAR 11 | DRCHOW | 307' -> 'DRCHOW'.
+    """
     # Step 1 — handle pipe separators specially
     if '|' in name:
         parts = [p.strip() for p in name.split('|')]
@@ -987,23 +871,10 @@ def strip_callsign(name: str) -> str:
 
 
 def _safe_code_span(text: str) -> str:
-    """Wrap arbitrary text in a Markdown code span that is guaranteed to
-    render correctly no matter what characters it contains — backticks,
-    backslashes, quotes, asterisks, underscores, tildes, pipes, etc.
-
-    A Markdown/Discord code span does not interpret ANY formatting or
-    backslash-escapes inside it — the only character that matters is the
-    backtick itself, because a run of N backticks closes a fence opened by
-    a run of N (or fewer) backticks. Per the CommonMark rule, using a fence
-    one backtick longer than the longest run of consecutive backticks found
-    inside the content makes it impossible for the content to accidentally
-    close the span early — regardless of anything else it contains.
-
-    A single padding space is added on each side when the content starts or
-    ends with a backtick (or is empty/whitespace-only), matching the
-    CommonMark convention, so the fence never visually merges with it.
-    Ordinary names (the overwhelming majority) are unaffected: they get the
-    same single-backtick wrap as before.
+    """Wrap text in a Markdown code span that can't break, whatever it
+    contains: the fence is one backtick longer than the longest backtick run
+    inside (CommonMark rule), padded with spaces when the text starts/ends
+    with a backtick or is blank. Normal names get a plain single-backtick wrap.
     """
     if text is None:
         text = ""
@@ -1022,19 +893,10 @@ def _safe_code_span(text: str) -> str:
 
 
 def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 78) -> str:
-    """Dynamically shorten `rank` (from the tail, adding '..') just enough
-    to keep the full rendered line under `threshold` visible characters, as
-    the reader actually sees it — i.e. ignoring Markdown syntax like ** and
-    backticks, which take no visual width. `prefix` is everything visible
-    before the rank (name plus its separator); `suffix` is everything
-    visible after it (its own separator plus the points text). Measured
-    against Discord's DESKTOP client specifically (mobile line-wrap width
-    is unpredictable and out of scope here).
-
-    Chosen over a fixed rank-abbreviation table so it also covers
-    hook-supplied custom_rank text, which a static table could never
-    anticipate. Below the threshold, or for short ranks that don't need
-    it, `rank` is returned unchanged.
+    """Shorten `rank` from the tail (adding '..') just enough to keep the
+    visible line (prefix + rank + suffix, Markdown excluded) under
+    `threshold` characters on Discord desktop. Works for hook-supplied
+    custom ranks too, which a fixed abbreviation table couldn't.
     """
     other_len = len(prefix) + len(suffix)
     full_len  = other_len + len(rank)
@@ -1046,7 +908,6 @@ def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 78) -> str:
     if budget <= 2:
         return rank[:budget]
     return rank[:budget - 2] + ".."
-
 
 
 # (min_points, icon, label, hammer_count)
@@ -1078,52 +939,18 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                         strip_callsign_flag: bool = False,
                         min3_latest_day: bool = False,
                         name_to_ucid: dict | None = None) -> str | None:
-    """Build the Podium table, grouped by closing event (date + optional
-    Session End marker), each showing the top `top` positions (1-50) that
-    day — NOT a single position, the top N positions.
-
-    history:   the full daily_history.json dict {date_str: [event, ...]}
-    players:   current parsed roster {name: {credits, custom_rank, ...}} —
-               used to look up each entry's CURRENT rank (via custom_rank
-               if the fh_hook.yaml override is set, else get_rank() from
-               current credits), matching how every other table resolves
-               rank — not a frozen rank from the day it happened, since a
-               player's rank keeps climbing and freezing it would show
-               stale titles for old entries.
-    days:      0 = all available history; otherwise only the most recent
-               N calendar dates that have at least one event. This is the
-               only size control here — there's no separate line cap.
-               Real Discord limits (1024 chars/field, 25 fields/embed) are
-               handled downstream by _add_podium_field's chunking, which
-               truncates whole blocks with a "+ N more" note if needed
-               rather than cutting a block awkwardly mid-way. A dedicated
-               max_lines option was tried and removed: with `top` able to
-               go up to 50, a single event could need 51 lines on its own,
-               making any modest line cap truncate mid-block on essentially
-               every render — the opposite of what it was meant to prevent.
-    top:       show the top N positions (1-50) for each closing event —
-               e.g. top=3 shows 1st, 2nd AND 3rd place, not just 3rd.
-    strip_callsign_flag: mirrors the same option used by every other table,
-               for visual consistency.
-    min3_latest_day: if True, every event under the single most recent date
-               (dates_desc[0] — both closures if that day had two) shows at
-               least the top 3 positions, even if `top` is set lower (1 or
-               2). `top` itself is never reduced by this — if top is already
-               >= 3, this has no effect. Only ever passed True when "P" is
-               combined with other letters (podium_combined_min3_latest_day);
-               the standalone "P" mode never uses this.
-
-    Each event renders as:
-        __**DD/MM/YYYY**__ (Session End)      <- suffix only on campaign-end closures
+    """Podium text: for each closing event (newest date first), the top `top`
+    positions of that day as
+        __date__ (Session End)
         🥇 `Name` — **Rank** — N,NNN pts
-        🥈 `Name` — **Rank** — N,NNN pts
-        🎖️ `Name` — **Rank** — N,NNN pts      <- 4th place onward
-    Blocks are separated by a blank line. A player no longer in the current
-    roster is shown without a rank part.
-
-    Returns None if there's no history at all, or nothing to show at any
-    requested position — the section is then skipped entirely, same
-    cycle-skip convention as every other table."""
+    (single-position events go on one line). `days` = 0 means all history,
+    otherwise the N most recent dates. Players are identified by UCID (stored
+    in the entry, or via name_to_ucid), then exact name, then callsign-stripped
+    name, and shown with their CURRENT name and rank; unknown players show the
+    stored name without rank. min3_latest_day forces at least 3 positions on
+    the newest date (used when "P" is combined with other tables).
+    Field-size limits are handled by _add_podium_field. None if nothing to show.
+    """
     if not history:
         return None
 
@@ -1162,12 +989,8 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                 if not name:
                     continue
                 marker  = medals[idx] if idx < 3 else "🎖️"
-                # Identify the player by UCID first — stored in the entry
-                # itself for days closed from v12.1.1 on, or translated from
-                # the name via name_to_ucid (daily_snapshot.json, which keeps
-                # every historical name) for older entries. That survives
-                # renames that name matching can't catch (e.g. "Viper**" ->
-                # "Viper"), and lets us show the player's CURRENT name.
+                # UCID first (stored since v12.1.1, else via name_to_ucid): survives
+                # renames name matching can't ("Viper**" -> "Viper").
                 current_name, player_data = None, None
                 ucid = entry.get("ucid") or name_to_ucid.get(name)
                 if ucid and ucid in ucid_to_current:
@@ -1177,11 +1000,8 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     if player_data:
                         current_name = name
                 if not player_data:
-                    # No UCID or exact-name match — playerStats/history may
-                    # record the name without the flight-callsign prefix
-                    # that Foothold_Ranks.lua (and therefore `players`)
-                    # carries, or vice versa. Last resort: callsign-stripped
-                    # comparison, same as the Session/Daily leaderboards.
+                    # Last resort: callsign-stripped comparison (history and Foothold_Ranks.lua
+                    # may differ by the flight-callsign prefix).
                     p_name = players_by_base.get(strip_callsign(name))
                     if p_name is not None:
                         current_name, player_data = p_name, players[p_name]
@@ -1238,21 +1058,11 @@ def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
 
 
 def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None:
-    """Add the Podium table to the embed, chunked across multiple fields if
-    needed — same FIELD_LIMIT-based chunking pattern already used for the
-    pilot leaderboard tables, since a single Discord embed field has a hard
-    1024-character limit that a long Podium listing (many days, and/or long
-    player names/rank titles) could otherwise exceed and get the whole
-    embed rejected by Discord instead of silently trimmed.
-
-    Also guards Discord's SEPARATE hard limit of 25 fields per embed —
-    unrelated to the 6000-character total handled by _trim_embed, and not
-    covered by chunking alone. If adding all Podium chunks would exceed
-    that cap given how many fields the embed already has (zones, leaderboard
-    tables, etc.), the listing is truncated with a "+ N more" note instead
-    of letting Discord reject the whole embed. A couple of field slots are
-    reserved for whatever gets added after Podium (the closing ruler, at
-    minimum) so this doesn't just shift the overflow one step later."""
+    """Add the Podium text as one or more fields (1024-char field limit),
+    respecting Discord's 25-fields-per-embed cap: if it doesn't fit, the
+    listing is truncated with a "+ N more" note, keeping room for the
+    trailing ruler.
+    """
     MAX_EMBED_FIELDS    = 25
     RESERVED_FOR_TRAILER = 2
 
@@ -1341,12 +1151,9 @@ def _fmt_compact(n: int) -> str:
 
 
 def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
-    """Build a one-line pilot career card from career stats dict.
-    CAREER_STAT IDs (Foothold v4.5):
-      1=FlightSeconds  3=HelicopterSeconds  8=ConventionalCarrierTraps
-      10=TotalKills    21=PilotDeaths       30=FuelReceivedLbs
-    Data sourced from Foothold_Ranks.lua — historical career totals only.
-    Returns None if all values are zero."""
+    """One-line career card from Foothold_Ranks.lua career stats (fixed/helo
+    hours, kills, traps, fuel received, deaths). None if all are zero.
+    """
     total_s  = int(career.get(1, 0))
     helo_s   = int(career.get(3, 0))
     fixed_s  = total_s - helo_s
@@ -1380,14 +1187,9 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     return f"·　{icon} " + " · ".join(parts)
 
 
-# Foothold's non-mission playerStats keys, taken from its own source
-# (zoneCommander.lua): the standard stat label table (FootholdStatLabelKeys),
-# the kill categories (CAREER_KILL_STAT_MAP, which adds Infantry), Refueling
-# (its stats displayOrder) and Zone supply delivery. Any OTHER key is treated
-# as a mission objective: that covers the generic ones (CAS/CAP/SEAD/Recon
-# mission…) and also the map-specific ones each mission script defines with
-# its own name (e.g. "Destroy enemy Bridge", "Kandalaksha Aluminium Plant"),
-# which can't be listed in advance because they change with every map.
+# Non-mission playerStats keys from zoneCommander.lua (stat labels, kill
+# categories, Refueling, Zone supply delivery). Any other key counts as a
+# mission objective — including map-specific ones like "Destroy enemy Bridge".
 _NON_MISSION_STATS = frozenset({
     "Air", "Helo", "Ground Units", "Ship", "SAM", "Structure", "Infantry",
     "Demolition kill", "Deaths", "Captured by enemy", "Zone capture",
@@ -1408,35 +1210,14 @@ def _is_mission_stat(key: str) -> bool:
 
 
 def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
-    """Build a one-line session/daily stats card from raw playerStats keys,
-    using the confirmed correlation between playerStats (session) and
-    CAREER_STAT (career) fields in Foothold's source. Kills are grouped into
-    four categories:
-      Air     = Air + Helo (aircraft kills)
-      SAM     = SAM (air defense kills)
-      Ground  = Ground Units + Structure + Infantry
-      Ship    = Ship (naval kills)
-    'Missions' sums every mission-objective key (see _is_mission_stat):
-    generic ones like CAP/SEAD/CAS mission, and map-specific ones such as
-    "Destroy enemy Bridge".
-    'Achievement' is Foothold's own milestone-unlock counter (playerStats key
-    'Achievement', confirmed via zoneCommander.lua's STATS_LABEL_ACHIEVEMENT) —
-    a progression/summary stat rather than raw combat action, so it's ranked
-    right after Missions and ahead of the combat kill categories.
-    Plus Rescues (Pilot Rescue), Refuels (Refueling event count), and Deaths.
-    Displayed as 'Msn', 'Ach' and 'Resc' respectively (abbreviated to keep the
-    line short enough to avoid Discord's mobile-width wraparound).
-    Priority order (highest to lowest): Missions, Achievement, Air, SAM,
-    Ground, Ship, Rescues, Refuels, Deaths. Capped at 7 fields — lowest-
-    priority fields are dropped first if there are more than 7 with a
-    non-zero value. Deaths is always shown if > 0.
-    Note: 'Flight time' is intentionally excluded — Foothold only records it
-    for a specific aircraft whitelist (mostly helicopters/transports, see
-    LogisticCommander.AllowedFlightTimeReward), so it reads 0/absent for
-    conventional fixed-wing combat aircraft even after long flights. Showing
-    it would be misleading for the majority of players. Career's FlightSeconds/
-    HelicopterSeconds (used in the pilot card) does not have this limitation.
-    Values of zero are omitted. Returns None if all values are zero."""
+    """One-line session/daily card from raw playerStats keys, in priority
+    order: Msn (every mission objective, see _is_mission_stat), Ach, Air
+    (Air+Helo), SAM, Ground (Ground Units+Structure+Infantry), Ship, Resc,
+    Refuels, Deaths. Capped at 7 entries, dropping the lowest priority first
+    but always keeping Deaths. 'Flight time' is left out on purpose: Foothold
+    only records it for a few transport/helo types, so it would read 0 for
+    most pilots. None if everything is zero.
+    """
     if not raw_stats:
         return None
 
@@ -1483,12 +1264,8 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
     return f"·　{icon} " + " · ".join(parts)
 
 
-# Fixed priority tiers for individual playerStats keys in the full-detail
-# Session/Daily Stats sections of /fh_report player, mirroring the same
-# conceptual grouping order as the main embed's compact card (_build_session_card)
-# — but keeping every individual key visible rather than collapsing them into
-# summed categories. Keys containing "mission" (any case) always sort into
-# tier 0 regardless of their exact name. Deaths is always forced to the end.
+# Display order of individual stat keys in /fh_report player (same grouping
+# as _build_session_card, without summing). Missions first, Deaths last.
 _STAT_KEY_ORDER = [
     "Achievement", "Air", "Helo", "SAM",
     "Infantry", "Ground Units", "Structure",
@@ -1497,28 +1274,18 @@ _STAT_KEY_ORDER = [
 
 
 def _display_stat_label(key: str) -> str:
-    """Friendlier display label for specific raw playerStats keys shown in
-    /fh_report player's full-detail Session/Daily Stats. 'Flight time' is
-    Foothold's own landing-triggered counter, limited to a whitelist of
-    helicopters and a few transport aircraft (see AllowedFlightTimeReward
-    in zoneCommander.lua) — nothing to do with total flight hours (that's
-    Career Stats' Flight Hours fixed/helo, which has no such limitation).
-    Relabeling avoids the key being misread as total time flown this session."""
+    """Display label for a raw playerStats key. 'Flight time' is Foothold's
+    transport-only landing counter, not total hours, hence the relabel.
+    """
     if key == "Flight time":
         return "Transport Flight Time"
     return key
 
 
 def _display_stat_value(key: str, value: float) -> str:
-    """Unit-aware formatting for specific raw playerStats keys, to avoid
-    ambiguity about what the raw number represents:
-    - 'Flight time' is recorded in minutes (see zoneCommander.lua's
-      addTempStat(player,'Flight time',minutes,crew)) — shown as 'Xh Ym'
-      instead of a bare number that could be misread as hours.
-    - 'Refueling' is a count of in-flight refueling events, not fuel
-      quantity (career's Fuel Received, shown in lbs, is the separate
-      quantity figure) — shown as 'N event(s)' to avoid that confusion.
-    Everything else uses the normal numeric formatting."""
+    """Unit-aware value: 'Flight time' is minutes (shown as Xh Ym),
+    'Refueling' is a count of refuel events; everything else is numeric.
+    """
     if key == "Flight time":
         total_min = int(value)
         h, m = divmod(total_min, 60)
@@ -1548,27 +1315,19 @@ def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
 
 
 def _single_channel_id(value):
-    """Accept channel_id as either a scalar or a one-item YAML list — it's
-    always meant to be a single channel, but someone copying the list
-    style used by commands_channel_id would otherwise crash the
-    int(channel_id) conversion (seen in practice: a YAML list comes back
-    as a CommentedSeq, not an int). A list with more than one entry uses
-    just the first."""
+    """channel_id as a scalar, accepting a one-item YAML list too (the first
+    item of a longer list).
+    """
     if isinstance(value, list):
         return value[0] if value else None
     return value
 
 
 def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: int = 1024) -> None:
-    """Add a monospace ```code block``` table as one or more embed fields,
-    splitting on line boundaries whenever it would exceed Discord's
-    per-field character limit (1024) — a player's stat categories keep
-    growing (new map-specific special missions can be long, no fixed upper
-    bound on row count), so a single field can't be assumed to always fit.
-    Continuation fields use a zero-width name, same convention as the
-    separators elsewhere in this embed. Mirrors FH_Control's own helper of
-    the same name, reused here for the same combined Session/Daily table
-    format (see _build_combined_stats_table)."""
+    """Add a ```code block``` table as one or more fields, splitting on line
+    boundaries to respect Discord's 1024-char field limit. Continuation
+    fields get a zero-width name.
+    """
     if len(table_text) <= limit:
         embed.add_field(name=name, value=table_text, inline=False)
         return
@@ -1586,14 +1345,10 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
 
 
 def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -> str:
-    """Monospace, column-aligned table combining Session and Daily values
-    for every category present in either — same format as FH_Control's
-    player embed. '-' marks a category with no value on that side (never
-    '0', which would misleadingly imply a real recorded zero). Unlike
-    FH_Control's own version, category ordering here goes through
-    fh_report's own _order_stat_items/_is_mission_stat, which also
-    recognizes map-specific special missions by name — FH_Control's
-    simpler "mission" in key.lower() check would miss those."""
+    """Monospace table with Session and Daily values side by side for every
+    category present in either; '-' marks a missing value (never '0').
+    Ordering uses _order_stat_items, which recognises map-specific missions.
+    """
     daily_stats = daily_stats or {}
     all_keys = set(session_stats.keys()) | set(daily_stats.keys())
     ordered_keys = [k for k, _ in _order_stat_items({k: 0 for k in all_keys})]
@@ -1645,11 +1400,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         activity_line = "- **Last seen:** —"
     embed.add_field(name="🕒 __Activity__", value=activity_line, inline=False)
 
-    # ── Session Stats + Daily Stats, combined into one aligned table ──────
-    # Same format as FH_Control's player embed: one monospace table instead
-    # of two separate bullet-list blocks, so Session and Daily line up
-    # category by category. Points for both are shown in the combined
-    # title; the table itself omits the "Points" key (redundant with that).
+    # ── Session + Daily stats in one aligned table (Points shown in the title) ─
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     other_stats = {k: v for k, v in session_stats.items() if k != "Points"} if session_stats else {}
     daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v} if daily_stats else {}
@@ -1698,22 +1449,10 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
 
 
 # ── report_layout engine ──────────────────────────────────────────────────────
-# Generalizes the old fixed set of points_order codes (R, S, D, BR, BS, BD,
-# BDS, 2R, 2S, 2D, 2DS, 3R, 3S, 3D, 3DS, 4R, 4DS, P, T) into a small
-# composable grammar: report_layout is a string of D/P/S/R letters, in any
-# order and any subset, naming which tables to render and in what sequence.
-# points_detail_D/points_detail_S/points_detail_R independently control
-# EXACTLY what each table shows, in the order given — nothing is implied:
-# if you want a table's own value shown, its own letter must be in its
-# own points_detail_<role> string. A role with no points_detail_<role> key
-# at all shows only its own value (e.g. no points_detail_S = "(S: nnn)"),
-# same as every other show_*-style feature in this plugin defaulting off.
-# Legacy points_order/compact_points values (and the older shared
-# points_detail single-string format from before this per-table split)
-# are translated into this grammar once, permanently, by
-# migrate_config.py when the config is migrated — this file only ever
-# reads report_layout/points_detail_D/points_detail_S/points_detail_R
-# directly (see FHReport._resolve_report_layout() in the cog below).
+# report_layout is a string of D/P/S/R letters naming the tables to render,
+# in order. points_detail_D/S/R list exactly which values each table shows
+# (a role without its key shows only its own value). Legacy points_order /
+# compact_points are converted once in the YAML by migrate_config.py.
 
 _ROLE_TITLES = {
     "D": "📅 __Daily Leaderboard · by Today's Points__",
@@ -1726,12 +1465,10 @@ _TABLE_MEDALS = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
 
 def _emit_table_field(embed: discord.Embed, title: str, icon: str,
                       lines: list[str], hidden: int, show_all_pilots: bool) -> None:
-    """Add one leaderboard table's lines to the embed. Mirrors the two
-    field-limit strategies used throughout this file's legacy table code:
-    show_all_pilots=True chunks into multiple fields with '__Pilots #a-b__'
-    continuation headers so nobody is ever silently dropped; False cuts at
-    Discord's ~1020-char field limit and appends a single '+ N more pilots'
-    note instead."""
+    """Add one leaderboard table to the embed. show_all_pilots=True splits it
+    into several fields with '__Pilots #a-b__' headers so nobody is dropped;
+    otherwise it's cut at the field limit with a '+ N more pilots' note.
+    """
     if not lines:
         return
     FIELD_LIMIT = 1020
@@ -1811,13 +1548,8 @@ def _render_layout_tables(
     pp = punishment_points or {}
     surplus = 0
 
-    # Every table in the composition shares the SAME cap — determined by
-    # the total number of pilot tables (R/S/D letters, Podium doesn't
-    # count) in the layout — falling back down the chain
-    # max_pilots_3t -> max_pilots_2t -> max_pilots, exactly as the legacy
-    # 2x/3x/4x modes did (a single-table layout just uses max_pilots
-    # alone). Surplus still cascades between tables when one has fewer
-    # players than the cap allows.
+    # All tables share one cap chosen by the number of R/S/D tables:
+    # max_pilots_3t -> max_pilots_2t -> max_pilots. Unused room cascades on.
     _table_count = len(roles_in_layout)
     if _table_count <= 1:
         table_limit = max_pilots
@@ -2145,13 +1877,9 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
 
 
 # ── Per-player identity (UCID-first) ──────────────────────────────────────────
-# Every daily/session figure is keyed by a stable player ID: the player's UCID
-# whenever one can be found (native to the Foothold save file, else from
-# Foothold_Ranks.lua, else from the accumulated name->UCID history kept in
-# daily_snapshot.json), and only as a last resort the in-game name itself
-# (old Foothold saves with no UCID anywhere). Names are for display only.
-# This replaces the old name-keyed model and its mid-day "callsign change"
-# reconciliation, whose edge cases kept losing or duplicating points.
+# Daily/session figures are keyed by player ID: the UCID (from the save, then
+# Foothold_Ranks.lua, then daily_snapshot.json history), else the name for
+# old UCID-less saves. Names are for display only.
 _UCID_RE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -2165,14 +1893,11 @@ def _player_id(name: str, name_to_ucid: dict) -> str:
 
 def _group_by_player_id(campaign_stats: dict, session_stats_raw: dict,
                         name_to_ucid: dict) -> tuple[dict, dict, dict]:
-    """Regroup name-keyed campaign points and session stats by player ID.
-    Several names can share one ID: old (name-keyed) Foothold saves create a
-    brand-new playerStats entry, starting from zero, every time a player
-    renames — the old entry keeps what was earned under the old name — so
-    summing all entries of one UCID gives the player's real total. Newer
-    UCID-keyed saves only ever have one entry per UCID, so nothing changes.
-    Returns (campaign_by_id, session_by_id, names_by_id) — names_by_id holds,
-    per ID, the name with the highest points (the one most likely in use)."""
+    """Regroup name-keyed points and session stats by player ID (UCID, else
+    name). Old name-keyed saves start a new entry on every rename, so all
+    entries of one UCID are summed. Returns (campaign_by_id, session_by_id,
+    names_by_id), names_by_id holding the highest-scoring name per ID.
+    """
     campaign_by_id: dict = {}
     best_name: dict = {}
     for name, pts in campaign_stats.items():
@@ -2194,14 +1919,11 @@ _MAX_ALIASES = 5  # past names kept per player (names active in the current save
 
 
 def _pack_daily_snapshot(d: dict, live_names: set | None = None) -> dict:
-    """Internal (section-per-field) snapshot -> on-disk format (format_version 2), where
-    everything about a player lives in ONE block under their ID (UCID, or
-    the name only for UCID-less old saves):
+    """Internal snapshot -> on-disk format_version 2:
         players: { id: { name, aliases?, baseline?, today?, carry? } }
-    with baseline/today/carry = {points?, stats?}. Empty parts are omitted
-    to keep the file small and readable. A player's past names ("aliases")
-    replace the old top-level name_to_ucid section; at most _MAX_ALIASES
-    are kept, plus any name still active in the current save (live_names)."""
+    with baseline/today/carry = {points?, stats?}; empty parts omitted. Past
+    names are kept as aliases (at most _MAX_ALIASES, plus any still active).
+    """
     players: dict = {}
 
     def blk(pid):
@@ -2231,10 +1953,8 @@ def _pack_daily_snapshot(d: dict, live_names: set | None = None) -> dict:
         if "name" not in b and b.get("aliases"):
             b["name"] = b["aliases"].pop()
         if b.get("aliases"):
-            # Keep at most _MAX_ALIASES, most recently learned last — but
-            # never drop a name still active in the current save: in old
-            # UCID-less saves that alias is what ties that entry to the
-            # player (dropping it would count their whole total as "today").
+            # Cap aliases, but never drop one still active in the save: in UCID-less
+            # saves it's what ties that entry to the player.
             live = [a for a in b["aliases"] if a in live_names]
             past = [a for a in b["aliases"] if a not in live_names]
             room = max(0, _MAX_ALIASES - len(live))
@@ -2285,23 +2005,14 @@ def _unpack_daily_snapshot(raw: dict) -> dict:
 
 
 def _normalize_snapshot_ids(snap: dict, name_to_ucid: dict, live_names: set) -> dict:
-    """Re-key every section of daily_snapshot.json by the CURRENT player ID.
-    Runs every cycle, entirely in memory. In the steady state it changes
-    nothing (keys are already UCIDs). It matters in two cases:
-      - a pre-12.2.0 name-keyed file: converted on the fly, no separate
-        migration step (and no one-off code left behind);
-      - an old UCID-less save where a player's UCID only becomes known
-        mid-day (e.g. once Foothold_Ranks.lua has them): their baseline,
-        stored under their name until then, follows them to the new UCID
-        key instead of being orphaned — otherwise their whole campaign
-        total would suddenly count as "today".
-    When several keys map to one ID: the ID's own key wins if present (it's
-    the continuing baseline); otherwise entries under names still active in
-    the save are summed (old-format saves can have several live entries per
-    player); entries under names no longer active are not added on top —
-    pre-12.2.0 rename handling left stale duplicate copies behind (the same
-    player under two names, both holding the same value). If none is
-    active, the largest value is kept."""
+    """Re-key every snapshot section by the CURRENT player ID, in memory,
+    every cycle. A no-op in the steady state; it converts pre-12.2.0
+    name-keyed files on the fly and moves a baseline to a UCID learned
+    mid-day (otherwise the player's whole total would count as "today").
+    When several keys map to one ID: the ID's own key wins; else entries
+    under names active in the save are summed; else the largest is kept
+    (pre-12.2.0 renames left stale duplicate copies).
+    """
     def _merge(section: dict, is_stats: bool) -> dict:
         grouped: dict = {}
         for key, val in (section or {}).items():
@@ -2350,13 +2061,10 @@ def _normalize_snapshot_ids(snap: dict, name_to_ucid: dict, live_names: set) -> 
 
 def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
                      ucid_to_rank_name: dict | None = None) -> dict:
-    """Re-key an ID-keyed dict by the name the leaderboard tables use: the
-    player's name in Foothold_Ranks.lua (matched by UCID) when available,
-    else the name seen in the save file (or the ID itself when it IS the
-    name, for old UCID-less saves). This lets every table attach daily and
-    session figures by exact name, without callsign-stripping guesswork.
-    Pass ucid_to_rank_name when converting several dicts in a row, so it's
-    built once."""
+    """Re-key an ID-keyed dict by the name the tables use: the
+    Foothold_Ranks.lua name for that UCID, else the save-file name, else the
+    ID. Pass ucid_to_rank_name when converting several dicts in a row.
+    """
     if ucid_to_rank_name is None:
         ucid_to_rank_name = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
     out: dict = {}
@@ -2377,16 +2085,10 @@ def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
 
 # ── Server selection for /fh_report commands ──────────────────────────────────
 class _FHServerTransformer(utils.ServerTransformer):
-    """DCSServerBot's own ServerTransformer (as recommended by Special K),
-    reused unchanged — it shows each server's PUBLIC name (server.name,
-    never the internal nodes.yaml instance name), hides servers still
-    registering (Status.UNREGISTERED), honours managed_by permissions, and
-    pre-suggests the server mapped to the current channel. The only thing
-    added here is a filter so the list shows just servers that actually
-    have an FH_Report block in fh_report.yaml (the core transformer only
-    supports status/maintenance filters, so e.g. a non-Foothold server
-    would otherwise appear too). The plugin instance is reached through
-    interaction.command.binding (the cog the command is bound to)."""
+    """DCSServerBot's ServerTransformer (public server names, hides
+    unregistered servers, honours managed_by, pre-selects the channel's
+    server), filtered to servers that have an FH_Report block.
+    """
 
     async def autocomplete(self, interaction: discord.Interaction,
                            current: str) -> list[app_commands.Choice[str]]:
@@ -2404,10 +2106,8 @@ class _FHServerTransformer(utils.ServerTransformer):
         if filtered or current:
             return filtered
 
-        # super() short-circuits an empty input to the server mapped to the
-        # current channel — if that one has no FH_Report block, rebuild the
-        # full list ourselves (same rules as the core loop) instead of
-        # leaving the admin with nothing to pick from.
+        # super() short-circuits empty input to the channel's server; if that one
+        # has no FH_Report block, list every eligible server instead.
         is_admin = self.is_admin(interaction)
         out: list[app_commands.Choice[str]] = []
         for name, srv in interaction.client.servers.items():
@@ -2546,23 +2246,10 @@ class FH_Report(Plugin):
         raw          = self.locals or {}
         self._cycle_punishment = None
 
-        # Warn about any fh_report.yaml server block whose key doesn't match
-        # any currently-registered DCSServerBot instance name — a common
-        # config mistake (e.g. copying the "DCS_Server" example verbatim
-        # instead of the actual instance name from nodes.yaml) that
-        # otherwise fails completely silently: the loop below just skips it
-        # forever with no log trace at all, and the mismatch was previously
-        # only ever surfaced by the /fh_report player command's own check.
-        #
-        # Gated by a grace period (not warned on first sight) because in a
-        # large multi-node cluster, remote agent nodes can take a while to
-        # register their servers with the central bot after startup — the
-        # very first updater cycle can easily run before all of them have
-        # checked in, which would otherwise log a permanent false-positive
-        # warning (the one-shot version never re-checks) for an instance
-        # that's actually fine seconds later. A key self-heals (its "first
-        # seen unmatched" clock resets) the moment it matches again, so a
-        # genuinely broken key still gets warned about, just not instantly.
+        # Warn about fh_report.yaml keys matching no DCSServerBot instance name
+        # (a common, otherwise silent mistake). A grace period avoids false alarms
+        # while remote nodes are still registering; the warning re-arms once the
+        # key matches again.
         live_instance_names = {server.instance.name for server in self.bot.servers.values()}
         now_ts = datetime.now(timezone.utc).timestamp()
         configured_server_count = 0
@@ -2586,10 +2273,7 @@ class FH_Report(Plugin):
                     f"in nodes.yaml. This server block will be skipped until fixed."
                 )
 
-        # Iterate all DCSSB servers — same pattern as Pretense.
-        # Config is looked up by instance name (the key used in fh_report.yaml)
-        # rather than server.name (the long DCS display name), so existing yaml
-        # configs require no changes.
+        # Config is keyed by instance name (nodes.yaml), not the DCS display name.
         stagger_seconds = _server_stagger_seconds(interval, configured_server_count)
         processed_server_count = 0
         for server in self.bot.servers.values():
@@ -2612,29 +2296,11 @@ class FH_Report(Plugin):
         await self.bot.wait_until_ready()
 
     def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
-        """Resolve (report_layout, points_detail) straight from config.
-
-        report_layout supports comma-separated rotation: "DP, SR" shows
-        "DP" one cycle, "SR" the next, back to "DP" after that, advancing
-        exactly one step per update_interval — no separate cadence
-        setting, no persistence across bot restarts (always starts back
-        at the first group on load). Any number of groups is allowed. A
-        single value (no comma) behaves exactly as before, with nothing
-        to rotate. points_detail_D/S/R are NOT part of the rotation —
-        they're global and apply the same regardless of which group is
-        showing this cycle.
-
-        No translation happens here any more — migrate_config.py converts
-        any legacy points_order/compact_points (and the older shared
-        single-string points_detail format) into report_layout and the
-        three independent points_detail_D/points_detail_S/points_detail_R
-        keys once, permanently, in the YAML itself. points_detail is
-        returned as a dict {"D": "...", "S": "...", "R": "..."} — a role
-        with no points_detail_<role> key at all is simply absent from the
-        dict, and _render_layout_tables treats that as "own value only",
-        same as every other show_*-style feature in this plugin defaulting
-        to off. Nothing here forces a table's own letter into its string —
-        that has to be written explicitly if wanted.
+        """(report_layout, points_detail) from config. report_layout may be a
+        comma-separated rotation ("DP, SR"): one group per update cycle, always
+        restarting at the first after a reload. points_detail_D/S/R apply to
+        every group; a role without its own key shows only its own value.
+        Legacy keys are converted once in the YAML by migrate_config.py.
         """
         groups = [g.strip() for g in str(cfg.get("report_layout") or "R").split(",") if g.strip()]
         if not groups:
@@ -2663,29 +2329,19 @@ class FH_Report(Plugin):
         return os.path.join(saves_dir, ".fhc", "daily_history.json")
 
     async def _load_daily_history(self, saves_dir: str, node) -> dict:
-        """Load daily history from disk. Returns {date_str: [event, ...]},
-        where each event is {"campaign_restart": bool, "top": [{"name","points"[,"ucid"]}, ...]}
-        ("ucid" present on entries written from v12.1.1 on).
-        A date can have more than one event if a campaign restart happened
-        on the same calendar day as the normal daily rollover — both are
-        kept, never overwritten."""
+        """daily_history.json: {date: [event, ...]}, each event
+        {"campaign_restart": bool, "top": [{"name", "points"[, "ucid"]}]}. A date
+        can hold more than one event. {} if missing.
+        """
         return await _read_json(node, self._get_history_file(saves_dir))
 
     async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
-        """Save daily history to disk atomically, via write_bytes_to_node
-        (works for both local and remote-node instances, with the old
-        local-only fallback and update hint for pre-3.0.4.28 DCSServerBot).
-        Ensures the .fhc subdirectory exists first — safe to create locally
-        here specifically, since saves_dir itself is already known-reachable
-        (we've successfully read other files from it earlier this same
-        cycle), unlike Foothold's own save files where a missing directory
-        is itself the signal that we're on an unreachable remote path."""
+        """Write daily_history.json via write_bytes_to_node (newest date first,
+        for readability only).
+        """
         path = self._get_history_file(saves_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Written most-recent-date-first purely for readability when someone
-        # opens the file by hand — _build_podium_table always re-sorts dates
-        # itself when reading, so this ordering has zero effect on what's
-        # actually displayed.
+        # Newest date first, for humans only — readers re-sort.
         sorted_data = dict(sorted(data.items(), key=lambda kv: kv[0], reverse=True))
         await write_bytes_to_node(
             node, path,
@@ -2694,19 +2350,13 @@ class FH_Report(Plugin):
         )
 
     async def _load_daily_snapshot(self, saves_dir: str, node) -> dict:
-        """Load daily_snapshot.json from disk, exactly as stored (since
-        12.2.0: one block per player under their UCID — see
-        _pack_daily_snapshot). Callers needing the internal per-field shape
-        pass it through _unpack_daily_snapshot, which also accepts the older
-        formats. Returns {} if missing or unreadable."""
+        """daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
+        callers unpack it with _unpack_daily_snapshot. {} if missing.
+        """
         return await _read_json(node, self._get_daily_file(saves_dir))
 
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
-        """Save daily snapshot to disk atomically, via write_bytes_to_node
-        (works for both local and remote-node instances, with the old
-        local-only fallback and update hint for pre-3.0.4.28 DCSServerBot).
-        Ensures the .fhc subdirectory exists first — see _save_daily_history
-        for why this is safe to do locally specifically for this subfolder."""
+        """Write daily_snapshot.json via write_bytes_to_node."""
         path = self._get_daily_file(saves_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         await write_bytes_to_node(
@@ -2717,13 +2367,10 @@ class FH_Report(Plugin):
 
     def _identify_players(self, snap: dict, campaign_stats: dict, session_stats_raw: dict,
                           players: dict, name_to_ucid_native: dict) -> tuple[dict, dict, dict, dict]:
-        """Build the full name -> UCID map and regroup the save file's
-        name-keyed data by player ID. Map priority, lowest to highest: every
-        name ever seen (accumulated in daily_snapshot.json — lets old names
-        in UCID-less saves still resolve), Foothold_Ranks.lua (current name
-        per UCID), and the save file's own native UCIDs. Returns
-        (campaign_by_id, session_by_id, names_by_id, name_to_ucid). `snap` is
-        this cycle's already-loaded daily_snapshot.json (read once per cycle)."""
+        """Full name -> UCID map (snapshot history < Foothold_Ranks.lua < save
+        file's native UCIDs) and the save data regrouped by player ID. Returns
+        (campaign_by_id, session_by_id, names_by_id, name_to_ucid).
+        """
         history_map = _unpack_daily_snapshot(snap).get("name_to_ucid") or {}
         ranks_map   = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
         name_to_ucid = {**history_map, **ranks_map, **(name_to_ucid_native or {})}
@@ -2739,50 +2386,22 @@ class FH_Report(Plugin):
                               live_names: set | None = None,
                               snap: dict | None = None,
                               persist: bool = True) -> tuple[dict, dict, bool]:
-        """Compute today's points and today's combat stats for each player by
-        comparing current campaign values against the snapshot taken at reset_hour UTC.
-        Returns (daily_pts, daily_stats, campaign_restarted):
-          daily_pts   = {player_id: daily_points}      — only players with daily_pts > 0
-          daily_stats = {player_id: {stat_key: delta}} — used for the daily card (show_daily_card)
+        """Today's points and stat deltas per player ID, against the baseline
+        snapshot taken at reset_hour UTC. Returns (daily_pts, daily_stats,
+        campaign_restarted).
 
-        Since 12.2.0 everything here is keyed by PLAYER ID (UCID, or the name
-        only for old saves with no UCID anywhere) — see _group_by_player_id.
-        campaign_stats / session_stats_raw arrive already grouped by ID;
-        names_by_id is used only to label Podium entries; live_names (the raw
-        names active in the current save) feeds _normalize_snapshot_ids,
-        which re-keys the stored baseline to current IDs every cycle (this is
-        also what converts a pre-12.2.0 name-keyed file, with no separate
-        migration step). `snap` lets the caller pass the file it already read
-        this cycle, so it's read only once. persist=False computes the same
-        figures purely in memory — no daily_history/daily_snapshot writes —
-        so read-only callers (/fh_report player) never race the updater,
-        which stays the only writer.
+        Inputs are already grouped by player ID (see _group_by_player_id), so
+        renames need no special handling. `snap` is the snapshot already read
+        this cycle. persist=False computes in memory only, so read-only callers
+        (/fh_report player) never race the updater, the only writer.
 
-        Manual reset: to reset the daily counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
-        is always treated as a fresh baseline (current values), so the daily
-        counter restarts at 0 rather than retroactively counting everything
-        accumulated up to that point.
-
-        Renames need no special handling: a renamed player keeps the same ID,
-        so their baseline and today's totals simply carry on. (The former
-        name-based "callsign change reconciliation" was removed in 12.2.0.)
-
-        Mission/map reset handling: a mid-day mission or map change (a new
-        Foothold save file, or the same file wiped in place) must NOT
-        interrupt today's point/stat counting, and is never treated as a
-        Podium-worthy closing event — only the real scheduled reset_hour
-        rollover closes a day and feeds Podium. Detected via any of:
-          (a) the active persistence file's name changed since last cycle
-          (b) campaign_stats/session_stats_raw lost every player that was
-              in the snapshot (the new file started empty)
-          (c) the existing points+kills-both-dropped heuristic (an in-place
-              admin/Foothold reset without a filename change)
-        When any of these fire (and it's not also a real calendar-day
-        reset), today's already-earned points/stats are preserved in a
-        separate 'carry_over' bucket, and the snapshot rebases to the new
-        file's own (usually empty) starting values — so
-        daily = (current - snapshot) + carry_over continues seamlessly
-        across the swap, with no visible interruption and no Podium entry.
+        Only the real reset_hour rollover closes a day and records it for the
+        Podium. A mid-day mission/map change — persistence filename changed,
+        every snapshot player vanished, or points and kills both dropped in
+        place — instead moves today's totals into carry_over and rebases the
+        snapshot, so daily = (current - snapshot) + carry_over continues
+        seamlessly. To reset the daily counters manually, delete
+        saves_dir/.fhc/daily_snapshot.json (a missing snapshot starts at 0).
         """
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
@@ -2804,15 +2423,9 @@ class FH_Report(Plugin):
         name_to_ucid_snapshot = snap.get("name_to_ucid", {})
         names_snapshot        = snap.get("names", {})
         names_by_id           = names_by_id or {}
-        # Stat categories ever seen across ALL cycles, not just the current
-        # in-memory stats_snapshot — a plain set(list) accumulator that only
-        # grows. Deriving "trusted" categories solely from stats_snapshot
-        # broke on a mid-day mission/map change: that branch rebases
-        # stats_snapshot to the new file's session_stats_raw, which is
-        # legitimately empty right after the swap (nobody's flown yet),
-        # so EVERY category got silently dropped from the Daily card for
-        # the rest of that day (Session wasn't affected — it doesn't use
-        # this gate). Persisting the set survives that empty moment.
+        # Stat categories ever seen, persisted. Derived from stats_snapshot alone,
+        # every category vanished from the Daily card after a mid-day mission swap
+        # (the rebased snapshot is empty until someone flies).
         known_stat_keys = set(snap.get("known_stat_keys", []))
 
         # ── Mid-day mission/map reset detection (never a Podium event) ─────
@@ -2821,12 +2434,7 @@ class FH_Report(Plugin):
         common_with_snapshot = set(snapshot) & set(campaign_stats)
         data_vanished = bool(snapshot) and not common_with_snapshot
 
-        # ── Campaign restart detection (in-place reset, same file) ─────────
-        # Points and kill counts only ever increase during a normal campaign.
-        # If both the total points AND total kills (Air + Ground Units) for
-        # players common to both the snapshot and current data have dropped
-        # significantly, treat this the same as the other mission-reset
-        # signals above — never a Podium event, daily counts carry over.
+        # ── In-place campaign reset: points AND kills both dropped ─────────
         campaign_restarted = False
         if common_with_snapshot:
             snap_pts_sum = sum(snapshot.get(n, 0) for n in common_with_snapshot)
@@ -2864,15 +2472,9 @@ class FH_Report(Plugin):
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
             self.log.debug(f"FH_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
 
-            # Close out the day for Podium — using the CURRENT snapshot/
-            # carry_over (which already correctly reflect any mid-day
-            # mission swaps folded in via the branch below on prior
-            # cycles), so this is accurate even if the day had several
-            # mission changes in it. Falls back to last_daily_saved for
-            # anyone not resolvable via the fresh delta (covers the rare
-            # edge case of a mission swap landing in this exact same cycle
-            # as the date-based reset, before campaign_stats/snapshot could
-            # be reconciled for it).
+            # Close the day for the Podium from the current snapshot/carry_over (which
+            # already include earlier mid-day swaps); last_daily_saved covers a swap
+            # landing in this same cycle.
             closing_daily = {}
             for name, current_pts in campaign_stats.items():
                 delta = max(0, current_pts - snapshot.get(name, 0)) + carry_over.get(name, 0)
@@ -2888,10 +2490,7 @@ class FH_Report(Plugin):
             if closing_daily and persist:
                 top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
                 history    = await self._load_daily_history(saves_dir, node)
-                # Store each player's UCID alongside the name it had that day,
-                # so the Podium can later show their CURRENT name and rank
-                # even after a rename (names alone can't be matched reliably
-                # — e.g. "Viper**" -> "Viper" isn't a callsign-prefix change).
+                # Store the UCID too, so the Podium can show the CURRENT name/rank later.
                 _top_entries = []
                 for pid, p in top_list:
                     _entry = {"name": names_by_id.get(pid) or names_snapshot.get(pid) or pid,
@@ -2899,11 +2498,8 @@ class FH_Report(Plugin):
                     if _is_ucid(pid):
                         _entry["ucid"] = pid
                     _top_entries.append(_entry)
-                # Same write, no extra I/O: fill in the UCID of any older
-                # entries that lack it (recorded before 12.1.1), so the
-                # Podium never needs the alias history to resolve them —
-                # which is what allows aliases to be capped. A no-op once
-                # every resolvable entry has its UCID.
+                # Backfill UCIDs of pre-12.1.1 entries in the same write, so the Podium
+                # never needs the (capped) alias history.
                 _n2u = {**name_to_ucid_snapshot, **(name_to_ucid or {})}
                 for _events in history.values():
                     for _event in _events:
@@ -2922,15 +2518,9 @@ class FH_Report(Plugin):
             stats_carry_over = {}
 
         elif mission_reset:
-            # Mid-day mission/map change — never a Podium event. By this
-            # point campaign_stats/session_stats_raw already belong to the
-            # NEW file (often empty), so we can no longer compute "how much
-            # was earned today" via current-minus-old-snapshot — the only
-            # reliable source left is last_daily_saved/last_daily_stats_saved,
-            # persisted every cycle for exactly this reason. Fold that into
-            # carry_over, then rebase the snapshot to the new file so
-            # (current - new_snapshot) + carry_over continues the day
-            # seamlessly with no visible interruption.
+            # Mid-day mission/map change (never a Podium event): current data is the
+            # NEW file, so today's earnings come from last_daily_saved. Fold them into
+            # carry_over and rebase the snapshot onto the new file.
             self.log.debug(
                 f"FH_Report: mid-day mission/map reset detected for {saves_dir} "
                 f"(filename_changed={filename_changed}, data_vanished={data_vanished}, "
@@ -2968,18 +2558,9 @@ class FH_Report(Plugin):
             if name not in daily and carried > 0:
                 daily[name] = carried
 
-        # ── Calculate today's combat stats delta for each player ───────────
-        # A stat key is only trustworthy for a delta if it was already being
-        # tracked as of the last snapshot (i.e. present for at least one
-        # player in stats_snapshot). If a key appears nowhere in the old
-        # snapshot, the system simply wasn't recording it yet at the last
-        # reset — computing current_val - 0 would show today's entire
-        # cumulative value mislabeled as "today's activity" (this happened
-        # with "Points spent" right after it was added to the raw stats).
-        # Skip such keys for today only; the next snapshot (taken at the
-        # following reset) will include them naturally since it's built
-        # directly from session_stats_raw, so deltas resume correctly from
-        # the next reset onward.
+        # ── Today's stat deltas ──────────────────────────────────────────────
+        # Only for keys already tracked at the last snapshot: a brand-new key
+        # would otherwise show its whole cumulative value as today's.
         tracked_keys_in_snapshot = set(known_stat_keys)
         for _stats in stats_snapshot.values():
             tracked_keys_in_snapshot.update(_stats.keys())
@@ -3002,20 +2583,14 @@ class FH_Report(Plugin):
             if name not in daily_stats and carried_stats:
                 daily_stats[name] = dict(carried_stats)
 
-        # Grow the persisted "ever seen" set with whatever categories are
-        # visible this cycle, so they're trusted from the NEXT cycle on
-        # (mirrors the original one-day-grace-period intent, just anchored
-        # to a persistent accumulator instead of the transient in-memory
-        # stats_snapshot).
+        # Categories seen now are trusted from the next cycle on.
         for _stats in session_stats_raw.values():
             known_stat_keys.update(_stats.keys())
         for _stats in stats_snapshot.values():
             known_stat_keys.update(_stats.keys())
 
-        # Persist the snapshot every cycle (not just on reset), always
-        # including 'last_daily' and the carry-over buckets, plus the
-        # current persistence filename (used to detect the next mission
-        # change) and reset markers.
+        # Persisted every cycle: last_daily and carry-over are what survive a
+        # mission swap; the filename detects the next one.
         new_snap = {
             "date":                 today_str if (first_run or date_reset_due) else (snap_date or today_str),
             "snapshot":             snapshot,
@@ -3056,19 +2631,15 @@ class FH_Report(Plugin):
             return {}
 
     async def _update_server(self, server, cfg: dict):
-        """Update the Discord embed for one server instance.
-        server  — DCSSB Server object (provides server.node.read_file())
-        cfg     — merged config dict (DEFAULT + instance overrides)
-        Mirrors the Pretense pattern: read files via server.node.read_file()
-        so the Master transparently fetches data from remote agent nodes."""
+        """Read one instance's Foothold files (through server.node, so remote
+        agent nodes work) and post or edit its Discord embed.
+        """
 
         instance_name = server.instance.name
 
         if _bool_cfg(cfg.get("disable_updates")):
-            # This instance is intentionally silenced — typically because a
-            # duplicate fh_report installation exists elsewhere in the same
-            # cluster (e.g. one config per agent box) pointing at the same
-            # channel. Skip entirely: no read, no post, no edit.
+            # Silenced instance (e.g. a duplicate install elsewhere in the cluster
+            # posting to the same channel): no read, no post.
             return
 
         channel_id    = _single_channel_id(cfg.get("channel_id"))
@@ -3138,47 +2709,24 @@ class FH_Report(Plugin):
                 self._cycle_punishment = await self._fetch_punishment_points()
             punishment_points = self._cycle_punishment
 
-        # Compute daily points first so we know if daily data exists before
-        # rendering. Needed whenever "D" is one of the tables, or "D" is
-        # requested as extra detail on some OTHER table via its own
-        # points_detail_<role>, or "P" is present — Podium's own
-        # daily_history capture-on-reset logic lives inside
-        # _compute_daily_points, so it must run even for a Podium-only
-        # layout or the history file would never get populated at all.
-        # Intentionally checked against the RAW (un-split) report_layout
-        # string, commas included: with rotation ("DP, SR"), daily/Podium
-        # data is kept warm on every cycle regardless of which single
-        # group is actually showing this time, so nothing goes stale or
-        # has to be rebuilt in a rush the moment its group comes back up.
-        # "none" groups (embed with campaign progress and bases only) never
-        # need daily data; points_detail_* only matters if some table shows.
+        # Daily computation is needed for D tables, a "D" in any points_detail, or
+        # P (the Podium history is recorded inside it). Checked against the whole
+        # rotation string so every group's data stays warm; "none" groups never
+        # need it.
         raw_layout = ",".join(g for g in str(cfg.get("report_layout") or "R").strip().upper().split(",")
                               if g.strip() and g.strip() != "NONE")
         needs_daily = ("D" in raw_layout) or ("P" in raw_layout) or (bool(raw_layout) and any(
             "D" in str(cfg.get(f"points_detail_{role}") or "").upper()
             for role in ("D", "S", "R")
         ))
-        # Also run daily-points computation (and its campaign-restart
-        # detection) whenever waypoint sorting is enabled, regardless of
-        # report_layout — that's the signal used to know when to refresh
-        # the shared waypoint cache (see sort_zones_by_waypoint below).
+        # Waypoint sorting also needs it: its campaign-restart detection triggers
+        # the waypoint cache refresh.
         needs_daily = needs_daily or _bool_cfg(cfg.get("sort_zones_by_waypoint"))
         daily_pts: dict = {}
         daily_stats: dict = {}
         campaign_restarted_now = False
-        # NOTE: intentionally does NOT require `campaign_stats` to be
-        # non-empty. Right after a mission/map change, the new file's
-        # playerStats is legitimately empty until someone scores — but
-        # that is exactly when this must still run: it's what detects the
-        # persistence-filename change and migrates today's already-earned
-        # points into carry_over (see _compute_daily_points' docstring).
-        # Skipping this call on an empty campaign_stats silently freezes
-        # daily_snapshot.json at the previous mission's state forever.
-        # Group this cycle's save-file data by player ID (UCID-first) — used
-        # for both the daily computation and the Session figures below.
-        # Read daily_snapshot.json only when the daily computation will run
-        # (it's also what keeps its name->UCID history up to date) — and then
-        # only once per cycle, shared with _compute_daily_points below.
+        # Must run even with empty campaign_stats: right after a mission change it's
+        # what detects the swap and carries today's points over.
         daily_snap = await self._load_daily_snapshot(saves_dir, node) if needs_daily else {}
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
@@ -3190,22 +2738,13 @@ class FH_Report(Plugin):
                 os.path.basename(persistence_file) if persistence_file else None,
                 name_to_ucid, names_by_id, live_names, daily_snap)
 
-        # Load daily_history once here (cheap, tiny file) so build_embed can
-        # reuse it below without reading the file twice. If there's no
-        # history yet, _render_layout_tables' own Podium step simply
-        # renders nothing for "P" — no separate skip-check needed here.
         daily_history_data = await self._load_daily_history(saves_dir, source_node)
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
 
-        # Zone ordering by waypoint number — opt-in, uses hot injection to
-        # dump Foothold's in-memory WaypointList (never persisted to any
-        # save file) to a shared cache file also used by FH_Control. Only
-        # re-triggered when the cache is missing entirely, or when a
-        # campaign restart was just detected (a new mission/map load is
-        # exactly the event that would change zone-to-waypoint assignments).
-        # Never re-triggered on every ordinary cycle, since WaypointList is
-        # static for the lifetime of a stable campaign.
+        # Waypoint ordering: dump WaypointList (in-memory only) via hot injection
+        # when the shared cache is missing or a campaign restart was detected —
+        # it's static for a stable campaign.
         sort_zones_by_wp = _bool_cfg(cfg.get("sort_zones_by_waypoint"))
         waypoint_map: dict = {}
         if sort_zones_by_wp:
@@ -3258,12 +2797,8 @@ class FH_Report(Plugin):
                     self._message_ids.pop(instance_name, None)
 
             if msg is None:
-                # No known message (lost message_ids.json entry, or first run
-                # on this instance). Before creating a new one, check if a
-                # matching FH_Report message already exists in this channel —
-                # this makes duplicate posts structurally impossible even if
-                # multiple fh_report installations end up pointing at the
-                # same channel_id (e.g. one config per agent box).
+                # Unknown message id: adopt an existing FH_Report message in the channel
+                # before posting, so duplicate posts can't happen.
                 campaign_name  = cfg.get("campaign_name", "Foothold Campaign")
                 expected_title = f"📡  {campaign_name}"
                 async for hist_msg in channel.history(limit=50):
@@ -3337,34 +2872,14 @@ class FH_Report(Plugin):
 
     def _resolve_server(self, interaction: discord.Interaction,
                         server_param) -> tuple[str | None, str | None]:
-        """Resolve which configured instance a command applies to, and
-        enforce that instance's channel restriction. Returns
-        (instance_name, error_message) — exactly one is None.
-
-        server_param may be: a Server object (from _FHServerTransformer on
-        the command itself), a plain string holding the server's PUBLIC
-        name (interaction.namespace during autocomplete carries the raw,
-        untransformed value), or None (option not filled in). Either way,
-        the internal instance name is only ever used as the config lookup
-        key, never shown to the user.
-
-        These are two independent questions, decided separately:
-
-        1. WHICH instance? Only ambiguous with more than one configured —
-           the channel is deliberately never used to guess between several
-           (two instances could easily end up sharing a channel in
-           commands_channel_id, which would make auto-detection
-           ambiguous/wrong), so the `server` option is required instead.
-           With exactly one instance configured, there's nothing to guess
-           and no need to ask.
-
-        2. IS THIS CHANNEL ALLOWED for that instance? Governed purely by
-           whether commands_channel_id is set for it — regardless of
-           whether there's 1 instance configured or several:
-             - not set at all  -> any channel is allowed (today's default,
-               unchanged, for anyone who hasn't opted into restricting it)
-             - set             -> only that instance's own channel_id, or
-               one of the channels listed in commands_channel_id
+        """Which configured instance a command applies to, plus its channel
+        check. Returns (instance_name, error_message), exactly one None.
+        server_param may be a Server (transformer), a public server name
+        (autocomplete namespace) or None.
+        - Instance: with one configured it's always that one; with several the
+          `server` option is required (the channel is never used to guess).
+        - Channel: unrestricted unless commands_channel_id is set; then only the
+          instance's channel_id or one listed in commands_channel_id.
         """
         configured = self._configured_instances()
         if not configured:
@@ -3401,11 +2916,9 @@ class FH_Report(Plugin):
         return server_name, None
 
     def _is_admin(self, interaction: discord.Interaction, server_name: str) -> bool:
-        """True if the calling user matches any entry in the 'admin' config —
-        a comma-separated string where each entry may be a Discord role name
-        (as defined in DCSSB) or a specific username. Defaults to 'Admin' if
-        not configured. Kept tolerant of a legacy list value (old yaml files
-        from before admin became a comma-separated string)."""
+        """True if the user has a role or name listed in the comma-separated
+        'admin' setting (default 'Admin'; a legacy YAML list also works).
+        """
         cfg       = self._merged_cfg(server_name)
         admin_raw = cfg.get("admin") or "Admin"
         if isinstance(admin_raw, list):
@@ -3446,10 +2959,7 @@ class FH_Report(Plugin):
     async def _autocomplete_report_player(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
-        # With multiple instances configured, `server` is a separate
-        # parameter on this same command — if the admin has already
-        # picked/typed it in this invocation, discord.py exposes that via
-        # interaction.namespace before the command itself even runs.
+        # The `server` option (if already filled in) is available via the namespace.
         server_param = getattr(interaction.namespace, "server", None)
         server_name, _ = self._resolve_server(interaction, server_param)
         if not server_name:
@@ -3459,13 +2969,8 @@ class FH_Report(Plugin):
         if not self._is_admin(interaction, server_name):
             return []
 
-        # Primary path: query DCSServerBot's own `players` table (ucid +
-        # name — the same table /linkme and our self-lookup path already
-        # use) instead of re-reading and re-parsing Foothold_Ranks.lua on
-        # every keystroke. Much cheaper against a roster this size, and it
-        # hands back a UCID rather than a raw name, so the actual command
-        # below can match it against the Foothold data by UCID — sidestepping
-        # callsign-prefix/strip_callsign mismatches entirely for this path.
+        # DCSServerBot's players table: cheap per keystroke, and returns a UCID so
+        # the command matches by UCID, not by name.
         try:
             pattern = f"%{current}%"
             async with self.apool.connection() as conn:
@@ -3519,14 +3024,9 @@ class FH_Report(Plugin):
     async def player(self, interaction: discord.Interaction,
                      _server: app_commands.Transform[Server, _FHServerTransformer] | None = None,
                      player_name: str | None = None):
-        # DCSServerBot's core has "magic" tied to a parameter LITERALLY
-        # named `server`: with server-specific channels defined (and no
-        # central admin channel), it auto-substitutes the server from
-        # channel context on its own — bypassing our own Transform/
-        # autocomplete logic entirely, before our command body ever runs
-        # (per Special K). Internally naming it `_server` and using
-        # @app_commands.rename to still show "server" to the user avoids
-        # that name-based magic; everything below this line is unchanged.
+        # Named `_server` (shown as "server" via rename): DCSServerBot core
+        # auto-fills a parameter literally named `server` from the channel,
+        # bypassing our transformer (per Special K).
         ctx = await self._command_context(interaction, _server)
         if ctx is None:
             return
@@ -3539,13 +3039,8 @@ class FH_Report(Plugin):
             return
 
         try:
-            # No longer forcing bc:saveToDisk() here — per @leka1986: Foothold
-            # already autosaves every 60s on its own, and a forced save is a
-            # genuinely heavy write (all AI state, loadouts, positions, the
-            # director state — thousands of lines), not a cheap one. Forcing
-            # it on every /fh_report player call cost real server resources
-            # for at most 60s of extra freshness — not worth it. We just read
-            # whatever Foothold's own autosave cycle already wrote.
+            # Never force bc:saveToDisk() here (per Leka): Foothold autosaves every
+            # 60s and a save is a heavy ~10,000-line write. Read the latest autosave.
             persistence_file = await find_persistence_file(saves_dir, node)
             if not persistence_file:
                 await interaction.followup.send(
@@ -3561,13 +3056,8 @@ class FH_Report(Plugin):
             return
 
         if player_name:
-            # Admin path — look up the requested player.
-            # If player_name came from the autocomplete dropdown above, it's
-            # a UCID (32 hex chars), not a display name: match it directly
-            # against the parsed Foothold roster by UCID, same as the
-            # self-lookup path below. This is immune to callsign prefixes,
-            # unusual characters, or any other name-formatting mismatch
-            # between Foothold_Ranks.lua and what's actually typed/shown.
+            # Admin path. An autocomplete pick is a UCID: match by UCID, immune to
+            # callsign/name formatting differences.
             match = None
             if re.fullmatch(r"[0-9a-f]{32}", player_name.lower()):
                 target_ucid = player_name.lower()
@@ -3624,10 +3114,8 @@ class FH_Report(Plugin):
 
         data = players[match]
 
-        # Same UCID-first identity as the periodic embed: regroup the save
-        # file's data by player ID, then re-key it by the Foothold_Ranks.lua
-        # name the roster (and `match`) uses. The callsign-stripped name
-        # comparison is kept only as a fallback for UCID-less saves.
+        # Same UCID-first identity as the embed; the stripped-name lookup is
+        # only a fallback for UCID-less saves.
         daily_snap = await self._load_daily_snapshot(saves_dir, node)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
