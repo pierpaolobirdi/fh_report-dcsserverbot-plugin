@@ -1977,40 +1977,50 @@ def _zone_lines(side_zones: list, full: str, empty: str, max_zones: int | None,
     return lines
 
 
-def build_embed(zones: dict, players: dict, campaign_name: str,
-                max_zones: int | None, max_pilots: int | None,
-                bar_length: int, slot_status: bool = False,
-                zone_name_length: int = 16,
-                max_pilots_2t: int | None = None,
-                max_pilots_3t: int | None = None,
-                punishment_points: dict | None = None,
-                show_punishment: bool = False,
-                show_all_pilots: bool = False,
-                strip_callsign_flag: bool = False,
-                campaign_stats: dict | None = None,
-                bar_style_emoji: bool = False,
-                daily_points: dict | None = None,
-                show_pilot_card: bool = False,
-                pilot_card_icon: str = "🔸",
-                show_session_card: bool = False,
-                session_card_icon: str = "🔸",
-                session_stats_raw: dict | None = None,
-                show_daily_card: bool = False,
-                daily_card_icon: str = "🔸",
-                daily_stats_raw: dict | None = None,
-                player_cmd_hint: str | None = None,
-                daily_history: dict | None = None,
-                podium_days: int = 7,
-                podium_top: int = 1,
-                podium_combined_days: int = 7,
-                podium_combined_top: int = 1,
-                podium_combined_min3_latest_day: bool = False,
-                sort_zones_by_waypoint: bool = False,
-                waypoint_map: dict | None = None,
+def build_embed(zones: dict, players: dict, cfg: dict, *,
                 report_layout: str = "R",
                 points_detail: dict | None = None,
+                campaign_stats: dict | None = None,
+                session_stats_raw: dict | None = None,
+                daily_points: dict | None = None,
+                daily_stats_raw: dict | None = None,
+                punishment_points: dict | None = None,
+                daily_history: dict | None = None,
+                waypoint_map: dict | None = None,
                 name_to_ucid: dict | None = None) -> discord.Embed:
-    """Build the Discord embed from parsed Foothold data."""
+    """Build the Discord embed from parsed Foothold data. Display options
+    are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
+    campaign_name       = cfg.get("campaign_name", "Foothold Campaign")
+    max_zones           = cfg.get("max_zones") or None
+    max_pilots          = cfg.get("max_pilots") or None
+    max_pilots_2t       = cfg.get("max_pilots_2t") or None
+    max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None
+    bar_length          = int(cfg.get("bar_length") or 40)
+    bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji"))
+    slot_status         = _bool_cfg(cfg.get("slot_status"))
+    zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16)))
+    sort_zones_by_waypoint = _bool_cfg(cfg.get("sort_zones_by_waypoint"))
+    show_punishment     = _bool_cfg(cfg.get("show_punishment"))
+    show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots"))
+    strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign"))
+    show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card"))
+    pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸")
+    show_session_card   = _bool_cfg(cfg.get("show_session_card"))
+    session_card_icon   = str(cfg.get("session_card_icon") or "🔸")
+    show_daily_card     = _bool_cfg(cfg.get("show_daily_card"))
+    daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸")
+    podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7)
+    podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1)))
+    podium_combined_days = int(cfg.get("podium_combined_days") if cfg.get("podium_combined_days") is not None else 7)
+    podium_combined_top  = max(1, min(50, int(cfg.get("podium_combined_top") or 1)))
+    podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day"))
+    # Footer reminder of /fh_report player — on unless explicitly disabled.
+    player_cmd_hint = None
+    raw_hint_flag   = cfg.get("show_player_cmd_hint")
+    if raw_hint_flag is None or _bool_cfg(raw_hint_flag):
+        player_cmd_hint = str(cfg.get("player_cmd_hint_text")
+                              or "Type /fh_report player to see your own stats.")
+
     _now_ts    = int(datetime.now(timezone.utc).timestamp())
     timestamp  = f"<t:{_now_ts}:f>"
     blue_count  = len(zones["blue"])
@@ -3219,59 +3229,22 @@ class FH_Report(Plugin):
                 self.log.warning(f"FH_Report [{instance_name}]: could not load waypoint cache: {e}")
                 waypoint_map = {}
 
-        # Player command hint — plain-text reminder of /fh_report player,
-        # shown as a second line in the footer. Active by default (migrate
-        # inserts it explicitly into DEFAULT) so users discover the command
-        # without the admin having to opt in.
-        player_cmd_hint = None
-        raw_hint_flag   = cfg.get("show_player_cmd_hint")
-        show_hint       = _bool_cfg(raw_hint_flag) if raw_hint_flag is not None else True
-        if show_hint:
-            player_cmd_hint = str(cfg.get("player_cmd_hint_text")
-                                  or "Type /fh_report player to see your own stats.")
-
         u2rn = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
         embed = build_embed(
-            zones               = zones,
-            players             = players,
-            campaign_name       = cfg.get("campaign_name", "Foothold Campaign"),
-            max_zones           = cfg.get("max_zones") or None,
-            max_pilots          = cfg.get("max_pilots") or None,
-            bar_length          = int(cfg.get("bar_length") or 40),
-            slot_status         = _bool_cfg(cfg.get("slot_status")),
-            punishment_points   = punishment_points,
-            show_punishment     = show_punishment,
-            show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots")),
-            strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign")),
-            zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16))),
-            max_pilots_2t       = cfg.get("max_pilots_2t") or None,
-            campaign_stats      = _by_display_name(campaign_by_id, players, names_by_id, u2rn),
-            report_layout       = current_layout,
-            points_detail       = current_detail,
-            bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
-            daily_points        = _by_display_name(daily_pts, players, names_by_id, u2rn),
-            max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
-            show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
-            pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
-            show_session_card   = _bool_cfg(cfg.get("show_session_card")),
-            session_card_icon   = str(cfg.get("session_card_icon") or "🔸"),
-            session_stats_raw   = _by_display_name(session_by_id, players, names_by_id, u2rn),
-            show_daily_card     = _bool_cfg(cfg.get("show_daily_card")),
-            daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
-            daily_stats_raw     = _by_display_name(daily_stats, players, names_by_id, u2rn),
-            player_cmd_hint     = player_cmd_hint,
-            daily_history       = daily_history_data if "P" in current_layout else None,
-            podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7),
-            podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1))),
-            podium_combined_days      = int(cfg.get("podium_combined_days") if cfg.get("podium_combined_days") is not None else 7),
-            podium_combined_top       = max(1, min(50, int(cfg.get("podium_combined_top") or 1))),
-            podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day")),
-            sort_zones_by_waypoint = sort_zones_by_wp,
-            waypoint_map        = waypoint_map,
+            zones, players, cfg,
+            report_layout     = current_layout,
+            points_detail     = current_detail,
+            campaign_stats    = _by_display_name(campaign_by_id, players, names_by_id, u2rn),
+            session_stats_raw = _by_display_name(session_by_id, players, names_by_id, u2rn),
+            daily_points      = _by_display_name(daily_pts, players, names_by_id, u2rn),
+            daily_stats_raw   = _by_display_name(daily_stats, players, names_by_id, u2rn),
+            punishment_points = punishment_points,
+            daily_history     = daily_history_data if "P" in current_layout else None,
+            waypoint_map      = waypoint_map,
             # Full name -> UCID map for this cycle (every past name each
             # player has had, plus current ones) — lets the Podium identify
             # old entries by UCID and show the player's current name/rank.
-            name_to_ucid        = name_to_ucid if "P" in current_layout else None,
+            name_to_ucid      = name_to_ucid if "P" in current_layout else None,
         )
 
         try:
