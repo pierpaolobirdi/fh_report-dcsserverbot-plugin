@@ -1,0 +1,21 @@
+RankSave = {}
+RankSave["playerIdentityVersion"]=2
+RankSave["players"]={
+  ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]={
+    ["career"]={
+      [1]=7200,
+      [3]=600,
+    },
+    ["credits"]=5100,
+    ["name"]="Zarpa",
+    ["lastSeen"]=100,
+  },
+  ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]={
+    ["name"]="Viper",
+    ["credits"]=31000,
+  },
+  ["cccccccccccccccccccccccccccccccc"]={
+    ["name"]="Excl",
+    ["credits"]=10,
+  },
+}
