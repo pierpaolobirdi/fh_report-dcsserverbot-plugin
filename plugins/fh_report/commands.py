@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "12.5.3"
+FH_REPORT_RELEASE = "12.5.4"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1063,7 +1063,7 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
     listing is truncated with a "+ N more" note, keeping room for the
     trailing ruler.
     """
-    MAX_EMBED_FIELDS    = 25
+    MAX_EMBED_FIELDS    = DISCORD_MAX_FIELDS
     RESERVED_FOR_TRAILER = 2
 
     title = f"{icon} __Daily Podium__"
@@ -1091,6 +1091,23 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 
 
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
+
+
+DISCORD_MAX_FIELDS = 25   # Discord rejects embeds with more fields
+
+
+def _cap_fields(embed: discord.Embed, max_fields: int) -> None:
+    """Drop trailing fields beyond `max_fields`, marking the last kept one —
+    a long show_all_pilots listing across several tables can otherwise
+    exceed Discord's field cap and get the whole update rejected."""
+    if len(embed.fields) <= max_fields:
+        return
+    while len(embed.fields) > max_fields:
+        embed.remove_field(max_fields)
+    last = embed.fields[-1]
+    note = "\n*…trimmed*"
+    value = last.value if len(last.value) + len(note) <= 1024 else last.value[:1024 - len(note)]
+    embed.set_field_at(max_fields - 1, name=last.name, value=value + note, inline=last.inline)
 
 
 def _embed_size(embed: discord.Embed) -> int:
@@ -1514,24 +1531,31 @@ def _emit_table_field(embed: discord.Embed, title: str, icon: str,
 
 
 def _render_layout_tables(
-    embed: discord.Embed, report_layout: str, points_detail: dict,
-    players: dict, dp: dict, has_daily: bool, strip_callsign_flag: bool,
-    max_pilots: int | None, max_pilots_2t: int | None, max_pilots_3t: int | None,
-    show_all_pilots: bool,
-    show_pilot_card: bool, pilot_card_icon: str,
-    show_session_card: bool, session_card_icon: str,
-    show_daily_card: bool, daily_card_icon: str,
-    show_punishment: bool, punishment_points: dict | None,
-    daily_history: dict | None,
-    podium_days: int, podium_top: int,
-    podium_combined_days: int, podium_combined_top: int, podium_combined_min3_latest_day: bool,
-    name_to_ucid: dict | None = None,
+    embed: discord.Embed, cfg: dict, report_layout: str, points_detail: dict,
+    players: dict, dp: dict, has_daily: bool, punishment_points: dict | None,
+    daily_history: dict | None, name_to_ucid: dict | None = None,
 ) -> None:
     """Render every table/Podium named in report_layout, in order, onto
-    embed. `points_detail` is a dict {"D": "...", "S": "...", "R": "..."} —
-    a role missing from it shows only its own value. See the module-level
-    comment above for the grammar. Mutates embed in place — mirrors
-    _add_podium_field's own convention."""
+    embed (table options read from `cfg`). `points_detail` is a dict
+    {"D": "...", "S": "...", "R": "..."} — a role missing from it shows only
+    its own value. See the module-level comment above for the grammar."""
+    max_pilots          = cfg.get("max_pilots") or None
+    max_pilots_2t       = cfg.get("max_pilots_2t") or None
+    max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None
+    show_punishment     = _bool_cfg(cfg.get("show_punishment"))
+    show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots"))
+    strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign"))
+    show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card"))
+    pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸")
+    show_session_card   = _bool_cfg(cfg.get("show_session_card"))
+    session_card_icon   = str(cfg.get("session_card_icon") or "🔸")
+    show_daily_card     = _bool_cfg(cfg.get("show_daily_card"))
+    daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸")
+    podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7)
+    podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1)))
+    podium_combined_days = int(cfg.get("podium_combined_days") if cfg.get("podium_combined_days") is not None else 7)
+    podium_combined_top  = max(1, min(50, int(cfg.get("podium_combined_top") or 1)))
+    podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day"))
     layout = (report_layout or "R").strip().upper()
     if layout == "NONE":
         return  # campaign progress and bases only — no leaderboard tables
@@ -1724,28 +1748,11 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
     campaign_name       = cfg.get("campaign_name", "Foothold Campaign")
     max_zones           = cfg.get("max_zones") or None
-    max_pilots          = cfg.get("max_pilots") or None
-    max_pilots_2t       = cfg.get("max_pilots_2t") or None
-    max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None
     bar_length          = int(cfg.get("bar_length") or 40)
     bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji"))
     slot_status         = _bool_cfg(cfg.get("slot_status"))
     zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16)))
     sort_zones_by_waypoint = _bool_cfg(cfg.get("sort_zones_by_waypoint"))
-    show_punishment     = _bool_cfg(cfg.get("show_punishment"))
-    show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots"))
-    strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign"))
-    show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card"))
-    pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸")
-    show_session_card   = _bool_cfg(cfg.get("show_session_card"))
-    session_card_icon   = str(cfg.get("session_card_icon") or "🔸")
-    show_daily_card     = _bool_cfg(cfg.get("show_daily_card"))
-    daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸")
-    podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7)
-    podium_top          = max(1, min(50, int(cfg.get("podium_top") or 1)))
-    podium_combined_days = int(cfg.get("podium_combined_days") if cfg.get("podium_combined_days") is not None else 7)
-    podium_combined_top  = max(1, min(50, int(cfg.get("podium_combined_top") or 1)))
-    podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day"))
     # Footer reminder of /fh_report player — on unless explicitly disabled.
     player_cmd_hint = None
     raw_hint_flag   = cfg.get("show_player_cmd_hint")
@@ -1840,22 +1847,11 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     has_daily   = bool(dp) or any(drs.values())
 
     _render_layout_tables(
-        embed=embed, report_layout=report_layout, points_detail=points_detail,
-        players=players, dp=dp, has_daily=has_daily,
-        strip_callsign_flag=strip_callsign_flag,
-        max_pilots=max_pilots, max_pilots_2t=max_pilots_2t, max_pilots_3t=max_pilots_3t,
-        show_all_pilots=show_all_pilots,
-        show_pilot_card=show_pilot_card, pilot_card_icon=pilot_card_icon,
-        show_session_card=show_session_card, session_card_icon=session_card_icon,
-        show_daily_card=show_daily_card, daily_card_icon=daily_card_icon,
-        show_punishment=show_punishment, punishment_points=punishment_points,
-        daily_history=daily_history,
-        podium_days=podium_days, podium_top=podium_top,
-        podium_combined_days=podium_combined_days, podium_combined_top=podium_combined_top,
-        podium_combined_min3_latest_day=podium_combined_min3_latest_day,
-        name_to_ucid=name_to_ucid,
+        embed, cfg, report_layout, points_detail, players, dp, has_daily,
+        punishment_points, daily_history, name_to_ucid,
     )
 
+    _cap_fields(embed, DISCORD_MAX_FIELDS - 1)   # keep room for the ruler
     # Full-width separator — placed at the bottom to fix embed width
     # without interrupting the visual flow of the content.
     try:
@@ -2057,6 +2053,24 @@ def _normalize_snapshot_ids(snap: dict, name_to_ucid: dict, live_names: set) -> 
             names[pid] = key
     new["names"] = names
     return new
+
+
+def _points_delta(current: dict, snapshot: dict, carry_over: dict) -> dict:
+    """Today's points per ID: (current - snapshot, never negative) + carry_over;
+    only IDs with something to show."""
+    out = {}
+    for pid, cur in current.items():
+        delta = max(0, cur - snapshot.get(pid, 0)) + carry_over.get(pid, 0)
+        if delta > 0:
+            out[pid] = delta
+    for pid, carried in carry_over.items():
+        if pid not in out and carried > 0:
+            out[pid] = carried
+    return out
+
+
+def _copy_stats(stats: dict) -> dict:
+    return {pid: dict(s) for pid, s in stats.items()}
 
 
 def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
@@ -2473,7 +2487,7 @@ class FH_Report(Plugin):
         if first_run:
             # No prior day to close or carry over — start completely fresh.
             snapshot         = dict(campaign_stats)
-            stats_snapshot   = {name: dict(stats) for name, stats in session_stats_raw.items()}
+            stats_snapshot   = _copy_stats(session_stats_raw)
             carry_over       = {}
             stats_carry_over = {}
 
@@ -2484,14 +2498,7 @@ class FH_Report(Plugin):
             # Close the day for the Podium from the current snapshot/carry_over (which
             # already include earlier mid-day swaps); last_daily_saved covers a swap
             # landing in this same cycle.
-            closing_daily = {}
-            for name, current_pts in campaign_stats.items():
-                delta = max(0, current_pts - snapshot.get(name, 0)) + carry_over.get(name, 0)
-                if delta > 0:
-                    closing_daily[name] = delta
-            for name, carried in carry_over.items():
-                if name not in closing_daily and carried > 0:
-                    closing_daily[name] = carried
+            closing_daily = _points_delta(campaign_stats, snapshot, carry_over)
             for name, val in last_daily_saved.items():
                 if name not in closing_daily and val > 0:
                     closing_daily[name] = val
@@ -2522,7 +2529,7 @@ class FH_Report(Plugin):
                 await self._save_daily_history(saves_dir, history, node)
 
             snapshot         = dict(campaign_stats)
-            stats_snapshot   = {name: dict(stats) for name, stats in session_stats_raw.items()}
+            stats_snapshot   = _copy_stats(session_stats_raw)
             carry_over       = {}
             stats_carry_over = {}
 
@@ -2542,7 +2549,7 @@ class FH_Report(Plugin):
                     new_carry_over[name] = max(new_carry_over.get(name, 0), val)
             carry_over = new_carry_over
 
-            new_stats_carry_over = {name: dict(stats) for name, stats in stats_carry_over.items()}
+            new_stats_carry_over = _copy_stats(stats_carry_over)
             for name, stats in last_daily_stats_saved.items():
                 merged = dict(new_stats_carry_over.get(name, {}))
                 for key, val in stats.items():
@@ -2553,19 +2560,12 @@ class FH_Report(Plugin):
             stats_carry_over = new_stats_carry_over
 
             snapshot       = dict(campaign_stats)
-            stats_snapshot = {name: dict(stats) for name, stats in session_stats_raw.items()}
+            stats_snapshot = _copy_stats(session_stats_raw)
 
         # ── Calculate today's point delta for each player ──────────────────
         # (snapshot/carry_over above already reflect any resets/carries
         # that happened this cycle, so this is a single, uniform formula.)
-        daily = {}
-        for name, current_pts in campaign_stats.items():
-            delta = max(0, current_pts - snapshot.get(name, 0)) + carry_over.get(name, 0)
-            if delta > 0:
-                daily[name] = delta
-        for name, carried in carry_over.items():
-            if name not in daily and carried > 0:
-                daily[name] = carried
+        daily = _points_delta(campaign_stats, snapshot, carry_over)
 
         # ── Today's stat deltas ──────────────────────────────────────────────
         # Only for keys already tracked at the last snapshot: a brand-new key
@@ -3067,6 +3067,7 @@ class FH_Report(Plugin):
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
             return
 
+        last_seen = None
         if player_name:
             # Admin path. An autocomplete pick is a UCID: match by UCID, immune to
             # callsign/name formatting differences.
@@ -3102,12 +3103,16 @@ class FH_Report(Plugin):
             try:
                 async with self.apool.connection() as conn:
                     async with conn.cursor() as cur:
+                        # UCID and last_seen in one round trip.
                         await cur.execute(
-                            "SELECT ucid FROM players WHERE discord_id = %s LIMIT 1",
+                            "SELECT p.ucid, (SELECT MAX(s.hop_off) FROM statistics s "
+                            "WHERE s.player_ucid = p.ucid) "
+                            "FROM players p WHERE p.discord_id = %s LIMIT 1",
                             (interaction.user.id,)
                         )
                         row = await cur.fetchone()
                         own_ucid = row[0] if row else None
+                        last_seen = row[1] if row else None
             except Exception as e:
                 await interaction.followup.send(f"❌ Error looking up your account:\n```{e}```", ephemeral=True)
                 return
@@ -3158,9 +3163,8 @@ class FH_Report(Plugin):
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
         # UCID + last_seen from DCSServerBot core tables
-        ucid      = data.get("ucid")
-        last_seen = None
-        if ucid:
+        ucid = data.get("ucid")
+        if ucid and not last_seen:
             try:
                 async with self.apool.connection() as conn:
                     async with conn.cursor() as cur:
