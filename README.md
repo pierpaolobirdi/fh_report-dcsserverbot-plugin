@@ -169,7 +169,9 @@ report_layout: DPS      # Daily, Podium, then Session — no Rank table at all
 report_layout: DPSR     # all four, Daily first
 ```
 
-`P` only makes sense combined with at least one of `D`/`S`/`R` — `P` on its own shows just the Podium and nothing else (see [Daily Podium](#daily-podium)). A `D` table is silently skipped on a cycle with no daily data yet.
+`P` only makes sense combined with at least one of `D`/`S`/`R` — `P` on its own shows just the Podium and nothing else (see [Daily Podium](#daily-podium)).
+
+`report_layout: none` shows no tables at all — just the campaign progress bar and the BLUE/RED bases. It can also be one of the groups in a rotation (e.g. `DPS, none`). A `D` table is silently skipped on a cycle with no daily data yet.
 
 **Rotating between compositions** — comma-separate any number of them to cycle through, one step per `update_interval`, wrapping back to the first after the last:
 

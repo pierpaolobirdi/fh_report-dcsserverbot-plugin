@@ -76,6 +76,10 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                        DPSR     = Daily, Podium, Session, Rank (all four)
 #                      P only makes sense combined with at least one of D/S/R —
 #                      "P" alone shows just the Podium, nothing else.
+#                      none     = no tables at all — just campaign progress and
+#                                 the BLUE/RED bases (daily files are then not
+#                                 read or written either). Can also be one of
+#                                 the groups in a rotation, e.g. DPS, none
 #                      Comma-separated = rotate between compositions, one step
 #                      per update_interval, back to the first after the last —
 #                      any number of groups is allowed. Example:

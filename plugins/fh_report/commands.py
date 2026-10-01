@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "12.1.0"
+FH_REPORT_RELEASE = "12.5.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1107,7 +1107,9 @@ def _is_numeric_segment(s: str) -> bool:
 
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
-    Handles separators (|, /, backslash, ,, ' - ') and callsign patterns (WORD N-N).
+    Handles separators (|, /, backslash, ,, ' - ') and callsign patterns
+    (WORD N-N or WORD N_N — Foothold uses either as the flight/slot
+    separator, e.g. "UZI 1_4 Silver").
     Preserves squadron tags like [MA] at the start.
     When two or more | separators are present and the last segment is mainly
     numeric (slot number like 307, 305A), the second-to-last segment is used
@@ -1130,7 +1132,7 @@ def strip_callsign(name: str) -> str:
     # Step 2 — remove leading callsign pattern: WORD(s) N-N
     # e.g. "UZI 1-1 zarpa" → "zarpa", but not "[MA] Leka" or "132nd Kimkiller"
     import re as _re
-    callsign_pattern = _re.compile(r'^[A-Z][A-Z0-9]* \d+-\d+\s*', _re.IGNORECASE)
+    callsign_pattern = _re.compile(r'^[A-Z][A-Z0-9]* \d+[-_]\d+\s*', _re.IGNORECASE)
     stripped = callsign_pattern.sub('', name).strip()
     # Only apply if result is not empty
     if stripped:
@@ -1229,7 +1231,8 @@ def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
 
 def _build_podium_table(history: dict, players: dict, days: int, top: int,
                         strip_callsign_flag: bool = False,
-                        min3_latest_day: bool = False) -> str | None:
+                        min3_latest_day: bool = False,
+                        name_to_ucid: dict | None = None) -> str | None:
     """Build the Podium table, grouped by closing event (date + optional
     Session End marker), each showing the top `top` positions (1-50) that
     day — NOT a single position, the top N positions.
@@ -1285,6 +1288,8 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
 
     medals = ["🥇", "🥈", "🥉"]
     blocks: list[list[str]] = []
+    name_to_ucid = name_to_ucid or {}
+    ucid_to_current = {d.get("ucid"): (n, d) for n, d in players.items() if d.get("ucid")}
     for date_idx, date_str in enumerate(dates_desc):
         is_latest_day  = (date_idx == 0)
         effective_top  = max(top, 3) if (is_latest_day and min3_latest_day) else top
@@ -1311,20 +1316,36 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                 if not name:
                     continue
                 marker  = medals[idx] if idx < 3 else "🎖️"
-                display = strip_callsign(name) if strip_callsign_flag else name
-                short   = _safe_code_span(display)
-                player_data = players.get(name)
+                # Identify the player by UCID first — stored in the entry
+                # itself for days closed from v12.1.1 on, or translated from
+                # the name via name_to_ucid (daily_snapshot.json, which keeps
+                # every historical name) for older entries. That survives
+                # renames that name matching can't catch (e.g. "Viper**" ->
+                # "Viper"), and lets us show the player's CURRENT name.
+                current_name, player_data = None, None
+                ucid = entry.get("ucid") or name_to_ucid.get(name)
+                if ucid and ucid in ucid_to_current:
+                    current_name, player_data = ucid_to_current[ucid]
                 if not player_data:
-                    # No exact-name match — playerStats/history may record
-                    # the name without the flight-callsign prefix that
-                    # Foothold_Ranks.lua (and therefore `players`) carries,
-                    # or vice versa. Fall back to a callsign-stripped
-                    # comparison, same as the Session/Daily leaderboard
-                    # lookups above, before giving up on a rank entirely.
+                    player_data = players.get(name)
+                    if player_data:
+                        current_name = name
+                if not player_data:
+                    # No UCID or exact-name match — playerStats/history may
+                    # record the name without the flight-callsign prefix
+                    # that Foothold_Ranks.lua (and therefore `players`)
+                    # carries, or vice versa. Last resort: callsign-stripped
+                    # comparison, same as the Session/Daily leaderboards.
                     for p_name, p_data in players.items():
                         if strip_callsign(p_name) == strip_callsign(name):
-                            player_data = p_data
+                            current_name, player_data = p_name, p_data
                             break
+                # Current name if the player could be identified; otherwise
+                # (excluded, or no longer in Foothold_Ranks.lua) the name
+                # stored for that day, without a rank.
+                shown   = current_name or name
+                display = strip_callsign(shown) if strip_callsign_flag else shown
+                short   = _safe_code_span(display)
                 if player_data:
                     rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
                     rank = _fit_rank(f"{display} — ", rank, f" — {int(pts):,} pts")
@@ -1510,6 +1531,33 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     return f"·　{icon} " + " · ".join(parts)
 
 
+# Foothold's non-mission playerStats keys, taken from its own source
+# (zoneCommander.lua): the standard stat label table (FootholdStatLabelKeys),
+# the kill categories (CAREER_KILL_STAT_MAP, which adds Infantry), Refueling
+# (its stats displayOrder) and Zone supply delivery. Any OTHER key is treated
+# as a mission objective: that covers the generic ones (CAS/CAP/SEAD/Recon
+# mission…) and also the map-specific ones each mission script defines with
+# its own name (e.g. "Destroy enemy Bridge", "Kandalaksha Aluminium Plant"),
+# which can't be listed in advance because they change with every map.
+_NON_MISSION_STATS = frozenset({
+    "Air", "Helo", "Ground Units", "Ship", "SAM", "Structure", "Infantry",
+    "Demolition kill", "Deaths", "Captured by enemy", "Zone capture",
+    "Zone upgrade", "Zone supply delivery", "Pilot Rescue", "Refueling",
+    "Points", "Points spent", "Flight time", "Achievement",
+})
+
+
+def _is_mission_stat(key: str) -> bool:
+    """True if a playerStats key counts as a mission objective — see
+    _NON_MISSION_STATS. Keys mentioning "mission" always count (e.g.
+    "Bomb runway (Joint mission)"); a " (troops)" suffix is ignored when
+    matching the non-mission list (e.g. "Zone capture (troops)")."""
+    if "mission" in key.lower():
+        return True
+    base = key[:-len(" (troops)")] if key.endswith(" (troops)") else key
+    return base not in _NON_MISSION_STATS
+
+
 def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
     """Build a one-line session/daily stats card from raw playerStats keys,
     using the confirmed correlation between playerStats (session) and
@@ -1519,8 +1567,9 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
       SAM     = SAM (air defense kills)
       Ground  = Ground Units + Structure + Infantry
       Ship    = Ship (naval kills)
-    'Missions' sums only keys whose name contains the word "mission"
-    (case-insensitive) — e.g. CAP mission, SEAD mission, CAS mission.
+    'Missions' sums every mission-objective key (see _is_mission_stat):
+    generic ones like CAP/SEAD/CAS mission, and map-specific ones such as
+    "Destroy enemy Bridge".
     'Achievement' is Foothold's own milestone-unlock counter (playerStats key
     'Achievement', confirmed via zoneCommander.lua's STATS_LABEL_ACHIEVEMENT) —
     a progression/summary stat rather than raw combat action, so it's ranked
@@ -1544,7 +1593,7 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
 
     missions = sum(
         int(v) for k, v in raw_stats.items()
-        if "mission" in k.lower() and isinstance(v, (int, float)) and v > 0
+        if _is_mission_stat(k) and isinstance(v, (int, float)) and v > 0
     )
     achievement = int(raw_stats.get("Achievement", 0))
     air    = int(raw_stats.get("Air", 0)) + int(raw_stats.get("Helo", 0))
@@ -1633,19 +1682,86 @@ def _display_stat_value(key: str, value: float) -> str:
 
 def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
     """Sort a raw playerStats dict into the fixed display order used by the
-    full-detail stats sections: Missions, Achievement, Air, Helo, SAM,
+    full-detail stats sections: Missions (every mission objective, incl.
+    map-specific ones — see _is_mission_stat), Achievement, Air, Helo, SAM,
     Infantry, Ground Units, Structure, Ship, Pilot Rescue, Refueling, any
-    unrecognized keys (alphabetical), then Deaths always last."""
+    other known keys (alphabetical), then Deaths always last."""
     def rank(key: str) -> tuple[int, str]:
         if key == "Deaths":
             return (99, key)
-        if "mission" in key.lower():
-            return (0, key)
         if key in _STAT_KEY_ORDER:
             return (_STAT_KEY_ORDER.index(key) + 1, key)
+        if _is_mission_stat(key):
+            return (0, key)
         return (98, key)  # unrecognized — after known categories, before Deaths
 
     return sorted(stats.items(), key=lambda kv: rank(kv[0]))
+
+
+def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: int = 1024) -> None:
+    """Add a monospace ```code block``` table as one or more embed fields,
+    splitting on line boundaries whenever it would exceed Discord's
+    per-field character limit (1024) — a player's stat categories keep
+    growing (new map-specific special missions can be long, no fixed upper
+    bound on row count), so a single field can't be assumed to always fit.
+    Continuation fields use a zero-width name, same convention as the
+    separators elsewhere in this embed. Mirrors FH_Control's own helper of
+    the same name, reused here for the same combined Session/Daily table
+    format (see _build_combined_stats_table)."""
+    if len(table_text) <= limit:
+        embed.add_field(name=name, value=table_text, inline=False)
+        return
+    inner = table_text.strip()
+    if inner.startswith("```"):
+        inner = inner[3:]
+    if inner.endswith("```"):
+        inner = inner[:-3]
+    lines = inner.strip("\n").split("\n")
+    fence_overhead = len("```\n\n```")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = fence_overhead
+    for line in lines:
+        add_len = len(line) + 1
+        if current and current_len + add_len > limit:
+            chunks.append("```\n" + "\n".join(current) + "\n```")
+            current, current_len = [], fence_overhead
+        current.append(line)
+        current_len += add_len
+    if current:
+        chunks.append("```\n" + "\n".join(current) + "\n```")
+    embed.add_field(name=name, value=chunks[0], inline=False)
+    for chunk in chunks[1:]:
+        embed.add_field(name="\u200b", value=chunk, inline=False)
+
+
+def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -> str:
+    """Monospace, column-aligned table combining Session and Daily values
+    for every category present in either — same format as FH_Control's
+    player embed. '-' marks a category with no value on that side (never
+    '0', which would misleadingly imply a real recorded zero). Unlike
+    FH_Control's own version, category ordering here goes through
+    fh_report's own _order_stat_items/_is_mission_stat, which also
+    recognizes map-specific special missions by name — FH_Control's
+    simpler "mission" in key.lower() check would miss those."""
+    daily_stats = daily_stats or {}
+    all_keys = set(session_stats.keys()) | set(daily_stats.keys())
+    ordered_keys = [k for k, _ in _order_stat_items({k: 0 for k in all_keys})]
+
+    name_width = max([len(_display_stat_label(k)) for k in ordered_keys] + [len("Category")])
+    session_vals = [_display_stat_value(k, session_stats[k]) for k in ordered_keys if k in session_stats]
+    daily_vals   = [_display_stat_value(k, daily_stats[k]) for k in ordered_keys if k in daily_stats]
+    session_width = max([len(v) for v in session_vals] + [len("Session")])
+    daily_width   = max([len(v) for v in daily_vals] + [len("Daily")])
+
+    header = f"{'Category':<{name_width}}  {'Session':>{session_width}}  {'Daily':>{daily_width}}"
+    lines = [header, "-" * len(header)]
+    for k in ordered_keys:
+        label = _display_stat_label(k)
+        s_val = _display_stat_value(k, session_stats[k]) if k in session_stats else "-"
+        d_val = _display_stat_value(k, daily_stats[k]) if k in daily_stats else "-"
+        lines.append(f"{label:<{name_width}}  {s_val:>{session_width}}  {d_val:>{daily_width}}")
+    return "```\n" + "\n".join(lines) + "\n```"
 
 
 def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
@@ -1668,7 +1784,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
 
     # ── Last seen ───────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
     if last_seen is not None:
         import calendar as _cal
         ts = int(_cal.timegm(last_seen.timetuple()))
@@ -1677,34 +1793,23 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         activity_line = "- **Last seen:** —"
     embed.add_field(name="🕒 __Activity__", value=activity_line, inline=False)
 
-    # ── Daily Stats (full, unfiltered — same level of detail as Session Stats) ─
-    # Only non-zero fields are shown; if everything is zero the section is
-    # omitted entirely (not even a placeholder), per the original spec.
-    # Daily Points shown in the section title itself, not as a separate block.
-    if daily_stats:
-        daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v}
-        if daily_filtered:
-            daily_ordered = _order_stat_items(daily_filtered)
-            daily_lines = "\n".join(f"- **{_display_stat_label(k)}:** {_display_stat_value(k, v)}" for k, v in daily_ordered)
-            embed.add_field(name="\u200b", value="─" * 32, inline=False)
-            embed.add_field(name=f"📅 __Daily Stats__ (D: {_fmt_num(daily_points)})",
-                            value=daily_lines, inline=False)
-
-    # ── Session Stats (full, unfiltered) ───────────────────────────────
-    # Session Points shown in the section title itself.
-    embed.add_field(name="\u200b", value="─" * 32, inline=False)
-    session_title = f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"
-    if session_stats:
-        other_stats = {k: v for k, v in session_stats.items() if k != "Points"}
-        if other_stats:
-            other_ordered = _order_stat_items(other_stats)
-            stat_lines = "\n".join(f"- **{_display_stat_label(k)}:** {_display_stat_value(k, v)}" for k, v in other_ordered)
-            embed.add_field(name=session_title, value=stat_lines, inline=False)
-        else:
-            embed.add_field(name=session_title,
-                            value="_No stats yet — will appear after first flight._", inline=False)
+    # ── Session Stats + Daily Stats, combined into one aligned table ──────
+    # Same format as FH_Control's player embed: one monospace table instead
+    # of two separate bullet-list blocks, so Session and Daily line up
+    # category by category. Points for both are shown in the combined
+    # title; the table itself omits the "Points" key (redundant with that).
+    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
+    other_stats = {k: v for k, v in session_stats.items() if k != "Points"} if session_stats else {}
+    daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v} if daily_stats else {}
+    title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
+    if daily_stats is not None:
+        title_parts.append(f"📅 __Daily__ (D: {_fmt_num(daily_points)})")
+    combined_title = "                                            ".join(title_parts)
+    if other_stats or daily_filtered:
+        _add_table_field(embed, combined_title,
+                         _build_combined_stats_table(other_stats, daily_filtered))
     else:
-        embed.add_field(name=session_title,
+        embed.add_field(name=combined_title,
                         value="_No stats yet — will appear after first flight._", inline=False)
 
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
@@ -1733,13 +1838,13 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if career.get(CAREER_DEATHS, 0) > 0:
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
-        embed.add_field(name="\u200b", value="─" * 32, inline=False)
+        embed.add_field(name="\u200b", value="▬" * 32, inline=False)
         embed.add_field(
             name=f"🏆 __Career Stats__ (R: {_fmt_num(credits)} — {get_rank(credits)})",
             value="\n".join(career_lines), inline=False)
 
     # ── Mission ─────────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value="─" * 32, inline=False)
+    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
     embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only player report")
@@ -1848,6 +1953,7 @@ def _render_layout_tables(
     daily_history: dict | None,
     podium_days: int, podium_top: int,
     podium_combined_days: int, podium_combined_top: int, podium_combined_min3_latest_day: bool,
+    name_to_ucid: dict | None = None,
 ) -> None:
     """Render every table/Podium named in report_layout, in order, onto
     embed. `points_detail` is a dict {"D": "...", "S": "...", "R": "..."} —
@@ -1855,6 +1961,8 @@ def _render_layout_tables(
     comment above for the grammar. Mutates embed in place — mirrors
     _add_podium_field's own convention."""
     layout = (report_layout or "R").strip().upper()
+    if layout == "NONE":
+        return  # campaign progress and bases only — no leaderboard tables
     points_detail = points_detail or {}
     roles_in_layout = [c for c in layout if c in ("R", "S", "D")]
 
@@ -1888,12 +1996,13 @@ def _render_layout_tables(
             if layout == "P":
                 p_lines = _build_podium_table(
                     daily_history or {}, players, days=podium_days, top=podium_top,
-                    strip_callsign_flag=strip_callsign_flag
+                    strip_callsign_flag=strip_callsign_flag, name_to_ucid=name_to_ucid
                 )
             else:
                 p_lines = _build_podium_table(
                     daily_history or {}, players, days=podium_combined_days, top=podium_combined_top,
-                    strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_combined_min3_latest_day
+                    strip_callsign_flag=strip_callsign_flag, min3_latest_day=podium_combined_min3_latest_day,
+                    name_to_ucid=name_to_ucid
                 )
             if p_lines:
                 _add_podium_field(embed, "👑", p_lines)
@@ -2022,7 +2131,8 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
                 sort_zones_by_waypoint: bool = False,
                 waypoint_map: dict | None = None,
                 report_layout: str = "R",
-                points_detail: dict | None = None) -> discord.Embed:
+                points_detail: dict | None = None,
+                name_to_ucid: dict | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data."""
     _now_ts    = int(datetime.now(timezone.utc).timestamp())
     timestamp  = f"<t:{_now_ts}:f>"
@@ -2198,6 +2308,7 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
         podium_days=podium_days, podium_top=podium_top,
         podium_combined_days=podium_combined_days, podium_combined_top=podium_combined_top,
         podium_combined_min3_latest_day=podium_combined_min3_latest_day,
+        name_to_ucid=name_to_ucid,
     )
 
     # Full-width separator — placed at the bottom to fix embed width
@@ -2219,6 +2330,237 @@ def build_embed(zones: dict, players: dict, campaign_name: str,
     embed = _trim_embed(embed)
 
     return embed
+
+
+# ── Per-player identity (UCID-first) ──────────────────────────────────────────
+# Every daily/session figure is keyed by a stable player ID: the player's UCID
+# whenever one can be found (native to the Foothold save file, else from
+# Foothold_Ranks.lua, else from the accumulated name->UCID history kept in
+# daily_snapshot.json), and only as a last resort the in-game name itself
+# (old Foothold saves with no UCID anywhere). Names are for display only.
+# This replaces the old name-keyed model and its mid-day "callsign change"
+# reconciliation, whose edge cases kept losing or duplicating points.
+_UCID_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def _is_ucid(key) -> bool:
+    return isinstance(key, str) and bool(_UCID_RE.fullmatch(key))
+
+
+def _player_id(name: str, name_to_ucid: dict) -> str:
+    return name_to_ucid.get(name) or name
+
+
+def _group_by_player_id(campaign_stats: dict, session_stats_raw: dict,
+                        name_to_ucid: dict) -> tuple[dict, dict, dict]:
+    """Regroup name-keyed campaign points and session stats by player ID.
+    Several names can share one ID: old (name-keyed) Foothold saves create a
+    brand-new playerStats entry, starting from zero, every time a player
+    renames — the old entry keeps what was earned under the old name — so
+    summing all entries of one UCID gives the player's real total. Newer
+    UCID-keyed saves only ever have one entry per UCID, so nothing changes.
+    Returns (campaign_by_id, session_by_id, names_by_id) — names_by_id holds,
+    per ID, the name with the highest points (the one most likely in use)."""
+    campaign_by_id: dict = {}
+    best_name: dict = {}
+    for name, pts in campaign_stats.items():
+        pid = _player_id(name, name_to_ucid)
+        campaign_by_id[pid] = campaign_by_id.get(pid, 0) + pts
+        if pid not in best_name or pts > campaign_stats.get(best_name[pid], 0):
+            best_name[pid] = name
+    session_by_id: dict = {}
+    for name, stats in session_stats_raw.items():
+        pid = _player_id(name, name_to_ucid)
+        acc = session_by_id.setdefault(pid, {})
+        for key, val in stats.items():
+            acc[key] = acc.get(key, 0) + val
+        best_name.setdefault(pid, name)
+    return campaign_by_id, session_by_id, best_name
+
+
+_MAX_ALIASES = 5  # past names kept per player (names active in the current save are always kept)
+
+
+def _pack_daily_snapshot(d: dict, live_names: set | None = None) -> dict:
+    """Internal (section-per-field) snapshot -> on-disk format (format_version 2), where
+    everything about a player lives in ONE block under their ID (UCID, or
+    the name only for UCID-less old saves):
+        players: { id: { name, aliases?, baseline?, today?, carry? } }
+    with baseline/today/carry = {points?, stats?}. Empty parts are omitted
+    to keep the file small and readable. A player's past names ("aliases")
+    replace the old top-level name_to_ucid section; at most _MAX_ALIASES
+    are kept, plus any name still active in the current save (live_names)."""
+    players: dict = {}
+
+    def blk(pid):
+        return players.setdefault(pid, {})
+
+    for pid, name in (d.get("names") or {}).items():
+        blk(pid)["name"] = name
+    for part, pts_key, st_key in (("baseline", "snapshot", "stats_snapshot"),
+                                  ("today", "last_daily", "last_daily_stats"),
+                                  ("carry", "carry_over", "stats_carry_over")):
+        for pid, v in (d.get(pts_key) or {}).items():
+            blk(pid).setdefault(part, {})["points"] = v
+        for pid, st in (d.get(st_key) or {}).items():
+            if st:
+                blk(pid).setdefault(part, {})["stats"] = st
+    for name, ucid in (d.get("name_to_ucid") or {}).items():
+        if not ucid:
+            continue
+        b = blk(ucid)
+        if b.get("name") == name:
+            continue
+        b.setdefault("aliases", [])
+        if name not in b["aliases"]:
+            b["aliases"].append(name)
+    live_names = live_names or set()
+    for b in players.values():                    # every block carries a name
+        if "name" not in b and b.get("aliases"):
+            b["name"] = b["aliases"].pop()
+        if b.get("aliases"):
+            # Keep at most _MAX_ALIASES, most recently learned last — but
+            # never drop a name still active in the current save: in old
+            # UCID-less saves that alias is what ties that entry to the
+            # player (dropping it would count their whole total as "today").
+            live = [a for a in b["aliases"] if a in live_names]
+            past = [a for a in b["aliases"] if a not in live_names]
+            room = max(0, _MAX_ALIASES - len(live))
+            b["aliases"] = (past[-room:] if room else []) + live
+        if "aliases" in b and not b["aliases"]:
+            del b["aliases"]
+    ordered = {pid: {k: b[k] for k in ("name", "aliases", "baseline", "today", "carry") if k in b}
+               for pid, b in players.items()}
+    return {
+        "format_version":       2,
+        "date":                 d.get("date", ""),
+        "persistence_filename": d.get("persistence_filename", ""),
+        "players":              ordered,
+        "known_stat_keys":      d.get("known_stat_keys", []),
+    }
+
+
+def _unpack_daily_snapshot(raw: dict) -> dict:
+    """On-disk per-player format -> internal section-per-field dict (the shape the
+    daily computation works on). Older formats (pre-12.2.0 name-keyed, or
+    the short-lived per-section UCID format) are returned unchanged — they
+    already have that shape, and _normalize_snapshot_ids re-keys them."""
+    # Detected by structure ("players" key), not by format_version.
+    if "players" not in (raw or {}):
+        return raw or {}
+    out = {
+        "date": raw.get("date", ""), "persistence_filename": raw.get("persistence_filename", ""),
+        "known_stat_keys": raw.get("known_stat_keys", []),
+        "snapshot": {}, "stats_snapshot": {}, "last_daily": {}, "last_daily_stats": {},
+        "carry_over": {}, "stats_carry_over": {}, "names": {}, "name_to_ucid": {},
+    }
+    for pid, b in (raw.get("players") or {}).items():
+        if "name" in b:
+            out["names"][pid] = b["name"]
+            if _is_ucid(pid):
+                out["name_to_ucid"][b["name"]] = pid
+        for alias in b.get("aliases") or []:
+            out["name_to_ucid"][alias] = pid
+        for part, pts_key, st_key in (("baseline", "snapshot", "stats_snapshot"),
+                                      ("today", "last_daily", "last_daily_stats"),
+                                      ("carry", "carry_over", "stats_carry_over")):
+            p = b.get(part) or {}
+            if "points" in p:
+                out[pts_key][pid] = p["points"]
+            if p.get("stats"):
+                out[st_key][pid] = p["stats"]
+    return out
+
+
+def _normalize_snapshot_ids(snap: dict, name_to_ucid: dict, live_names: set) -> dict:
+    """Re-key every section of daily_snapshot.json by the CURRENT player ID.
+    Runs every cycle, entirely in memory. In the steady state it changes
+    nothing (keys are already UCIDs). It matters in two cases:
+      - a pre-12.2.0 name-keyed file: converted on the fly, no separate
+        migration step (and no one-off code left behind);
+      - an old UCID-less save where a player's UCID only becomes known
+        mid-day (e.g. once Foothold_Ranks.lua has them): their baseline,
+        stored under their name until then, follows them to the new UCID
+        key instead of being orphaned — otherwise their whole campaign
+        total would suddenly count as "today".
+    When several keys map to one ID: the ID's own key wins if present (it's
+    the continuing baseline); otherwise entries under names still active in
+    the save are summed (old-format saves can have several live entries per
+    player); entries under names no longer active are not added on top —
+    pre-12.2.0 rename handling left stale duplicate copies behind (the same
+    player under two names, both holding the same value). If none is
+    active, the largest value is kept."""
+    def _merge(section: dict, is_stats: bool) -> dict:
+        grouped: dict = {}
+        for key, val in (section or {}).items():
+            grouped.setdefault(_player_id(key, name_to_ucid), []).append((key, val))
+        out: dict = {}
+        for pid, entries in grouped.items():
+            own = [v for k, v in entries if k == pid]
+            live = [v for k, v in entries if k in live_names]
+            if own:
+                out[pid] = own[0]
+            elif live:
+                if is_stats:
+                    acc: dict = {}
+                    for st in live:
+                        for k, v in st.items():
+                            acc[k] = acc.get(k, 0) + v
+                    out[pid] = acc
+                else:
+                    out[pid] = sum(live)
+            else:
+                if is_stats:
+                    acc = {}
+                    for _, st in entries:
+                        for k, v in st.items():
+                            acc[k] = max(acc.get(k, 0), v)
+                    out[pid] = acc
+                else:
+                    out[pid] = max(v for _, v in entries)
+        return out
+
+    new = dict(snap)
+    for key in ("snapshot", "last_daily", "carry_over"):
+        new[key] = _merge(snap.get(key), is_stats=False)
+    for key in ("stats_snapshot", "last_daily_stats", "stats_carry_over"):
+        new[key] = _merge(snap.get(key), is_stats=True)
+    names: dict = {}
+    for key, name in (snap.get("names") or {}).items():
+        names[_player_id(key, name_to_ucid)] = name
+    for key in list((snap.get("snapshot") or {})) + list((snap.get("stats_snapshot") or {})):
+        pid = _player_id(key, name_to_ucid)
+        if not _is_ucid(key) and (pid not in names or key in live_names):
+            names[pid] = key
+    new["names"] = names
+    return new
+
+
+def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
+                     ucid_to_rank_name: dict | None = None) -> dict:
+    """Re-key an ID-keyed dict by the name the leaderboard tables use: the
+    player's name in Foothold_Ranks.lua (matched by UCID) when available,
+    else the name seen in the save file (or the ID itself when it IS the
+    name, for old UCID-less saves). This lets every table attach daily and
+    session figures by exact name, without callsign-stripping guesswork.
+    Pass ucid_to_rank_name when converting several dicts in a row, so it's
+    built once."""
+    if ucid_to_rank_name is None:
+        ucid_to_rank_name = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
+    out: dict = {}
+    for pid, val in (by_id or {}).items():
+        name = ucid_to_rank_name.get(pid) or names_by_id.get(pid) or pid
+        if name in out:
+            if isinstance(val, dict):
+                merged = dict(out[name])
+                for k, v in val.items():
+                    merged[k] = merged.get(k, 0) + v
+                out[name] = merged
+            else:
+                out[name] = out[name] + val
+        else:
+            out[name] = dict(val) if isinstance(val, dict) else val
+    return out
 
 
 # ── Server selection for /fh_report commands ──────────────────────────────────
@@ -2842,7 +3184,8 @@ class FH_Report(Plugin):
 
     def _load_daily_history(self, saves_dir: str) -> dict:
         """Load daily history from disk. Returns {date_str: [event, ...]},
-        where each event is {"campaign_restart": bool, "top": [{"name","points"}, ...]}.
+        where each event is {"campaign_restart": bool, "top": [{"name","points"[,"ucid"]}, ...]}
+        ("ucid" present on entries written from v12.1.1 on).
         A date can have more than one event if a campaign restart happened
         on the same calendar day as the normal daily rollover — both are
         kept, never overwritten."""
@@ -2878,8 +3221,11 @@ class FH_Report(Plugin):
         )
 
     def _load_daily_snapshot(self, saves_dir: str) -> dict:
-        """Load daily snapshot from disk. Returns dict with keys:
-        'date' (YYYY-MM-DD), 'snapshot' {name: pts}, 'stats_snapshot' {name: {stat: val}}."""
+        """Load daily_snapshot.json from disk, exactly as stored (since
+        12.2.0: one block per player under their UCID — see
+        _pack_daily_snapshot). Callers needing the internal per-field shape
+        pass it through _unpack_daily_snapshot, which also accepts the older
+        formats. Returns {} if missing or unreadable."""
         path = self._get_daily_file(saves_dir)
         if os.path.exists(path):
             try:
@@ -2903,15 +3249,44 @@ class FH_Report(Plugin):
             log=self.log
         )
 
+    def _identify_players(self, snap: dict, campaign_stats: dict, session_stats_raw: dict,
+                          players: dict, name_to_ucid_native: dict) -> tuple[dict, dict, dict, dict]:
+        """Build the full name -> UCID map and regroup the save file's
+        name-keyed data by player ID. Map priority, lowest to highest: every
+        name ever seen (accumulated in daily_snapshot.json — lets old names
+        in UCID-less saves still resolve), Foothold_Ranks.lua (current name
+        per UCID), and the save file's own native UCIDs. Returns
+        (campaign_by_id, session_by_id, names_by_id, name_to_ucid). `snap` is
+        this cycle's already-loaded daily_snapshot.json (read once per cycle)."""
+        history_map = _unpack_daily_snapshot(snap).get("name_to_ucid") or {}
+        ranks_map   = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
+        name_to_ucid = {**history_map, **ranks_map, **(name_to_ucid_native or {})}
+        campaign_by_id, session_by_id, names_by_id = _group_by_player_id(
+            campaign_stats, session_stats_raw, name_to_ucid)
+        return campaign_by_id, session_by_id, names_by_id, name_to_ucid
+
     async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
                               session_stats_raw: dict, reset_hour: int, node,
                               persistence_filename: str | None = None,
-                              name_to_ucid: dict | None = None) -> tuple[dict, dict, bool]:
+                              name_to_ucid: dict | None = None,
+                              names_by_id: dict | None = None,
+                              live_names: set | None = None,
+                              snap: dict | None = None) -> tuple[dict, dict, bool]:
         """Compute today's points and today's combat stats for each player by
         comparing current campaign values against the snapshot taken at reset_hour UTC.
         Returns (daily_pts, daily_stats, campaign_restarted):
-          daily_pts   = {name: daily_points}      — only players with daily_pts > 0
-          daily_stats = {name: {stat_key: delta}} — used for the daily card (show_daily_card)
+          daily_pts   = {player_id: daily_points}      — only players with daily_pts > 0
+          daily_stats = {player_id: {stat_key: delta}} — used for the daily card (show_daily_card)
+
+        Since 12.2.0 everything here is keyed by PLAYER ID (UCID, or the name
+        only for old saves with no UCID anywhere) — see _group_by_player_id.
+        campaign_stats / session_stats_raw arrive already grouped by ID;
+        names_by_id is used only to label Podium entries; live_names (the raw
+        names active in the current save) feeds _normalize_snapshot_ids,
+        which re-keys the stored baseline to current IDs every cycle (this is
+        also what converts a pre-12.2.0 name-keyed file, with no separate
+        migration step). `snap` lets the caller pass the file it already read
+        this cycle, so it's read only once.
 
         Manual reset: this plugin has no commands. To manually reset the daily
         counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
@@ -2919,17 +3294,9 @@ class FH_Report(Plugin):
         counter restarts at 0 rather than retroactively counting everything
         accumulated up to that point.
 
-        Mid-campaign callsign-change reconciliation: Foothold's playerStats
-        is keyed by in-game name, not UCID — so a player who changes callsign
-        mid-campaign gets a BRAND NEW playerStats entry under the new name,
-        with no history at all under it. Left unhandled, this would look
-        exactly like a new player joining, and their entire accumulated
-        total under the new name would be misattributed as "today's gain"
-        the moment it first appears (name_to_ucid, built from the already-
-        parsed Foothold_Ranks.lua data, is used to detect this: if a name
-        that's new to our snapshot shares a UCID with a name we already had
-        tracked, it's a rename, not a new player, and today's already-earned
-        total is carried across to the new name automatically).
+        Renames need no special handling: a renamed player keeps the same ID,
+        so their baseline and today's totals simply carry on. (The former
+        name-based "callsign change reconciliation" was removed in 12.2.0.)
 
         Mission/map reset handling: a mid-day mission or map change (a new
         Foothold save file, or the same file wiped in place) must NOT
@@ -2951,7 +3318,12 @@ class FH_Report(Plugin):
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
 
-        snap                = self._load_daily_snapshot(saves_dir)
+        if snap is None:
+            snap = self._load_daily_snapshot(saves_dir)
+        snap_on_disk = snap          # exactly what's on disk, to skip no-op writes below
+        snap = _unpack_daily_snapshot(snap)
+        if snap:
+            snap = _normalize_snapshot_ids(snap, name_to_ucid or {}, live_names or set())
         snap_date           = snap.get("date", "")
         snapshot            = snap.get("snapshot", {})
         stats_snapshot      = snap.get("stats_snapshot", {})
@@ -2961,6 +3333,8 @@ class FH_Report(Plugin):
         stats_carry_over    = snap.get("stats_carry_over", {})
         last_persistence_fn = snap.get("persistence_filename", "")
         name_to_ucid_snapshot = snap.get("name_to_ucid", {})
+        names_snapshot        = snap.get("names", {})
+        names_by_id           = names_by_id or {}
         # Stat categories ever seen across ALL cycles, not just the current
         # in-memory stats_snapshot — a plain set(list) accumulator that only
         # grows. Deriving "trusted" categories solely from stats_snapshot
@@ -2971,43 +3345,6 @@ class FH_Report(Plugin):
         # the rest of that day (Session wasn't affected — it doesn't use
         # this gate). Persisting the set survives that empty moment.
         known_stat_keys = set(snap.get("known_stat_keys", []))
-
-        # ── Mid-campaign callsign-change reconciliation ─────────────────────
-        # See docstring above. Runs BEFORE mission-reset detection since a
-        # single rename shouldn't be confused with one (other players' names
-        # still overlap fine with the snapshot in that case).
-        if name_to_ucid and name_to_ucid_snapshot:
-            ucid_to_old_name = {u: n for n, u in name_to_ucid_snapshot.items() if u}
-            for new_name in list(campaign_stats.keys()):
-                if new_name in snapshot:
-                    continue  # already tracked under this exact name
-                new_ucid = name_to_ucid.get(new_name)
-                if not new_ucid:
-                    continue
-                old_name = ucid_to_old_name.get(new_ucid)
-                if not old_name or old_name == new_name or old_name in campaign_stats:
-                    # No match, no-op rename, or the "old" name is still
-                    # present in playerStats too (so it's genuinely a
-                    # different, unrelated player, not a rename) — skip.
-                    continue
-                migrated_pts = last_daily_saved.get(old_name, 0)
-                if migrated_pts > 0:
-                    carry_over[new_name] = carry_over.get(new_name, 0) + migrated_pts
-                migrated_stats = last_daily_stats_saved.get(old_name, {})
-                if migrated_stats:
-                    merged = dict(stats_carry_over.get(new_name, {}))
-                    for key, val in migrated_stats.items():
-                        if val > merged.get(key, 0):
-                            merged[key] = val
-                    stats_carry_over[new_name] = merged
-                snapshot[new_name] = campaign_stats[new_name]
-                if new_name in session_stats_raw:
-                    stats_snapshot[new_name] = dict(session_stats_raw[new_name])
-                self.log.info(
-                    f"FH_Report: detected a mid-campaign callsign change for "
-                    f"{saves_dir}: '{old_name}' -> '{new_name}' (same UCID) — "
-                    f"today's totals carried over to the new name."
-                )
 
         # ── Mid-day mission/map reset detection (never a Podium event) ─────
         filename_changed = bool(last_persistence_fn) and bool(persistence_filename) and \
@@ -3082,9 +3419,31 @@ class FH_Report(Plugin):
             if closing_daily:
                 top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
                 history    = self._load_daily_history(saves_dir)
+                # Store each player's UCID alongside the name it had that day,
+                # so the Podium can later show their CURRENT name and rank
+                # even after a rename (names alone can't be matched reliably
+                # — e.g. "Viper**" -> "Viper" isn't a callsign-prefix change).
+                _top_entries = []
+                for pid, p in top_list:
+                    _entry = {"name": names_by_id.get(pid) or names_snapshot.get(pid) or pid,
+                              "points": p}
+                    if _is_ucid(pid):
+                        _entry["ucid"] = pid
+                    _top_entries.append(_entry)
+                # Same write, no extra I/O: fill in the UCID of any older
+                # entries that lack it (recorded before 12.1.1), so the
+                # Podium never needs the alias history to resolve them —
+                # which is what allows aliases to be capped. A no-op once
+                # every resolvable entry has its UCID.
+                _n2u = {**name_to_ucid_snapshot, **(name_to_ucid or {})}
+                for _events in history.values():
+                    for _event in _events:
+                        for _e in _event.get("top") or []:
+                            if not _e.get("ucid") and _n2u.get(_e.get("name")):
+                                _e["ucid"] = _n2u[_e["name"]]
                 history.setdefault(snap_date, []).append({
                     "campaign_restart": False,
-                    "top": [{"name": n, "points": p} for n, p in top_list],
+                    "top": _top_entries,
                 })
                 await self._save_daily_history(saves_dir, history, node)
 
@@ -3188,7 +3547,7 @@ class FH_Report(Plugin):
         # including 'last_daily' and the carry-over buckets, plus the
         # current persistence filename (used to detect the next mission
         # change) and reset markers.
-        await self._save_daily_snapshot(saves_dir, {
+        new_snap = {
             "date":                 today_str if (first_run or date_reset_due) else (snap_date or today_str),
             "snapshot":             snapshot,
             "stats_snapshot":       stats_snapshot,
@@ -3198,8 +3557,15 @@ class FH_Report(Plugin):
             "stats_carry_over":     stats_carry_over,
             "persistence_filename": persistence_filename or last_persistence_fn,
             "name_to_ucid":         {**name_to_ucid_snapshot, **(name_to_ucid or {})},
+            "names":                {**names_snapshot, **names_by_id},
             "known_stat_keys":      sorted(known_stat_keys),
-        }, node)
+        }
+        # Only write when something actually changed — with nobody earning
+        # points (e.g. an empty server) every cycle would otherwise rewrite
+        # an identical file, over the network for remote nodes.
+        new_snap = _pack_daily_snapshot(new_snap, live_names)
+        if new_snap != snap_on_disk:
+            await self._save_daily_snapshot(saves_dir, new_snap, node)
 
         return daily, daily_stats, campaign_restarted
 
@@ -3317,11 +3683,14 @@ class FH_Report(Plugin):
         # data is kept warm on every cycle regardless of which single
         # group is actually showing this time, so nothing goes stale or
         # has to be rebuilt in a rush the moment its group comes back up.
-        raw_layout = str(cfg.get("report_layout") or "R").strip().upper()
-        needs_daily = ("D" in raw_layout) or ("P" in raw_layout) or any(
+        # "none" groups (embed with campaign progress and bases only) never
+        # need daily data; points_detail_* only matters if some table shows.
+        raw_layout = ",".join(g for g in str(cfg.get("report_layout") or "R").strip().upper().split(",")
+                              if g.strip() and g.strip() != "NONE")
+        needs_daily = ("D" in raw_layout) or ("P" in raw_layout) or (bool(raw_layout) and any(
             "D" in str(cfg.get(f"points_detail_{role}") or "").upper()
             for role in ("D", "S", "R")
-        )
+        ))
         # Also run daily-points computation (and its campaign-restart
         # detection) whenever waypoint sorting is enabled, regardless of
         # report_layout — that's the signal used to know when to refresh
@@ -3338,6 +3707,15 @@ class FH_Report(Plugin):
         # points into carry_over (see _compute_daily_points' docstring).
         # Skipping this call on an empty campaign_stats silently freezes
         # daily_snapshot.json at the previous mission's state forever.
+        # Group this cycle's save-file data by player ID (UCID-first) — used
+        # for both the daily computation and the Session figures below.
+        # Read daily_snapshot.json only when the daily computation will run
+        # (it's also what keeps its name->UCID history up to date) — and then
+        # only once per cycle, shared with _compute_daily_points below.
+        daily_snap = self._load_daily_snapshot(saves_dir) if needs_daily else {}
+        campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
+            daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
+        live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
             reset_hour    = int(cfg.get("daily_reset_hour") or 0)
             # Override with day-specific hour if daily_reset_schedule is defined
@@ -3347,22 +3725,10 @@ class FH_Report(Plugin):
                 today_key = day_keys[datetime.now(timezone.utc).weekday()]
                 if today_key in schedule:
                     reset_hour = int(schedule[today_key])
-            # Prefer the native ucidToName from THIS SAME file (Foothold
-            # 4.9.1+ — confirmed with Leka, lives right alongside
-            # playerStats). Falls back to cross-referencing the already-
-            # parsed Foothold_Ranks.lua data (older Foothold versions that
-            # don't have this field in the mission progress file yet).
-            name_to_ucid_fallback = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
-            # Merge per-player, not "pick one source entirely" — during a
-            # transition period right after updating Foothold to 4.9.1+,
-            # players already in playerStats from BEFORE the update may not
-            # yet have an entry in the native ucidToName table (only
-            # populated for them once they reconnect). Native takes
-            # priority per-name where available; the older Ranks-based
-            # cross-reference still fills in anyone the native table
-            # doesn't have yet, instead of being discarded wholesale.
-            name_to_ucid = {**name_to_ucid_fallback, **name_to_ucid_native}
-            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, source_node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
+            daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
+                saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
+                os.path.basename(persistence_file) if persistence_file else None,
+                name_to_ucid, names_by_id, live_names, daily_snap)
 
         # Detect if session data exists (any player with session_points > 0)
         has_session = any(d.get("session_points", 0) > 0 for d in players.values())
@@ -3417,6 +3783,7 @@ class FH_Report(Plugin):
             player_cmd_hint = str(cfg.get("player_cmd_hint_text")
                                   or "Type /fh_report player to see your own stats.")
 
+        u2rn = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
         embed = build_embed(
             zones               = zones,
             players             = players,
@@ -3431,20 +3798,20 @@ class FH_Report(Plugin):
             strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign")),
             zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16))),
             max_pilots_2t       = cfg.get("max_pilots_2t") or None,
-            campaign_stats      = campaign_stats,
+            campaign_stats      = _by_display_name(campaign_by_id, players, names_by_id, u2rn),
             report_layout       = current_layout,
             points_detail       = current_detail,
             bar_style_emoji     = _bool_cfg(cfg.get("bar_style_emoji")),
-            daily_points        = daily_pts,
+            daily_points        = _by_display_name(daily_pts, players, names_by_id, u2rn),
             max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None,
             show_pilot_card     = _bool_cfg(cfg.get("show_pilot_card")),
             pilot_card_icon     = str(cfg.get("pilot_card_icon") or "🔸"),
             show_session_card   = _bool_cfg(cfg.get("show_session_card")),
             session_card_icon   = str(cfg.get("session_card_icon") or "🔸"),
-            session_stats_raw   = session_stats_raw,
+            session_stats_raw   = _by_display_name(session_by_id, players, names_by_id, u2rn),
             show_daily_card     = _bool_cfg(cfg.get("show_daily_card")),
             daily_card_icon     = str(cfg.get("daily_card_icon") or "🔸"),
-            daily_stats_raw     = daily_stats,
+            daily_stats_raw     = _by_display_name(daily_stats, players, names_by_id, u2rn),
             player_cmd_hint     = player_cmd_hint,
             daily_history       = daily_history_data if "P" in current_layout else None,
             podium_days         = int(cfg.get("podium_days") if cfg.get("podium_days") is not None else 7),
@@ -3454,6 +3821,10 @@ class FH_Report(Plugin):
             podium_combined_min3_latest_day = _bool_cfg(cfg.get("podium_combined_min3_latest_day")),
             sort_zones_by_waypoint = sort_zones_by_wp,
             waypoint_map        = waypoint_map,
+            # Full name -> UCID map for this cycle (every past name each
+            # player has had, plus current ones) — lets the Podium identify
+            # old entries by UCID and show the player's current name/rank.
+            name_to_ucid        = name_to_ucid if "P" in current_layout else None,
         )
 
         try:
@@ -3700,13 +4071,23 @@ class FH_Report(Plugin):
 
     @fh_report.command(name="player", description="Show a player's rank, session and career stats (read-only).")
     @app_commands.describe(
-        player_name="Player name — admin only. Leave empty to see your own stats.",
-        server="Which server — only needed if more than one is configured."
+        _server="Which server — only needed if more than one is configured.",
+        player_name="Player name — admin only. Leave empty to see your own stats."
     )
+    @app_commands.rename(_server="server")
     @app_commands.autocomplete(player_name=_autocomplete_report_player)
     async def player(self, interaction: discord.Interaction,
-                     player_name: str | None = None,
-                     server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+                     _server: app_commands.Transform[Server, _FHServerTransformer] | None = None,
+                     player_name: str | None = None):
+        # DCSServerBot's core has "magic" tied to a parameter LITERALLY
+        # named `server`: with server-specific channels defined (and no
+        # central admin channel), it auto-substitutes the server from
+        # channel context on its own — bypassing our own Transform/
+        # autocomplete logic entirely, before our command body ever runs
+        # (per Special K). Internally naming it `_server` and using
+        # @app_commands.rename to still show "server" to the user avoids
+        # that name-based magic; everything below this line is unchanged.
+        server = _server
         ephemeral = utils.get_ephemeral(interaction)
         await interaction.response.defer(ephemeral=ephemeral)
 
@@ -3826,22 +4207,27 @@ class FH_Report(Plugin):
 
         data = players[match]
 
-        # Session points (with callsign-stripped fallback, mirrors build_embed)
-        s_pts = campaign_stats.get(match, 0)
-        if s_pts == 0:
-            for cs_name, cs_val in campaign_stats.items():
-                if strip_callsign(cs_name) == strip_callsign(match):
-                    s_pts = cs_val
-                    break
+        # Same UCID-first identity as the periodic embed: regroup the save
+        # file's data by player ID, then re-key it by the Foothold_Ranks.lua
+        # name the roster (and `match`) uses. The callsign-stripped name
+        # comparison is kept only as a fallback for UCID-less saves.
+        daily_snap = self._load_daily_snapshot(saves_dir)   # read once per cycle
+        campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
+            daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
+        u2rn     = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
+        cs_disp  = _by_display_name(campaign_by_id, players, names_by_id, u2rn)
+        srs_disp = _by_display_name(session_by_id, players, names_by_id, u2rn)
 
-        # Session stats raw (with callsign-stripped fallback)
-        s_stats = session_stats_raw.get(match)
-        if s_stats is None:
-            for srs_name, srs_val in session_stats_raw.items():
-                if strip_callsign(srs_name) == strip_callsign(match):
-                    s_stats = srs_val
-                    break
-        s_stats = s_stats or {}
+        def _lookup(by_name: dict, default):
+            if match in by_name:
+                return by_name[match]
+            for k, v in by_name.items():
+                if strip_callsign(k) == strip_callsign(match):
+                    return v
+            return default
+
+        s_pts   = _lookup(cs_disp, 0)
+        s_stats = _lookup(srs_disp, None) or {}
 
         # Daily points — reuse the same snapshot-based computation as the embed
         reset_hour = int(cfg.get("daily_reset_hour") or 0)
@@ -3851,25 +4237,12 @@ class FH_Report(Plugin):
             today_key = day_keys[datetime.now(timezone.utc).weekday()]
             if today_key in schedule:
                 reset_hour = int(schedule[today_key])
-        name_to_ucid_fallback = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
-        # Merge per-player, not "pick one source entirely" — during a
-        # transition period right after updating Foothold to 4.9.1+,
-        # players already in playerStats from BEFORE the update may not
-        # yet have an entry in the native ucidToName table (only
-        # populated for them once they reconnect). Native takes
-        # priority per-name where available; the older Ranks-based
-        # cross-reference still fills in anyone the native table
-        # doesn't have yet, instead of being discarded wholesale.
-        name_to_ucid = {**name_to_ucid_fallback, **name_to_ucid_native}
-        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(saves_dir, campaign_stats, session_stats_raw, reset_hour, node, os.path.basename(persistence_file) if persistence_file else None, name_to_ucid)
-        d_pts     = daily_pts_all.get(match, 0)
-        d_stats   = daily_stats_all.get(match)
-        if d_stats is None:
-            for ds_name, ds_val in daily_stats_all.items():
-                if strip_callsign(ds_name) == strip_callsign(match):
-                    d_stats = ds_val
-                    break
-        d_stats = d_stats or {}
+        daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
+            saves_dir, campaign_by_id, session_by_id, reset_hour, node,
+            os.path.basename(persistence_file) if persistence_file else None,
+            name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap)
+        d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
+        d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
         # UCID + last_seen from DCSServerBot core tables
         ucid      = data.get("ucid")
@@ -3907,11 +4280,15 @@ class FH_Report(Plugin):
         date_from="Start date (YYYY-MM-DD)",
         date_to="End date (YYYY-MM-DD)",
         top="Show the top N positions for each day (1-50)",
-        server="Which server — only needed if more than one is configured."
+        _server="Which server — only needed if more than one is configured."
     )
+    @app_commands.rename(_server="server")
     async def podium(self, interaction: discord.Interaction,
                      date_from: str, date_to: str, top: app_commands.Range[int, 1, 50],
-                     server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+                     _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        # See player()'s comment above on why this is `_server` + rename,
+        # not a plain `server` parameter.
+        server = _server
         ephemeral = utils.get_ephemeral(interaction)
         await interaction.response.defer(ephemeral=ephemeral)
 
@@ -3978,7 +4355,8 @@ class FH_Report(Plugin):
 
         podium_lines = _build_podium_table(
             filtered_history, players, days=0, top=top,
-            strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign"))
+            strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")),
+            name_to_ucid=_unpack_daily_snapshot(self._load_daily_snapshot(saves_dir)).get("name_to_ucid") or {}
         )
         if not podium_lines:
             await interaction.followup.send(
