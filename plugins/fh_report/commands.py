@@ -61,6 +61,93 @@ async def _do_script(server, lua: str) -> None:
     await server.send_to_dcs({"command": "do_script", "script": lua})
 
 
+# ── Lua table helpers (brace counting) ───────────────────────────────────────
+
+def _lua_block(text: str, brace_pos: int) -> tuple[str, int]:
+    """`brace_pos` is the index of a '{' in `text`. Returns (inner content,
+    index just past the matching '}'), using brace counting so it's robust
+    to any indentation/nesting in Foothold's Lua files."""
+    depth, i, n = 1, brace_pos + 1, len(text)
+    while i < n and depth > 0:
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    return text[brace_pos + 1:i - 1], i
+
+
+def _lua_table(text: str, pattern: str) -> str | None:
+    """Inner content of the first table whose opening matches `pattern`
+    (a regex ending in `\\{`), or None if not found."""
+    m = re.search(pattern, text)
+    if not m:
+        return None
+    return _lua_block(text, m.end() - 1)[0]
+
+
+def _lua_entries(block: str, key_pattern: str):
+    """Yield (key, inner) for every `["key"]={...}` (or single-quoted) whose
+    key matches `key_pattern`."""
+    for m in re.finditer(r"\[[\"'](" + key_pattern + r")[\"']\]\s*=\s*\{", block):
+        yield m.group(1), _lua_block(block, m.end() - 1)[0]
+
+
+def _lua_numbers(block: str, skip: tuple[str, ...] = ()) -> dict:
+    """{key: int|float} for every quoted-key numeric assignment in `block`."""
+    out = {}
+    for m in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', block):
+        key, val = m.group(1), m.group(2)
+        if key not in skip:
+            out[key] = float(val) if "." in val else int(val)
+    return out
+
+
+def _lua_num_str(value: float) -> str:
+    return str(int(value)) if float(value) == int(value) else str(value)
+
+
+def _set_lua_entry_number(text: str, section_pattern: str, entry_key: str,
+                          field: str, value: float) -> str:
+    """Set the first `[field]=<number>` inside entry `[entry_key]={...}` of
+    the table matched by `section_pattern`. Returns `text` unchanged if the
+    section, entry or field isn't found."""
+    sm = re.search(section_pattern, text)
+    if not sm:
+        return text
+    sec_open = sm.end() - 1
+    sec_inner, _ = _lua_block(text, sec_open)
+    em = re.search(r"\[[\"']" + re.escape(entry_key) + r"[\"']\]\s*=\s*\{", sec_inner)
+    if not em:
+        return text
+    e_open = sec_open + 1 + em.end() - 1
+    _, e_end = _lua_block(text, e_open)
+    lua_val = _lua_num_str(value)
+    new_block = re.sub(
+        r"(\[[\"']" + re.escape(field) + r"[\"']\]\s*=\s*)-?\d+(?:\.\d+)?",
+        lambda m: m.group(1) + lua_val, text[e_open:e_end], count=1
+    )
+    return text[:e_open] + new_block + text[e_end:]
+
+
+_RANKS_PLAYERS_RE  = r"RankSave\[[\"']players[\"']\]\s*=\s*\{"
+_PLAYER_STATS_RE   = r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{"
+_UCID_TO_NAME_RE   = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]"
+_ANY_KEY           = r"[^\"']+"
+_UCID_KEY          = r"[a-f0-9]{32}"
+
+
+def _ranks_version(content: str) -> int | None:
+    m = re.search(r'RankSave\[["\']playerIdentityVersion["\']\]\s*=\s*(\d+)', content)
+    return int(m.group(1)) if m else None
+
+
+def _stats_version(content: str) -> int | None:
+    m = re.search(r'zonePersistance\[["\']playerStatsIdentityVersion["\']\]\s*=\s*(\d+)', content)
+    return int(m.group(1)) if m else None
+
+
 class _UpdateReadCache:
     """Reuse remote file reads within one server's current update only.
 
@@ -283,43 +370,22 @@ async def parse_zones(filepath: str, node) -> dict:
         # A slot [N] is active if it contains at least one unit name string.
         # We find the remainingUnits block then count non-empty slot entries.
         active_slots = 0
-        if level > 0:
-            # Find remainingUnits block start
-            ru_key = '"remainingUnits"' if '"remainingUnits"' in block else "'remainingUnits'"
-            ru_start = block.find(f'[{ru_key}]={{')
-            if ru_start == -1:
-                ru_start = block.find("[" + ru_key + "]={")
-            if ru_start != -1:
-                # Extract remainingUnits block using brace counting
-                bs = block.find('{', ru_start)
-                depth, j = 1, bs + 1
-                while j < len(block) and depth > 0:
-                    if block[j] == '{': depth += 1
-                    elif block[j] == '}': depth -= 1
-                    j += 1
-                ru_block = block[bs + 1:j - 1]
-                # Count active slots across ALL slots (1..level), not just the
-                # first 5. This ensures zones with active slots beyond position 5
-                # (e.g. a base with damaged early slots but live late slots) are
-                # correctly shown as still having active defenses.
-                # Display is capped at 5 symbols — showing "how many remain active"
-                # up to that cap, prioritizing active slots over slot position.
-                for idx in range(1, level + 1):
-                    # Find [idx]={ using brace counting
-                    slot_key = f'[{idx}]={{'
-                    sk = ru_block.find(slot_key)
-                    if sk == -1:
-                        continue
-                    sb = sk + len(slot_key) - 1
-                    sd, sj = 1, sb + 1
-                    while sj < len(ru_block) and sd > 0:
-                        if ru_block[sj] == '{': sd += 1
-                        elif ru_block[sj] == '}': sd -= 1
-                        sj += 1
-                    slot_content = ru_block[sb + 1:sj - 1]
-                    # Active if any quoted non-empty string inside
-                    if re.search(r'["\x27][^"\x27]{1,}["\x27]', slot_content):
-                        active_slots += 1
+        ru_key = '"remainingUnits"' if '"remainingUnits"' in block else "'remainingUnits'"
+        ru_start = block.find(f'[{ru_key}]={{')
+        if ru_start != -1:
+            ru_block, _ = _lua_block(block, block.find('{', ru_start))
+            # Count active slots across ALL slots (1..level), not just the
+            # first 5, so zones with live slots beyond position 5 still show
+            # as having active defenses (display is capped at 5 symbols).
+            for idx in range(1, level + 1):
+                slot_key = f'[{idx}]={{'
+                sk = ru_block.find(slot_key)
+                if sk == -1:
+                    continue
+                slot_content, _ = _lua_block(ru_block, sk + len(slot_key) - 1)
+                # Active if any quoted non-empty string inside
+                if re.search(r'["\x27][^"\x27]{1,}["\x27]', slot_content):
+                    active_slots += 1
 
         info = {"name": zone, "level": level, "active_slots": active_slots, "suspended": suspended}
         if side == 2:
@@ -333,13 +399,7 @@ async def parse_zones(filepath: str, node) -> dict:
             rub_start = block.find(f'[{ru_key2}]={{')
             base_slots = 0
             if rub_start != -1:
-                bs2 = block.find('{', rub_start)
-                depth2, j2 = 1, bs2 + 1
-                while j2 < len(block) and depth2 > 0:
-                    if block[j2] == '{': depth2 += 1
-                    elif block[j2] == '}': depth2 -= 1
-                    j2 += 1
-                rub_block = block[bs2 + 1:j2 - 1]
+                rub_block, _ = _lua_block(block, block.find('{', rub_start))
                 base_slots = len(re.findall(r'\[\d+\]=', rub_block))
             extra_allowance = 2 if global_extra_unlock else 1
             info["true_max"] = base_slots + extra_allowance
@@ -377,131 +437,54 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
         data = await node.read_file(filepath)
         content = data.decode("utf-8")
 
-        version_m = re.search(r'zonePersistance\[["\']playerStatsIdentityVersion["\']\]\s*=\s*(\d+)', content)
-        version = int(version_m.group(1)) if version_m else None
+        version = _stats_version(content)
 
         if version is not None and version != 1:
             if filepath not in _unsupported_version_warned:
                 _unsupported_version_warned.add(filepath)
-                logging.getLogger(__name__).warning(
+                log.warning(
                     f"FH_Report: {filepath} reports playerStatsIdentityVersion={version}, "
                     f"which this version of FH_Report doesn't understand yet — "
                     f"please update FH_Report. Skipping this file for now."
                 )
             return {}, {}, {}
 
-        stats_match = re.search(
-            r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{",
-            content
-        )
-        if not stats_match:
+        block = _lua_table(content, _PLAYER_STATS_RE)
+        if block is None:
             return {}, {}, {}
-        # Use brace counting to extract the full playerStats block robustly,
-        # regardless of inconsistent indentation in the Lua file.
-        start  = stats_match.end()
-        depth  = 1
-        pos    = start
-        while pos < len(content) and depth > 0:
-            if content[pos] == "{":
-                depth += 1
-            elif content[pos] == "}":
-                depth -= 1
-            pos += 1
-        block   = content[start:pos - 1]
         results = {}
         raw_all = {}
         name_to_ucid: dict = {}
 
-        if version is None:
-            # ── Old format: name-keyed, stats inline in the player block ──
-            for m in re.finditer(r"\[[\"']([^\"']+)[\"']\]\s*=\s*\{", block):
-                name      = m.group(1)
-                blk_start = m.end()
-                d = 1
-                i = blk_start
-                while i < len(block) and d > 0:
-                    if block[i] == "{":
-                        d += 1
-                    elif block[i] == "}":
-                        d -= 1
-                    i += 1
-                player_block = block[blk_start:i - 1]
-                pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', player_block)
-                if not pts_m:
-                    continue
-                results[name] = int(pts_m.group(1))
-                raw_stats = {}
-                for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', player_block):
-                    key, val = sm.group(1), sm.group(2)
-                    if key == "Points":
-                        continue
-                    raw_stats[key] = float(val) if "." in val else int(val)
-                raw_all[name] = raw_stats
-
-            # Native ucidToName may still be present as a supplementary
-            # table even in an old-format file (an interim Foothold step) —
-            # use it opportunistically if so, costs nothing if absent.
-            ucid_match = re.search(
-                r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{",
-                content
-            )
-            if ucid_match:
-                u_start = ucid_match.end()
-                u_depth = 1
-                u_pos   = u_start
-                while u_pos < len(content) and u_depth > 0:
-                    if content[u_pos] == "{":
-                        u_depth += 1
-                    elif content[u_pos] == "}":
-                        u_depth -= 1
-                    u_pos += 1
-                ucid_block = content[u_start:u_pos - 1]
-                for um in re.finditer(r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]", ucid_block):
-                    name_to_ucid[um.group(2)] = um.group(1)
-
-        else:
-            # ── New format (4.9.1+): UCID-keyed, name + nested "stats" ────
-            for m in re.finditer(r"\[[\"']([a-f0-9]{32})[\"']\]\s*=\s*\{", block):
-                ucid      = m.group(1)
-                blk_start = m.end()
-                d = 1
-                i = blk_start
-                while i < len(block) and d > 0:
-                    if block[i] == "{":
-                        d += 1
-                    elif block[i] == "}":
-                        d -= 1
-                    i += 1
-                player_block = block[blk_start:i - 1]
-
+        # Old format: name-keyed, stats inline in the player block.
+        # New format (4.9.1+): UCID-keyed, "name" + nested "stats" table.
+        for key, player_block in _lua_entries(block, _ANY_KEY if version is None else _UCID_KEY):
+            if version is None:
+                name, stats_block = key, player_block
+            else:
                 name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', player_block)
                 if not name_m:
                     continue
                 name = name_m.group(1)
-
-                stats_m = re.search(r'\[(?:"stats"|\'stats\')\]\s*=\s*\{', player_block)
-                if not stats_m:
+                stats_block = _lua_table(player_block, r'\[(?:"stats"|\'stats\')\]\s*=\s*\{')
+                if stats_block is None:
                     continue
-                sb = player_block.find('{', stats_m.end() - 1)
-                sd, sj = 1, sb + 1
-                while sj < len(player_block) and sd > 0:
-                    if player_block[sj] == '{': sd += 1
-                    elif player_block[sj] == '}': sd -= 1
-                    sj += 1
-                stats_block = player_block[sb + 1:sj - 1]
+            pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', stats_block)
+            if not pts_m:
+                continue
+            results[name] = int(pts_m.group(1))
+            raw_all[name] = _lua_numbers(stats_block, skip=("Points",))
+            if version is not None:
+                name_to_ucid[name] = key
 
-                pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', stats_block)
-                if not pts_m:
-                    continue
-                results[name] = int(pts_m.group(1))
-                raw_stats = {}
-                for sm in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', stats_block):
-                    key, val = sm.group(1), sm.group(2)
-                    if key == "Points":
-                        continue
-                    raw_stats[key] = float(val) if "." in val else int(val)
-                raw_all[name] = raw_stats
-                name_to_ucid[name] = ucid
+        if version is None:
+            # Native ucidToName may still be present as a supplementary
+            # table even in an old-format file (an interim Foothold step) —
+            # use it opportunistically if so, costs nothing if absent.
+            ucid_block = _lua_table(content, r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{")
+            if ucid_block:
+                for um in re.finditer(_UCID_TO_NAME_RE, ucid_block):
+                    name_to_ucid[um.group(2)] = um.group(1)
 
         return results, raw_all, name_to_ucid
     except Exception:
@@ -588,149 +571,57 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     data = await node.read_file(filepath)
     content = data.decode("utf-8")
 
-    version_m = re.search(r'RankSave\[["\']playerIdentityVersion["\']\]\s*=\s*(\d+)', content)
-    version = int(version_m.group(1)) if version_m else None
+    version = _ranks_version(content)
 
     if version is not None and version not in (1, 2):
         if filepath not in _unsupported_version_warned:
             _unsupported_version_warned.add(filepath)
-            logging.getLogger(__name__).warning(
+            log.warning(
                 f"FH_Report: {filepath} reports playerIdentityVersion={version}, "
                 f"which this version of FH_Report doesn't understand yet — "
                 f"please update FH_Report. Skipping this file for now."
             )
         return {}
 
+    players_block = _lua_table(content, _RANKS_PLAYERS_RE)
+    if players_block is None:
+        return {}
+
+    excluded = set(excluded_ucids or [])
+    # Old format: name-keyed, UCID resolved via the separate ucidToName table.
+    name_to_ucid = (
+        {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, content)}
+        if version is None else {}
+    )
+
     players = {}
-
-    if version is None:
-        # ── Old format: name-keyed, separate ucidToName lookup ────────────
-        excluded_names: set[str] = set()
-        for ucid in excluded_ucids:
-            m = re.search(rf"\['{re.escape(ucid)}'\]=\"([^\"]+)\"", content)
-            if m:
-                excluded_names.add(m.group(1))
-
-        name_to_ucid = {}
-        ucid_pattern = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]=[\'\"]([^\'\"]+)[\'\"]"
-        for ucid_m in re.finditer(ucid_pattern, content):
-            name_to_ucid[ucid_m.group(2)] = ucid_m.group(1)
-
-        players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
-        if not players_start:
-            return {}
-        bs = content.find('{', players_start.end() - 1)
-        depth, j = 1, bs + 1
-        while j < len(content) and depth > 0:
-            if content[j] == '{': depth += 1
-            elif content[j] == '}': depth -= 1
-            j += 1
-        players_block = content[bs + 1:j - 1]
-
-        pos = 0
-        while pos < len(players_block):
-            km = re.search(r'\[["\']([^"\']+)["\']\]=\{', players_block[pos:])
-            if not km:
-                break
-            name = km.group(1)
-            brace_pos = pos + km.end() - 1
-            depth2, k = 1, brace_pos + 1
-            while k < len(players_block) and depth2 > 0:
-                if players_block[k] == '{': depth2 += 1
-                elif players_block[k] == '}': depth2 -= 1
-                k += 1
-            block = players_block[brace_pos + 1:k - 1]
-            pos = pos + km.start() + 1
-
-            credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
-            if not credit_m:
-                continue
-            clean_name = name.strip()
-            if not clean_name or len(clean_name) < 2:
-                continue
-            if clean_name in excluded_names:
-                continue
-
-            career: dict = {}
-            career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
-            if career_m:
-                cb = block.find('{', career_m.end() - 1)
-                cd, cj = 1, cb + 1
-                while cj < len(block) and cd > 0:
-                    if block[cj] == '{': cd += 1
-                    elif block[cj] == '}': cd -= 1
-                    cj += 1
-                career_block = block[cb + 1:cj - 1]
-                for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
-                    career[int(cm.group(1))] = float(cm.group(2))
-
-            players[clean_name] = {
-                "credits": float(credit_m.group(1)),
-                "ucid":    name_to_ucid.get(clean_name),
-                "career":  career,
-            }
-
-    else:
-        # ── New format (4.9.1+): UCID-keyed, name/credits/career inline ───
-        # No ucidToName lookup needed at all — the UCID is already the
-        # block's own key, and "name" lives inside the same block.
-        players_start = re.search(r"RankSave\[[\"']players[\"']\]\s*=\s*\{", content)
-        if not players_start:
-            return {}
-        bs = content.find('{', players_start.end() - 1)
-        depth, j = 1, bs + 1
-        while j < len(content) and depth > 0:
-            if content[j] == '{': depth += 1
-            elif content[j] == '}': depth -= 1
-            j += 1
-        players_block = content[bs + 1:j - 1]
-
-        pos = 0
-        while pos < len(players_block):
-            km = re.search(r'\[["\']([a-f0-9]{32})["\']\]=\{', players_block[pos:])
-            if not km:
-                break
-            ucid = km.group(1)
-            brace_pos = pos + km.end() - 1
-            depth2, k = 1, brace_pos + 1
-            while k < len(players_block) and depth2 > 0:
-                if players_block[k] == '{': depth2 += 1
-                elif players_block[k] == '}': depth2 -= 1
-                k += 1
-            block = players_block[brace_pos + 1:k - 1]
-            pos = pos + km.start() + 1
-
-            if ucid in excluded_ucids:
-                continue
-
-            credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
-            if not credit_m:
-                continue
+    for key, block in _lua_entries(players_block, _ANY_KEY if version is None else _UCID_KEY):
+        credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
+        if not credit_m:
+            continue
+        if version is None:
+            clean_name = key.strip()
+            ucid = name_to_ucid.get(clean_name)
+        else:
+            ucid = key
             name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', block)
             if not name_m:
                 continue
             clean_name = name_m.group(1).strip()
-            if not clean_name or len(clean_name) < 2:
-                continue
+        if len(clean_name) < 2 or (ucid and ucid in excluded):
+            continue
 
-            career: dict = {}
-            career_m = re.search(r'\[(?:"career"|\'career\')\]\s*=\s*\{', block)
-            if career_m:
-                cb = block.find('{', career_m.end() - 1)
-                cd, cj = 1, cb + 1
-                while cj < len(block) and cd > 0:
-                    if block[cj] == '{': cd += 1
-                    elif block[cj] == '}': cd -= 1
-                    cj += 1
-                career_block = block[cb + 1:cj - 1]
-                for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
-                    career[int(cm.group(1))] = float(cm.group(2))
+        career: dict = {}
+        career_block = _lua_table(block, r'\[(?:"career"|\'career\')\]\s*=\s*\{')
+        if career_block:
+            for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+                career[int(cm.group(1))] = float(cm.group(2))
 
-            players[clean_name] = {
-                "credits": float(credit_m.group(1)),
-                "ucid":    ucid,
-                "career":  career,
-            }
+        players[clean_name] = {
+            "credits": float(credit_m.group(1)),
+            "ucid":    ucid,
+            "career":  career,
+        }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
