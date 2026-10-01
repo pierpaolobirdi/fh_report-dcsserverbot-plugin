@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "12.5.0"
+FH_REPORT_RELEASE = "12.5.3"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2162,6 +2162,13 @@ def _reset_hour_today(cfg: dict) -> int:
     return int(cfg.get("daily_reset_hour") or 0)
 
 
+def _ensure_local_fhc_dir(saves_dir: str) -> None:
+    """Create saves_dir/.fhc when saves_dir is on this machine. For a remote
+    agent node the path only exists there, so nothing is created locally."""
+    if os.path.isdir(saves_dir):
+        os.makedirs(os.path.join(saves_dir, ".fhc"), exist_ok=True)
+
+
 async def _resolve_saves_dir(server, cfg: dict) -> str:
     """Configured saves_dir, else <missions dir>/Saves (same as Pretense)."""
     return cfg.get("saves_dir") or os.path.join(await server.get_missions_dir(), "Saves")
@@ -2324,8 +2331,8 @@ class FH_Report(Plugin):
         return os.path.join(saves_dir, ".fhc", "daily_snapshot.json")
 
     def _get_history_file(self, saves_dir: str) -> str:
-        """Return path to daily_history.json — the Podium feature's historical
-        record of each day's top-10, keyed by date (YYYY-MM-DD)."""
+        """Return path to daily_history.json — the Podium's record of each
+        day's top 50, keyed by date (YYYY-MM-DD)."""
         return os.path.join(saves_dir, ".fhc", "daily_history.json")
 
     async def _load_daily_history(self, saves_dir: str, node) -> dict:
@@ -2340,7 +2347,7 @@ class FH_Report(Plugin):
         for readability only).
         """
         path = self._get_history_file(saves_dir)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _ensure_local_fhc_dir(saves_dir)
         # Newest date first, for humans only — readers re-sort.
         sorted_data = dict(sorted(data.items(), key=lambda kv: kv[0], reverse=True))
         await write_bytes_to_node(
@@ -2358,20 +2365,21 @@ class FH_Report(Plugin):
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
         """Write daily_snapshot.json via write_bytes_to_node."""
         path = self._get_daily_file(saves_dir)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _ensure_local_fhc_dir(saves_dir)
         await write_bytes_to_node(
             node, path,
             json.dumps(data, indent=2).encode("utf-8"),
             log=self.log
         )
 
-    def _identify_players(self, snap: dict, campaign_stats: dict, session_stats_raw: dict,
+    def _identify_players(self, snap_unpacked: dict, campaign_stats: dict, session_stats_raw: dict,
                           players: dict, name_to_ucid_native: dict) -> tuple[dict, dict, dict, dict]:
-        """Full name -> UCID map (snapshot history < Foothold_Ranks.lua < save
+        """`snap_unpacked` is daily_snapshot.json after _unpack_daily_snapshot.
+        Full name -> UCID map (snapshot history < Foothold_Ranks.lua < save
         file's native UCIDs) and the save data regrouped by player ID. Returns
         (campaign_by_id, session_by_id, names_by_id, name_to_ucid).
         """
-        history_map = _unpack_daily_snapshot(snap).get("name_to_ucid") or {}
+        history_map = snap_unpacked.get("name_to_ucid") or {}
         ranks_map   = {n: d.get("ucid") for n, d in players.items() if d.get("ucid")}
         name_to_ucid = {**history_map, **ranks_map, **(name_to_ucid_native or {})}
         campaign_by_id, session_by_id, names_by_id = _group_by_player_id(
@@ -2385,7 +2393,8 @@ class FH_Report(Plugin):
                               names_by_id: dict | None = None,
                               live_names: set | None = None,
                               snap: dict | None = None,
-                              persist: bool = True) -> tuple[dict, dict, bool]:
+                              persist: bool = True,
+                              snap_unpacked: dict | None = None) -> tuple[dict, dict, bool]:
         """Today's points and stat deltas per player ID, against the baseline
         snapshot taken at reset_hour UTC. Returns (daily_pts, daily_stats,
         campaign_restarted).
@@ -2409,7 +2418,7 @@ class FH_Report(Plugin):
         if snap is None:
             snap = await self._load_daily_snapshot(saves_dir, node)
         snap_on_disk = snap          # exactly what's on disk, to skip no-op writes below
-        snap = _unpack_daily_snapshot(snap)
+        snap = snap_unpacked if snap_unpacked is not None else _unpack_daily_snapshot(snap)
         if snap:
             snap = _normalize_snapshot_ids(snap, name_to_ucid or {}, live_names or set())
         snap_date           = snap.get("date", "")
@@ -2728,19 +2737,20 @@ class FH_Report(Plugin):
         # Must run even with empty campaign_stats: right after a mission change it's
         # what detects the swap and carries today's points over.
         daily_snap = await self._load_daily_snapshot(saves_dir, node) if needs_daily else {}
+        snap_unpacked = _unpack_daily_snapshot(daily_snap)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
-            daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
+            snap_unpacked, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
             reset_hour = _reset_hour_today(cfg)
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
-                name_to_ucid, names_by_id, live_names, daily_snap)
-
-        daily_history_data = await self._load_daily_history(saves_dir, source_node)
+                name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
+        daily_history_data = (await self._load_daily_history(saves_dir, source_node)
+                              if "P" in current_layout else None)
 
         # Waypoint ordering: dump WaypointList (in-memory only) via hot injection
         # when the shared cache is missing or a campaign restart was detected —
@@ -2778,7 +2788,7 @@ class FH_Report(Plugin):
             daily_points      = _by_display_name(daily_pts, players, names_by_id, u2rn),
             daily_stats_raw   = _by_display_name(daily_stats, players, names_by_id, u2rn),
             punishment_points = punishment_points,
-            daily_history     = daily_history_data if "P" in current_layout else None,
+            daily_history     = daily_history_data,
             waypoint_map      = waypoint_map,
             # Full name -> UCID map for this cycle (every past name each
             # player has had, plus current ones) — lets the Podium identify
@@ -2790,8 +2800,10 @@ class FH_Report(Plugin):
             msg_id = self._message_ids.get(instance_name)
             msg = None
             if msg_id:
+                # Edit by id without fetching first: one API call instead of two.
                 try:
-                    msg = await channel.fetch_message(msg_id)
+                    await channel.get_partial_message(msg_id).edit(embed=embed)
+                    return
                 except discord.NotFound:
                     self.log.warning(f"FH_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
                     self._message_ids.pop(instance_name, None)
@@ -3117,8 +3129,9 @@ class FH_Report(Plugin):
         # Same UCID-first identity as the embed; the stripped-name lookup is
         # only a fallback for UCID-less saves.
         daily_snap = await self._load_daily_snapshot(saves_dir, node)
+        snap_unpacked = _unpack_daily_snapshot(daily_snap)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
-            daily_snap, campaign_stats, session_stats_raw, players, name_to_ucid_native)
+            snap_unpacked, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         u2rn     = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
         cs_disp  = _by_display_name(campaign_by_id, players, names_by_id, u2rn)
         srs_disp = _by_display_name(session_by_id, players, names_by_id, u2rn)
@@ -3128,7 +3141,7 @@ class FH_Report(Plugin):
         def _lookup(by_name: dict, default):
             if match in by_name:
                 return by_name[match]
-            k = _stripped_index(by_name).get(match_base)
+            k = next((k for k in by_name if strip_callsign(k) == match_base), None)
             return by_name[k] if k is not None else default
 
         s_pts   = _lookup(cs_disp, 0)
@@ -3140,7 +3153,7 @@ class FH_Report(Plugin):
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
             name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap,
-            persist=False)
+            persist=False, snap_unpacked=snap_unpacked)
         d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
