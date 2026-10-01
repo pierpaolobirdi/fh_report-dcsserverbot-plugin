@@ -6,9 +6,9 @@ from core import EventListener
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .commands import FHReport
+    from .commands import FH_Report
 
 
-class FHReportEventListener(EventListener["FHReport"]):
+class FHReportEventListener(EventListener["FH_Report"]):
     """Placeholder listener."""
     pass

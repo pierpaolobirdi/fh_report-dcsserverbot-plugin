@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import functools
 import importlib.util
 import json
 import logging
@@ -308,19 +309,19 @@ async def parse_zones(filepath: str, node) -> dict:
     gxu_m = re.search(r'globalExtraUnlock"?\]\s*=\s*(true|false)', content)
     global_extra_unlock = (gxu_m.group(1) == "true") if gxu_m else False
 
+    # One pass over the file: first ` = {` block per zone, up to the next
+    # top-level zonePersistance line.
+    zone_blocks: dict[str, str] = {}
+    for m in re.finditer(
+        r"zonePersistance\[[\"']zones[\"']\]\[(?:\"([^\"]+)\"|'([^']+)')\] = \{(.*?)(?=\nzonePersistance|\Z)",
+        content, re.DOTALL
+    ):
+        zone_blocks.setdefault(m.group(1) or m.group(2), m.group(3))
+
     for zone in zone_names:
-        ez = re.escape(zone)
-        sq = chr(39)
-        dq = chr(34)
-        pattern = (
-            rf"zonePersistance\[[{dq}\{sq}]zones[{dq}\{sq}]\]"
-            + rf"\[(?:{dq}{ez}{dq}|{sq}{ez}{sq})\] = \{{"
-            + r"(.*?)(?=\nzonePersistance|\Z)"
-        )
-        match = re.search(pattern, content, re.DOTALL)
-        if not match:
+        block = zone_blocks.get(zone)
+        if block is None:
             continue
-        block = match.group(1)
 
         side_m      = re.search('\\[(?:"side"|\'side\')\\]=(\\d+)', block)
         active_m    = re.search('\\[(?:"active"|\'active\')\\]=(true|false)', block)
@@ -950,6 +951,7 @@ def _is_numeric_segment(s: str) -> bool:
 _CALLSIGN_RE = re.compile(r'^[A-Z][A-Z0-9]* \d+[-_]\d+\s*', re.IGNORECASE)
 
 
+@functools.lru_cache(maxsize=4096)
 def strip_callsign(name: str) -> str:
     """Remove flight callsign prefix from pilot name.
     Handles separators (|, /, backslash, ,, ' - ') and callsign patterns
@@ -1218,6 +1220,23 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
     return "\n".join("\n".join(b) for b in blocks)
 
 
+def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
+    """Group lines into chunks whose newline-joined length stays within
+    `limit` (Discord's per-field cap), never splitting a line. A single line
+    longer than `limit` gets a chunk of its own."""
+    chunks, cur, cur_len = [], [], 0
+    for line in lines:
+        ll = len(line) + 1
+        if cur and cur_len + ll > limit:
+            chunks.append(cur)
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += ll
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None:
     """Add the Podium table to the embed, chunked across multiple fields if
     needed — same FIELD_LIMIT-based chunking pattern already used for the
@@ -1239,19 +1258,8 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 
     title = f"{icon} __Daily Podium__"
     cont_title = f"{icon} __Daily Podium (cont.)__"
-    lines = podium_text.split("\n")
     FIELD_LIMIT = 1020
-    chunks, cur, cur_len = [], [], 0
-    for line in lines:
-        ll = len(line) + 1
-        if cur_len + ll > FIELD_LIMIT and cur:
-            chunks.append("\n".join(cur))
-            cur, cur_len = [line], ll
-        else:
-            cur.append(line)
-            cur_len += ll
-    if cur:
-        chunks.append("\n".join(cur))
+    chunks = ["\n".join(c) for c in _chunk_lines(podium_text.split("\n"), FIELD_LIMIT)]
 
     available = MAX_EMBED_FIELDS - len(embed.fields) - RESERVED_FOR_TRAILER
     if available <= 0:
@@ -1569,20 +1577,9 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
         inner = inner[3:]
     if inner.endswith("```"):
         inner = inner[:-3]
-    lines = inner.strip("\n").split("\n")
     fence_overhead = len("```\n\n```")
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = fence_overhead
-    for line in lines:
-        add_len = len(line) + 1
-        if current and current_len + add_len > limit:
-            chunks.append("```\n" + "\n".join(current) + "\n```")
-            current, current_len = [], fence_overhead
-        current.append(line)
-        current_len += add_len
-    if current:
-        chunks.append("```\n" + "\n".join(current) + "\n```")
+    chunks = ["```\n" + "\n".join(c) + "\n```"
+              for c in _chunk_lines(inner.strip("\n").split("\n"), limit - fence_overhead)]
     embed.add_field(name=name, value=chunks[0], inline=False)
     for chunk in chunks[1:]:
         embed.add_field(name="\u200b", value=chunk, inline=False)
@@ -1617,6 +1614,9 @@ def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -
     return "```\n" + "\n".join(lines) + "\n```"
 
 
+_SEPARATOR = "▬" * 32
+
+
 def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                last_seen, session_points: float,
                                daily_points: float, session_stats: dict,
@@ -1637,7 +1637,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
 
     # ── Last seen ───────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
+    embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     if last_seen is not None:
         ts = int(calendar.timegm(last_seen.timetuple()))
         activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
@@ -1650,7 +1650,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     # of two separate bullet-list blocks, so Session and Daily line up
     # category by category. Points for both are shown in the combined
     # title; the table itself omits the "Points" key (redundant with that).
-    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
+    embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     other_stats = {k: v for k, v in session_stats.items() if k != "Points"} if session_stats else {}
     daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v} if daily_stats else {}
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
@@ -1684,13 +1684,13 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if career.get(CAREER_DEATHS, 0) > 0:
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
-        embed.add_field(name="\u200b", value="▬" * 32, inline=False)
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
         embed.add_field(
             name=f"🏆 __Career Stats__ (R: {_fmt_num(credits)} — {get_rank(credits)})",
             value="\n".join(career_lines), inline=False)
 
     # ── Mission ─────────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value="▬" * 32, inline=False)
+    embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
     embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only player report")
@@ -1740,20 +1740,8 @@ def _emit_table_field(embed: discord.Embed, title: str, icon: str,
         if hidden > 0:
             all_lines.append(f"*+ {hidden} more pilots*")
         is_more_note = lambda line: line.startswith("*+ ") and line.endswith(" more pilots*")
-        chunks, cur, cur_len, cur_count = [], [], 0, 0
-        for line in all_lines:
-            ll = len(line) + 1
-            if cur_len + ll > FIELD_LIMIT and cur:
-                chunks.append((cur, cur_count))
-                cur, cur_len = [line], ll
-                cur_count = 0 if is_more_note(line) else 1
-            else:
-                cur.append(line)
-                cur_len += ll
-                if not is_more_note(line):
-                    cur_count += 1
-        if cur:
-            chunks.append((cur, cur_count))
+        chunks = [(c, sum(1 for line in c if not is_more_note(line)))
+                  for c in _chunk_lines(all_lines, FIELD_LIMIT)]
         position = 1
         for i, (chunk_lines, chunk_count) in enumerate(chunks):
             chunk = "\n".join(chunk_lines)
@@ -2484,6 +2472,7 @@ class FH_Report(Plugin):
         self._layout_cycle_index: dict = {}
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
+        self._cycle_punishment: dict | None = None
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -2545,6 +2534,7 @@ class FH_Report(Plugin):
         self._last_update = now
 
         raw          = self.locals or {}
+        self._cycle_punishment = None
 
         # Warn about any fh_report.yaml server block whose key doesn't match
         # any currently-registered DCSServerBot instance name — a common
@@ -2758,8 +2748,7 @@ class FH_Report(Plugin):
         so read-only callers (/fh_report player) never race the updater,
         which stays the only writer.
 
-        Manual reset: this plugin has no commands. To manually reset the daily
-        counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
+        Manual reset: to reset the daily counters, delete saves_dir/.fhc/daily_snapshot.json — a missing snapshot
         is always treated as a fresh baseline (current values), so the daily
         counter restarts at 0 rather than retroactively counting everything
         accumulated up to that point.
@@ -3135,7 +3124,9 @@ class FH_Report(Plugin):
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
         if show_punishment:
-            punishment_points = await self._fetch_punishment_points()
+            if self._cycle_punishment is None:   # same query for every server: once per cycle
+                self._cycle_punishment = await self._fetch_punishment_points()
+            punishment_points = self._cycle_punishment
 
         # Compute daily points first so we know if daily data exists before
         # rendering. Needed whenever "D" is one of the tables, or "D" is
@@ -3457,6 +3448,28 @@ class FH_Report(Plugin):
                 return True
         return False
 
+    async def _command_context(self, interaction: discord.Interaction, server_param):
+        """Shared slash-command prologue: defer, resolve the instance (and
+        its channel restriction — see _resolve_server), and load its config.
+        Returns (instance_name, server, cfg, saves_dir, node, ephemeral), or
+        None after already sending the error. `node` caches reads for the
+        duration of the command."""
+        ephemeral = utils.get_ephemeral(interaction)
+        await interaction.response.defer(ephemeral=ephemeral)
+        instance_name, err = self._resolve_server(interaction, server_param)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return None
+        srv = self._get_server_by_instance(instance_name)
+        if srv is None:
+            await interaction.followup.send(
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                ephemeral=True)
+            return None
+        cfg = self._merged_cfg(instance_name)
+        saves_dir = await _resolve_saves_dir(srv, cfg)
+        return instance_name, srv, cfg, saves_dir, _UpdateReadCache(srv.node), ephemeral
+
     async def _autocomplete_report_player(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
@@ -3541,37 +3554,16 @@ class FH_Report(Plugin):
         # (per Special K). Internally naming it `_server` and using
         # @app_commands.rename to still show "server" to the user avoids
         # that name-based magic; everything below this line is unchanged.
-        server = _server
-        ephemeral = utils.get_ephemeral(interaction)
-        await interaction.response.defer(ephemeral=ephemeral)
-
-        # Single configured instance: resolves to it from ANY channel, as
-        # always. With more than one, `server` must be given explicitly
-        # (channel alone is never used to guess between several — see
-        # _resolve_server), and the channel used must be that instance's
-        # own report channel or one of its commands_channel_id entries.
-        server, err = self._resolve_server(interaction, server)
-        if err:
-            await interaction.followup.send(err, ephemeral=True)
+        ctx = await self._command_context(interaction, _server)
+        if ctx is None:
             return
+        server, srv, cfg, saves_dir, node, ephemeral = ctx
 
-        srv = self._get_server_by_instance(server)
-        if srv is None:
-            await interaction.followup.send(
-                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
-                ephemeral=True)
-            return
-
-        is_admin = self._is_admin(interaction, server)
-        if player_name and not is_admin:
+        if player_name and not self._is_admin(interaction, server):
             await interaction.followup.send(
                 "❌ You can only view your own stats. Leave the `player_name` field empty.",
                 ephemeral=True)
             return
-
-        cfg       = self._merged_cfg(server)
-        saves_dir = await _resolve_saves_dir(srv, cfg)
-        node = srv.node
 
         try:
             # No longer forcing bc:saveToDisk() here — per @leka1986: Foothold
@@ -3735,21 +3727,10 @@ class FH_Report(Plugin):
                      _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
         # See player()'s comment above on why this is `_server` + rename,
         # not a plain `server` parameter.
-        server = _server
-        ephemeral = utils.get_ephemeral(interaction)
-        await interaction.response.defer(ephemeral=ephemeral)
-
-        server, err = self._resolve_server(interaction, server)
-        if err:
-            await interaction.followup.send(err, ephemeral=True)
+        ctx = await self._command_context(interaction, _server)
+        if ctx is None:
             return
-
-        srv = self._get_server_by_instance(server)
-        if srv is None:
-            await interaction.followup.send(
-                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
-                ephemeral=True)
-            return
+        server, srv, cfg, saves_dir, node, ephemeral = ctx
 
         try:
             d_from = datetime.strptime(date_from.strip(), "%Y-%m-%d").date()
@@ -3763,10 +3744,6 @@ class FH_Report(Plugin):
             await interaction.followup.send(
                 "❌ `date_from` must not be after `date_to`.", ephemeral=True)
             return
-
-        cfg       = self._merged_cfg(server)
-        saves_dir = await _resolve_saves_dir(srv, cfg)
-        node = srv.node
 
         try:
             history = await self._load_daily_history(saves_dir, node)
