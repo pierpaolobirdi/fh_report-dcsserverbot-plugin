@@ -80,3 +80,21 @@ def test_admin_lookup_by_ucid(saves_dir):
 def test_non_admin_cannot_query_others(saves_dir):
     pool, sent = _invoke(saves_dir, "Viper", admin=False)
     assert pool.connections == 0 and "only view your own stats" in sent[0]
+
+
+def test_missing_ranks_file_gives_friendly_message(saves_dir):
+    import os
+    d = saves_dir()
+    os.remove(os.path.join(d, "Foothold_Ranks.lua"))
+    pool, followup = _Pool(), _Followup()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public"})()
+    plugin = make_plugin(apool=pool)
+    plugin._is_admin = lambda interaction, server: False
+
+    async def ctx(interaction, server_param):
+        return "inst", srv, {"saves_dir": d}, d, commands._UpdateReadCache(srv.node), True
+    plugin._command_context = ctx
+    plugin._public_server_name = lambda name: "Public"
+    interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
+    asyncio.run(plugin.player(interaction, None, None))
+    assert followup.sent == ["❌ No campaign rankings yet for **Public** — fly a mission first, then try again."]

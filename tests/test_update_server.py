@@ -28,6 +28,7 @@ class _Partial:
         self.channel.log.append(("partial_edit", self.id))
         if self.id not in self.channel.messages:
             raise NotFound()
+        self.channel.sent = embed
 
 
 class _Channel:
@@ -42,7 +43,9 @@ class _Channel:
 
     async def send(self, embed=None):
         self.log.append(("send",))
-        return _Message(99, "", self.log)
+        self.messages[99] = embed.title if embed else ""
+        self.sent = embed
+        return _Message(99, self.messages[99], self.log)
 
     def history(self, limit=50):
         async def gen():
