@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.3"
+FH_REPORT_RELEASE = "14.1.4"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1804,8 +1804,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     # tables section) so the report_layout engine below can add its own
     # fields onto the same embed object.
     embed = discord.Embed(
-        title=f"📡  {campaign_name}",
-        description=f"{_front_status(timestamp, map_name)}\n\n{progress}",
+        title=_embed_title(campaign_name, map_name),
+        description=f"**Front Status — {timestamp}**\n\n{progress}",
         color=0x3498DB
     )
     embed.add_field(name=f"🔵 BLUE Zones ({blue_count})", value=blue_text[:1024], inline=True)
@@ -1876,10 +1876,14 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     return _trim_embed(embed)
 
 
-def _front_status(timestamp: str, map_name: str | None) -> str:
-    """Header line under the title, plus the map line when it's known."""
-    line = f"**Front Status — {timestamp}**"
-    return line + (f"\n🗺️ Map: {map_name}" if map_name else "")
+def _embed_title(campaign_name: str, map_name: str | None) -> str:
+    """Report title; when the map is known it's a second line of the title
+    itself, so it shares the title's font. The first line is what identifies
+    this instance's message in the channel (see _publish_embed)."""
+    title = f"📡  {campaign_name}"
+    if map_name:
+        title += f"\nMap: {map_name}"
+    return title[:256]          # Discord's title limit
 
 
 def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points_detail: dict,
@@ -1892,8 +1896,8 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     campaign_name = cfg.get("campaign_name", "Foothold Campaign")
     timestamp = f"<t:{int(datetime.now(timezone.utc).timestamp())}:f>"
     embed = discord.Embed(
-        title=f"📡  {campaign_name}",
-        description=(f"{_front_status(timestamp, map_name)}\n\n"
+        title=_embed_title(campaign_name, map_name),
+        description=(f"**Front Status — {timestamp}**\n\n"
                      "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
         color=0x95A5A6
     )
@@ -2932,7 +2936,7 @@ class FH_Report(Plugin):
                 expected_title = f"📡  {campaign_name}"
                 async for hist_msg in channel.history(limit=50):
                     if (hist_msg.author.id == self.bot.user.id and hist_msg.embeds
-                            and hist_msg.embeds[0].title == expected_title):
+                            and (hist_msg.embeds[0].title or "").split("\n")[0] == expected_title):
                         msg = hist_msg
                         self._message_ids[instance_name] = msg.id
                         self._save_message_ids()
