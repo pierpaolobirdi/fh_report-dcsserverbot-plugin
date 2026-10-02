@@ -53,15 +53,15 @@ def _saves(tmp_path, with_save=True):
 def _map_line(channel):
     """Map lines anywhere in the embed's title or description."""
     text = (channel.sent.title or "") + "\n" + (channel.sent.description or "")
-    return [ln for ln in text.split("\n") if "Map:" in ln]
+    return [ln for ln in text.split("\n") if "🗺️" in ln]
 
 
 def test_map_is_the_second_line_of_the_title(tmp_path):
     ch = _Channel({})
     _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), _saves(tmp_path))
-    assert ch.sent.title == "📡  C\nMap: Syria"
+    assert ch.sent.title == "📡  C\n🗺️  Syria"
     assert ch.sent.description.startswith("**Front Status — ")     # directly below, no map line here
-    assert "Map:" not in ch.sent.description
+    assert "🗺️" not in ch.sent.description
 
 
 def test_no_map_known_shows_nothing(tmp_path):
@@ -86,7 +86,7 @@ def test_last_known_map_is_kept_when_no_mission_is_loaded(tmp_path):
     plugin = _plugin(tmp_path, ch)
     _cycle(plugin, _MapServer(_Mission("Syria")), saves)
     _cycle(plugin, _MapServer(None), saves)                    # server stopped / mission unloading
-    assert _map_line(ch) == ["Map: Syria"]
+    assert _map_line(ch) == ["🗺️  Syria"]
 
 
 def test_map_is_replaced_when_dcssb_reports_another(tmp_path):
@@ -94,7 +94,7 @@ def test_map_is_replaced_when_dcssb_reports_another(tmp_path):
     plugin = _plugin(tmp_path, ch)
     _cycle(plugin, _MapServer(_Mission("Syria")), saves)
     _cycle(plugin, _MapServer(_Mission("Caucasus")), saves)
-    assert _map_line(ch) == ["Map: Caucasus"]
+    assert _map_line(ch) == ["🗺️  Caucasus"]
     assert json.load(open(_map_file(saves))) == {"map": "Caucasus"}
 
 
@@ -102,7 +102,7 @@ def test_last_map_survives_a_restart(tmp_path):
     saves, ch = _saves(tmp_path), _Channel({})
     _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), saves)
     _cycle(_plugin(tmp_path, ch), _MapServer(None), saves)      # fresh plugin: DCSSB doesn't know yet
-    assert _map_line(ch) == ["Map: Syria"]
+    assert _map_line(ch) == ["🗺️  Syria"]
 
 
 def test_file_is_only_rewritten_when_the_map_changes(tmp_path, monkeypatch):
@@ -141,7 +141,7 @@ def test_new_server_without_saves_folder_stores_nothing_and_stays_quiet(tmp_path
     missing = str(tmp_path / "Saves")                          # mission never ran: no folder yet
     with caplog.at_level(logging.DEBUG):
         _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), missing)
-    assert _map_line(ch) == ["Map: Syria"]                  # still shown, from DCSSB
+    assert _map_line(ch) == ["🗺️  Syria"]                  # still shown, from DCSSB
     assert not os.path.exists(missing)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -185,17 +185,17 @@ def test_maps_are_kept_per_instance(tmp_path):
 def test_not_started_embed_also_shows_the_map(tmp_path):
     ch = _Channel({})
     _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), _saves(tmp_path, with_save=False))
-    assert "Campaign not started" in ch.sent.description and _map_line(ch) == ["Map: Syria"]
+    assert "Campaign not started" in ch.sent.description and _map_line(ch) == ["🗺️  Syria"]
 
 
 def test_embed_without_map_is_unchanged():
     embed = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
-    assert embed.title == "📡  C" and "Map:" not in embed.description
+    assert embed.title == "📡  C" and "🗺️" not in embed.description
 
 
 def test_existing_message_with_map_in_title_is_still_adopted(tmp_path):
     saves = _saves(tmp_path)
-    ch = _Channel({10: "📡  C\nMap: Syria"})                    # id lost: found by the first title line
+    ch = _Channel({10: "📡  C\n🗺️  Syria"})                    # id lost: found by the first title line
     _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), saves)
     assert ("send",) not in ch.log and ("adopt_edit", 10) in ch.log
 
