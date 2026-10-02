@@ -2702,7 +2702,7 @@ class FH_Report(Plugin):
             return
         if instance_name in _missing_save_warned:
             _missing_save_warned.discard(instance_name)
-            self.log.info(f"FH_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
+            self.log.debug(f"FH_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
 
         ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
         ranks_missing = False
@@ -2831,11 +2831,11 @@ class FH_Report(Plugin):
                                 saves_dir: str, node) -> None:
         """No Foothold save yet (new server / campaign not started): post a
         "not started" embed, with the rank table if Foothold_Ranks.lua exists.
-        Logged once per instance, not every cycle."""
+        Logged once (DEBUG) per instance, not every cycle."""
         instance_name = server.instance.name
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
-            self.log.warning(
+            self.log.debug(
                 f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
                 f"'campaign not started' until the Foothold mission creates its save files."
             )

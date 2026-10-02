@@ -40,13 +40,14 @@ def _names(embed):
 
 def test_new_server_without_saves_folder_shows_not_started(tmp_path, caplog):
     saves, channel, plugin = _setup(tmp_path)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         embed = _cycle(plugin, channel, saves, cycles=3)
     assert embed.title == "📡  C"
     assert "Campaign not started" in embed.description
     assert not any("Zones" in n for n in _names(embed))
     assert channel.log.count(("send",)) == 1                  # posted once, then edited
-    assert sum("no foothold_*.lua" in r.message for r in caplog.records) == 1   # warned once
+    notes = [r for r in caplog.records if "no foothold_*.lua" in r.message]
+    assert len(notes) == 1 and notes[0].levelno == logging.DEBUG   # once, DEBUG only
 
 
 def test_not_started_shows_rank_table_when_ranks_exist(tmp_path):
@@ -68,7 +69,7 @@ def test_same_message_becomes_full_report_when_save_appears(tmp_path, caplog):
     saves, channel, plugin = _setup(tmp_path, **{"Foothold_Ranks.lua": "ranks_new.lua"})
     _cycle(plugin, channel, saves)
     shutil.copy(os.path.join(FIXTURES, "foothold_new.lua"), os.path.join(saves, "foothold_x.lua"))
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         embed = _cycle(plugin, channel, saves)
     assert any("BLUE Zones" in n for n in _names(embed))
     assert "Campaign not started" not in embed.description
