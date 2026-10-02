@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.2"
+FH_REPORT_RELEASE = "14.1.3"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2238,10 +2238,8 @@ class FH_Report(Plugin):
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
-        self._last_maps: dict[str, str] = {}
-        self._last_maps_file: str = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "last_maps.json"
-        )
+        self._last_maps: dict[str, str] = {}          # last known map per instance
+        self._last_maps_saved: dict[str, str] = {}    # what's on disk (key present = file checked)
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2253,7 +2251,6 @@ class FH_Report(Plugin):
     async def cog_load(self) -> None:
         await super().cog_load()
         self._message_ids = self._load_message_ids()
-        self._last_maps = self._load_last_maps()
         raw      = self.locals or {}
         interval, interval_warning = _validated_update_interval(raw)
         if interval_warning:
@@ -2283,39 +2280,48 @@ class FH_Report(Plugin):
         except OSError as e:
             self.log.error(f"FH_Report: could not save message IDs: {e}")
 
-    # ── Last known map per instance (JSON file) ────────────────────────────
+    # ── Last known map per instance (saves_dir/.fhc/last_map.json) ────────
 
-    def _load_last_maps(self) -> dict:
-        try:
-            with open(self._last_maps_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (ValueError, OSError):
-            return {}
-        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v} \
-            if isinstance(data, dict) else {}
+    def _get_map_file(self, saves_dir: str) -> str:
+        return os.path.join(saves_dir, ".fhc", "last_map.json")
 
-    def _save_last_maps(self) -> None:
-        try:
-            with open(self._last_maps_file, "w", encoding="utf-8") as f:
-                json.dump(self._last_maps, f, indent=2)
-        except OSError as e:
-            self.log.error(f"FH_Report: could not save last known maps: {e}")
-
-    def _known_map(self, server) -> str | None:
+    async def _known_map(self, server, saves_dir: str, node) -> str | None:
         """The map of this instance's loaded mission, as DCSServerBot reports
-        it. Remembered (and persisted) so it's still shown while no mission is
-        loaded; replaced as soon as DCSSB reports a different one. None if it
-        has never been known."""
+        it. Remembered in saves_dir/.fhc/last_map.json so it's still shown
+        while no mission is loaded (and after a restart); replaced as soon as
+        DCSSB reports a different one. None if it has never been known."""
         instance_name = server.instance.name
+        if instance_name not in self._last_maps_saved:       # first look: read the file once
+            data = await _read_json(node, self._get_map_file(saves_dir))
+            saved = data.get("map") if isinstance(data, dict) else None
+            saved = saved.strip() if isinstance(saved, str) else ""
+            self._last_maps_saved[instance_name] = saved
+            if saved:
+                self._last_maps[instance_name] = saved
         try:
             current = getattr(getattr(server, "current_mission", None), "map", None)
         except Exception:
             current = None
-        current = current.strip() if isinstance(current, str) else ""
-        if current and self._last_maps.get(instance_name) != current:
-            self._last_maps[instance_name] = current
-            self._save_last_maps()
-        return self._last_maps.get(instance_name)
+        if isinstance(current, str) and current.strip():
+            self._last_maps[instance_name] = current.strip()
+        known = self._last_maps.get(instance_name)
+        if known and known != self._last_maps_saved.get(instance_name):
+            await self._save_map(instance_name, known, saves_dir, node)
+        return known
+
+    async def _save_map(self, instance_name: str, map_name: str, saves_dir: str, node) -> None:
+        """Persist the map when it changed. Skipped (and retried next cycle)
+        while saves_dir doesn't exist yet — a normal state for a new server."""
+        try:
+            await node.list_directory(saves_dir)
+        except FileNotFoundError:
+            return
+        except Exception:
+            pass
+        _ensure_local_fhc_dir(saves_dir)
+        if await write_bytes_to_node(node, self._get_map_file(saves_dir),
+                                     json.dumps({"map": map_name}).encode("utf-8"), log=self.log):
+            self._last_maps_saved[instance_name] = map_name
 
     # ── Core update task ──────────────────────────────────────────────────
 
@@ -2732,10 +2738,10 @@ class FH_Report(Plugin):
             return
 
         saves_dir = await _resolve_saves_dir(server, cfg)
-        map_name  = self._known_map(server)
 
         source_node = server.node
         node = _UpdateReadCache(source_node)
+        map_name = await self._known_map(server, saves_dir, source_node)
 
         # One-time-per-instance write self-test — see run_write_self_test()
         # for why this doesn't wait for a real correction to be needed.
