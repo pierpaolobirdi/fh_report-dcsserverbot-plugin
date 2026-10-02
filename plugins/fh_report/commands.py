@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.1"
+FH_REPORT_RELEASE = "14.2.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1747,7 +1747,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 punishment_points: dict | None = None,
                 daily_history: dict | None = None,
                 waypoint_map: dict | None = None,
-                name_to_ucid: dict | None = None) -> discord.Embed:
+                name_to_ucid: dict | None = None,
+                map_name: str | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data. Display options
     are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
     campaign_name       = cfg.get("campaign_name", "Foothold Campaign")
@@ -1804,10 +1805,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     # fields onto the same embed object.
     embed = discord.Embed(
         title=f"📡  {campaign_name}",
-        description=(
-            f"**Front Status — {timestamp}**\n\n"
-            f"{progress}"
-        ),
+        description=f"{_front_status(timestamp, map_name)}\n\n{progress}",
         color=0x3498DB
     )
     embed.add_field(name=f"🔵 BLUE Zones ({blue_count})", value=blue_text[:1024], inline=True)
@@ -1878,8 +1876,15 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     return _trim_embed(embed)
 
 
+def _front_status(timestamp: str, map_name: str | None) -> str:
+    """Header line under the title, plus the map line when it's known."""
+    line = f"**Front Status — {timestamp}**"
+    return line + (f"\n🗺️ Map: {map_name}" if map_name else "")
+
+
 def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points_detail: dict,
-                            punishment_points: dict | None = None) -> discord.Embed:
+                            punishment_points: dict | None = None,
+                            map_name: str | None = None) -> discord.Embed:
     """Embed for an instance whose Foothold mission hasn't created its save
     file yet (new server, or campaign not started). Same title as the real
     report, so that message simply becomes the report once the save appears.
@@ -1888,7 +1893,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     timestamp = f"<t:{int(datetime.now(timezone.utc).timestamp())}:f>"
     embed = discord.Embed(
         title=f"📡  {campaign_name}",
-        description=(f"**Front Status — {timestamp}**\n\n"
+        description=(f"{_front_status(timestamp, map_name)}\n\n"
                      "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
         color=0x95A5A6
     )
@@ -2233,6 +2238,10 @@ class FH_Report(Plugin):
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
+        self._last_maps: dict[str, str] = {}
+        self._last_maps_file: str = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "last_maps.json"
+        )
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2244,6 +2253,7 @@ class FH_Report(Plugin):
     async def cog_load(self) -> None:
         await super().cog_load()
         self._message_ids = self._load_message_ids()
+        self._last_maps = self._load_last_maps()
         raw      = self.locals or {}
         interval, interval_warning = _validated_update_interval(raw)
         if interval_warning:
@@ -2272,6 +2282,40 @@ class FH_Report(Plugin):
                 json.dump(self._message_ids, f, indent=2)
         except OSError as e:
             self.log.error(f"FH_Report: could not save message IDs: {e}")
+
+    # ── Last known map per instance (JSON file) ────────────────────────────
+
+    def _load_last_maps(self) -> dict:
+        try:
+            with open(self._last_maps_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (ValueError, OSError):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v} \
+            if isinstance(data, dict) else {}
+
+    def _save_last_maps(self) -> None:
+        try:
+            with open(self._last_maps_file, "w", encoding="utf-8") as f:
+                json.dump(self._last_maps, f, indent=2)
+        except OSError as e:
+            self.log.error(f"FH_Report: could not save last known maps: {e}")
+
+    def _known_map(self, server) -> str | None:
+        """The map of this instance's loaded mission, as DCSServerBot reports
+        it. Remembered (and persisted) so it's still shown while no mission is
+        loaded; replaced as soon as DCSSB reports a different one. None if it
+        has never been known."""
+        instance_name = server.instance.name
+        try:
+            current = getattr(getattr(server, "current_mission", None), "map", None)
+        except Exception:
+            current = None
+        current = current.strip() if isinstance(current, str) else ""
+        if current and self._last_maps.get(instance_name) != current:
+            self._last_maps[instance_name] = current
+            self._save_last_maps()
+        return self._last_maps.get(instance_name)
 
     # ── Core update task ──────────────────────────────────────────────────
 
@@ -2688,6 +2732,7 @@ class FH_Report(Plugin):
             return
 
         saves_dir = await _resolve_saves_dir(server, cfg)
+        map_name  = self._known_map(server)
 
         source_node = server.node
         node = _UpdateReadCache(source_node)
@@ -2698,7 +2743,7 @@ class FH_Report(Plugin):
 
         persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
-            await self._post_not_started(server, cfg, channel, channel_id, saves_dir, node)
+            await self._post_not_started(server, cfg, channel, channel_id, saves_dir, node, map_name)
             return
         if instance_name in _missing_save_warned:
             _missing_save_warned.discard(instance_name)
@@ -2823,12 +2868,13 @@ class FH_Report(Plugin):
             # player has had, plus current ones) — lets the Podium identify
             # old entries by UCID and show the player's current name/rank.
             name_to_ucid      = name_to_ucid if "P" in current_layout else None,
+            map_name          = map_name,
         )
 
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
 
     async def _post_not_started(self, server, cfg: dict, channel, channel_id,
-                                saves_dir: str, node) -> None:
+                                saves_dir: str, node, map_name: str | None = None) -> None:
         """No Foothold save yet (new server / campaign not started): post a
         "not started" embed, with the rank table if Foothold_Ranks.lua exists.
         Logged once (DEBUG) per instance, not every cycle."""
@@ -2855,7 +2901,7 @@ class FH_Report(Plugin):
                 self._cycle_punishment = await self._fetch_punishment_points()
             punishment_points = self._cycle_punishment
         layout, detail = self._resolve_report_layout(instance_name, cfg)
-        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points)
+        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points, map_name)
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
 
     async def _publish_embed(self, instance_name: str, channel, channel_id, cfg: dict,
