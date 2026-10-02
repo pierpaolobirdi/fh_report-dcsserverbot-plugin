@@ -265,7 +265,7 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
 async def parse_zones(filepath: str, node) -> dict:
     """Parse zone persistence file. Returns {'blue': [...], 'red': [...]}."""
     data = await node.read_file(filepath)
-    content = data.decode("utf-8")
+    content = data.decode("utf-8", errors="replace")
 
     zones = {"blue": [], "red": [], "neutral": 0}
     zone_names = [
@@ -371,7 +371,7 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
     """
     try:
         data = await node.read_file(filepath)
-        content = data.decode("utf-8")
+        content = data.decode("utf-8", errors="replace")
 
         version = _stats_version(content)
 
@@ -473,6 +473,7 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
 
 _unsupported_version_warned: set[str] = set()
 _unmatched_instance_warned: set[str] = set()
+_missing_save_warned: set[str] = set()       # instances already warned about a missing Foothold save
 _unmatched_instance_since: dict[str, float] = {}
 _UNMATCHED_INSTANCE_GRACE_SECONDS = 120  # tolerate remote-node startup races
 
@@ -489,7 +490,7 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     Foothold migrates the file itself once, so per-read detection is enough.
     """
     data = await node.read_file(filepath)
-    content = data.decode("utf-8")
+    content = data.decode("utf-8", errors="replace")
 
     version = _ranks_version(content)
 
@@ -714,7 +715,10 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
 
     if ranks_source is None:
         ranks_source = await node.read_file(ranks_file)
-    original = ranks_source.decode("utf-8")
+    try:
+        original = ranks_source.decode("utf-8")
+    except UnicodeDecodeError:
+        return False   # never rewrite a file we can't round-trip byte for byte
     if _ranks_version(original) is not None:
         return False
     players_block = _lua_table(original, _RANKS_PLAYERS_RE)
@@ -1753,13 +1757,6 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     slot_status         = _bool_cfg(cfg.get("slot_status"))
     zone_name_length    = max(8, min(24, int(cfg.get("zone_name_length") or 16)))
     sort_zones_by_waypoint = _bool_cfg(cfg.get("sort_zones_by_waypoint"))
-    # Footer reminder of /fh_report player — on unless explicitly disabled.
-    player_cmd_hint = None
-    raw_hint_flag   = cfg.get("show_player_cmd_hint")
-    if raw_hint_flag is None or _bool_cfg(raw_hint_flag):
-        player_cmd_hint = str(cfg.get("player_cmd_hint_text")
-                              or "Type /fh_report player to see your own stats.")
-
     _now_ts    = int(datetime.now(timezone.utc).timestamp())
     timestamp  = f"<t:{_now_ts}:f>"
     blue_count  = len(zones["blue"])
@@ -1851,6 +1848,19 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
         punishment_points, daily_history, name_to_ucid,
     )
 
+    return _finish_embed(embed, cfg)
+
+
+def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
+    """Closing ruler, footer and timestamp, then Discord's size limits."""
+    campaign_name = cfg.get("campaign_name", "Foothold Campaign")
+    # Footer reminder of /fh_report player — on unless explicitly disabled.
+    player_cmd_hint = None
+    raw_hint_flag   = cfg.get("show_player_cmd_hint")
+    if raw_hint_flag is None or _bool_cfg(raw_hint_flag):
+        player_cmd_hint = str(cfg.get("player_cmd_hint_text")
+                              or "Type /fh_report player to see your own stats.")
+
     _cap_fields(embed, DISCORD_MAX_FIELDS - 1)   # keep room for the ruler
     # Full-width separator — placed at the bottom to fix embed width
     # without interrupting the visual flow of the content.
@@ -1865,11 +1875,27 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     footer_lines.append(f"{campaign_name} • Updated automatically")
     embed.set_footer(text="\n".join(footer_lines))
     embed.timestamp = datetime.now(timezone.utc)
+    return _trim_embed(embed)
 
-    # Trim if embed exceeds Discord 6000 char limit
-    embed = _trim_embed(embed)
 
-    return embed
+def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points_detail: dict,
+                            punishment_points: dict | None = None) -> discord.Embed:
+    """Embed for an instance whose Foothold mission hasn't created its save
+    file yet (new server, or campaign not started). Same title as the real
+    report, so that message simply becomes the report once the save appears.
+    Shows the rank table when Foothold_Ranks.lua exists and the layout has R."""
+    campaign_name = cfg.get("campaign_name", "Foothold Campaign")
+    timestamp = f"<t:{int(datetime.now(timezone.utc).timestamp())}:f>"
+    embed = discord.Embed(
+        title=f"📡  {campaign_name}",
+        description=(f"**Front Status — {timestamp}**\n\n"
+                     "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
+        color=0x95A5A6
+    )
+    if players and "R" in (report_layout or "").upper():
+        _render_layout_tables(embed, cfg, "R", points_detail, players, {}, False,
+                              punishment_points, None)
+    return _finish_embed(embed, cfg)
 
 
 # ── Per-player identity (UCID-first) ──────────────────────────────────────────
@@ -2672,8 +2698,11 @@ class FH_Report(Plugin):
 
         persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
-            self.log.warning(f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir}")
+            await self._post_not_started(server, cfg, channel, channel_id, saves_dir, node)
             return
+        if instance_name in _missing_save_warned:
+            _missing_save_warned.discard(instance_name)
+            self.log.info(f"FH_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
 
         ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
         ranks_missing = False
@@ -2796,6 +2825,42 @@ class FH_Report(Plugin):
             name_to_ucid      = name_to_ucid if "P" in current_layout else None,
         )
 
+        await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
+
+    async def _post_not_started(self, server, cfg: dict, channel, channel_id,
+                                saves_dir: str, node) -> None:
+        """No Foothold save yet (new server / campaign not started): post a
+        "not started" embed, with the rank table if Foothold_Ranks.lua exists.
+        Logged once per instance, not every cycle."""
+        instance_name = server.instance.name
+        if instance_name not in _missing_save_warned:
+            _missing_save_warned.add(instance_name)
+            self.log.warning(
+                f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
+                f"'campaign not started' until the Foothold mission creates its save files."
+            )
+        try:
+            players = await parse_ranks(os.path.join(saves_dir, "Foothold_Ranks.lua"),
+                                        cfg.get("excluded_ucids") or [], node)
+        except Exception:
+            players = {}
+        if players and _HAS_HOOK:
+            try:
+                players = _fh_hook.post_process(players, cfg, instance_name, {})
+            except Exception as e:
+                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+        punishment_points = {}
+        if players and _bool_cfg(cfg.get("show_punishment")):
+            if self._cycle_punishment is None:
+                self._cycle_punishment = await self._fetch_punishment_points()
+            punishment_points = self._cycle_punishment
+        layout, detail = self._resolve_report_layout(instance_name, cfg)
+        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points)
+        await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
+
+    async def _publish_embed(self, instance_name: str, channel, channel_id, cfg: dict,
+                             embed: discord.Embed) -> None:
+        """Edit this instance's report message, adopting or posting one if needed."""
         try:
             msg_id = self._message_ids.get(instance_name)
             msg = None
@@ -3061,7 +3126,13 @@ class FH_Report(Plugin):
             ranks_file = os.path.join(saves_dir, "Foothold_Ranks.lua")
 
             excluded_ucids = cfg.get("excluded_ucids") or []
-            players        = await parse_ranks(ranks_file, excluded_ucids, node)
+            try:
+                players    = await parse_ranks(ranks_file, excluded_ucids, node)
+            except FileNotFoundError:
+                await interaction.followup.send(
+                    f"❌ No campaign rankings yet for **{self._public_server_name(server)}** — "
+                    f"fly a mission first, then try again.", ephemeral=True)
+                return
             campaign_stats, session_stats_raw, name_to_ucid_native = await parse_player_stats(persistence_file, node)
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
