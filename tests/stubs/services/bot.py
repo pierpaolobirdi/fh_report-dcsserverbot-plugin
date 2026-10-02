@@ -1,0 +1,2 @@
+class DCSServerBot:
+    pass

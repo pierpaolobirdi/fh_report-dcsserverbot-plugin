@@ -467,6 +467,24 @@ This needs a one-time cache shared with FH_Control (if installed) and only refre
 | `fh_report.yaml` | Configuration template (goes in `config/plugins/`) |
 | `migrate_config.py` | Migration script, called automatically by `install.cmd` on updates |
 | `install.cmd` | Installation and update script |
+| `tests/` | Automated tests (developers only — not needed to run the plugin) |
+
+---
+
+## Tests (developers)
+
+The `tests/` folder checks parsing, rendering, daily tracking and the slash
+commands against small stand-ins for discord.py and DCSServerBot, so no bot,
+Discord or database is needed:
+
+```
+pip install pytest
+python -m pytest tests
+```
+
+`tests/golden/` pins the exact embed and daily-tracking output. After an
+intentional change to that output, regenerate it with
+`FH_UPDATE_GOLDEN=1 python -m pytest tests` and review the diff.
 
 ---
 
