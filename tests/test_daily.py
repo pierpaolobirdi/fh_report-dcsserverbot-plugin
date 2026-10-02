@@ -1,6 +1,6 @@
 """Daily tracking over simulated weeks: day rollovers, mid-day mission swaps,
 in-place campaign resets. Golden file pins the exact daily figures plus the
-resulting daily_snapshot.json and daily_history.json."""
+resulting fhr_daily_snapshot.json and fhr_daily_history.json."""
 import asyncio
 import os
 import random
@@ -55,7 +55,7 @@ async def _scenario(saves, seed, clock):
             {u: "N" + u[-1] for u in ids}, set(cs) | set(ss), snap))
     files = {}
     for name in ("daily_snapshot.json", "daily_history.json"):
-        path = os.path.join(saves, ".fhc", name)
+        path = os.path.join(saves, ".fhc", "fhr_" + name)
         files[name] = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
     return out, files
 
@@ -81,4 +81,5 @@ def test_persist_false_writes_nothing(tmp_path, fake_clock):
     asyncio.run(plugin._compute_daily_points(str(tmp_path), {"x": 50}, {}, 0, FileNode(), "f.lua",
                                              {}, {}, {"x"}, snap, persist=False))
     assert snap_file.read_text() == '{"date": "2026-09-01", "snapshot": {"x": 1}}'
-    assert not (tmp_path / ".fhc" / "daily_history.json").exists()
+    assert not (tmp_path / ".fhc" / "fhr_daily_history.json").exists()
+    assert not (tmp_path / ".fhc" / "fhr_daily_snapshot.json").exists()

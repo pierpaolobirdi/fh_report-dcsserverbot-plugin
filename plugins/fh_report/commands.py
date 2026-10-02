@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.6"
+FH_REPORT_RELEASE = "14.1.7"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -639,6 +639,41 @@ async def _read_json(node, path: str) -> dict:
         return json.loads((await node.read_file(path)).decode("utf-8"))
     except Exception:
         return {}
+
+
+FHR_PREFIX = "fhr_"    # files this plugin keeps in saves_dir/.fhc (FH_Control uses fhc_)
+
+
+def _fhr_path(saves_dir: str, name: str) -> str:
+    return os.path.join(saves_dir, ".fhc", FHR_PREFIX + name)
+
+
+def _remove_legacy_file(path: str) -> None:
+    """Best-effort delete of an old, un-prefixed file. Local nodes only: a
+    remote saves_dir doesn't exist here (no delete API for remote nodes), so
+    the old file just stays there, unused."""
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            log.debug(f"FH_Report: removed legacy file {path} (replaced by its {FHR_PREFIX} copy)")
+    except OSError:
+        pass
+
+
+async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> tuple[dict, bool]:
+    """Read saves_dir/.fhc/fhr_<name>, falling back to the old un-prefixed
+    <name> (files written before the fhr_ prefix existed). Returns
+    (data, read_from_new_file). Writers always use the fhr_ name, so an old
+    file is read only until the next write creates its fhr_ replacement.
+    With cleanup=True (the updater, the only writer), the old file is removed
+    the first time the fhr_ file is read back OK — never in the same step that
+    wrote it, so a bad write still leaves the old data to fall back on."""
+    data = await _read_json(node, _fhr_path(saves_dir, name))
+    if data:
+        if cleanup:
+            _remove_legacy_file(os.path.join(saves_dir, ".fhc", name))
+        return data, True
+    return await _read_json(node, os.path.join(saves_dir, ".fhc", name)), False
 
 
 async def run_write_self_test(node, saves_dir: str, log=None) -> None:
@@ -1915,7 +1950,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
 
 # ── Per-player identity (UCID-first) ──────────────────────────────────────────
 # Daily/session figures are keyed by player ID: the UCID (from the save, then
-# Foothold_Ranks.lua, then daily_snapshot.json history), else the name for
+# Foothold_Ranks.lua, then fhr_daily_snapshot.json history), else the name for
 # old UCID-less saves. Names are for display only.
 _UCID_RE = re.compile(r"[0-9a-f]{32}")
 
@@ -2290,22 +2325,23 @@ class FH_Report(Plugin):
         except OSError as e:
             self.log.error(f"FH_Report: could not save message IDs: {e}")
 
-    # ── Last known map per instance (saves_dir/.fhc/last_map.json) ────────
+    # ── Last known map per instance (saves_dir/.fhc/fhr_last_map.json) ────────
 
     def _get_map_file(self, saves_dir: str) -> str:
-        return os.path.join(saves_dir, ".fhc", "last_map.json")
+        return _fhr_path(saves_dir, "last_map.json")
 
     async def _known_map(self, server, saves_dir: str, node) -> str | None:
         """The map of this instance's loaded mission, as DCSServerBot reports
-        it. Remembered in saves_dir/.fhc/last_map.json so it's still shown
+        it. Remembered in saves_dir/.fhc/fhr_last_map.json so it's still shown
         while no mission is loaded (and after a restart); replaced as soon as
         DCSSB reports a different one. None if it has never been known."""
         instance_name = server.instance.name
         if instance_name not in self._last_maps_saved:       # first look: read the file once
-            data = await _read_json(node, self._get_map_file(saves_dir))
+            data, from_new = await _read_fhr_json(node, saves_dir, "last_map.json", cleanup=True)
             saved = data.get("map") if isinstance(data, dict) else None
             saved = saved.strip() if isinstance(saved, str) else ""
-            self._last_maps_saved[instance_name] = saved
+            # A map found only in the old file still has to be written to the fhr_ one.
+            self._last_maps_saved[instance_name] = saved if from_new else ""
             if saved:
                 self._last_maps[instance_name] = saved
         try:
@@ -2427,23 +2463,23 @@ class FH_Report(Plugin):
         return layout, detail
 
     def _get_daily_file(self, saves_dir: str) -> str:
-        """Return path to daily_snapshot.json cache file."""
-        return os.path.join(saves_dir, ".fhc", "daily_snapshot.json")
+        """Return path to fhr_daily_snapshot.json cache file."""
+        return _fhr_path(saves_dir, "daily_snapshot.json")
 
     def _get_history_file(self, saves_dir: str) -> str:
-        """Return path to daily_history.json — the Podium's record of each
+        """Return path to fhr_daily_history.json — the Podium's record of each
         day's top 50, keyed by date (YYYY-MM-DD)."""
-        return os.path.join(saves_dir, ".fhc", "daily_history.json")
+        return _fhr_path(saves_dir, "daily_history.json")
 
-    async def _load_daily_history(self, saves_dir: str, node) -> dict:
-        """daily_history.json: {date: [event, ...]}, each event
+    async def _load_daily_history(self, saves_dir: str, node, cleanup: bool = False) -> dict:
+        """fhr_daily_history.json: {date: [event, ...]}, each event
         {"campaign_restart": bool, "top": [{"name", "points"[, "ucid"]}]}. A date
         can hold more than one event. {} if missing.
         """
-        return await _read_json(node, self._get_history_file(saves_dir))
+        return (await _read_fhr_json(node, saves_dir, "daily_history.json", cleanup))[0]
 
     async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
-        """Write daily_history.json via write_bytes_to_node (newest date first,
+        """Write fhr_daily_history.json via write_bytes_to_node (newest date first,
         for readability only).
         """
         path = self._get_history_file(saves_dir)
@@ -2456,14 +2492,14 @@ class FH_Report(Plugin):
             log=self.log
         )
 
-    async def _load_daily_snapshot(self, saves_dir: str, node) -> dict:
-        """daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
+    async def _load_daily_snapshot(self, saves_dir: str, node, cleanup: bool = False) -> dict:
+        """fhr_daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
         callers unpack it with _unpack_daily_snapshot. {} if missing.
         """
-        return await _read_json(node, self._get_daily_file(saves_dir))
+        return (await _read_fhr_json(node, saves_dir, "daily_snapshot.json", cleanup))[0]
 
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
-        """Write daily_snapshot.json via write_bytes_to_node."""
+        """Write fhr_daily_snapshot.json via write_bytes_to_node."""
         path = self._get_daily_file(saves_dir)
         _ensure_local_fhc_dir(saves_dir)
         await write_bytes_to_node(
@@ -2474,7 +2510,7 @@ class FH_Report(Plugin):
 
     def _identify_players(self, snap_unpacked: dict, campaign_stats: dict, session_stats_raw: dict,
                           players: dict, name_to_ucid_native: dict) -> tuple[dict, dict, dict, dict]:
-        """`snap_unpacked` is daily_snapshot.json after _unpack_daily_snapshot.
+        """`snap_unpacked` is fhr_daily_snapshot.json after _unpack_daily_snapshot.
         Full name -> UCID map (snapshot history < Foothold_Ranks.lua < save
         file's native UCIDs) and the save data regrouped by player ID. Returns
         (campaign_by_id, session_by_id, names_by_id, name_to_ucid).
@@ -2510,13 +2546,14 @@ class FH_Report(Plugin):
         place — instead moves today's totals into carry_over and rebases the
         snapshot, so daily = (current - snapshot) + carry_over continues
         seamlessly. To reset the daily counters manually, delete
-        saves_dir/.fhc/daily_snapshot.json (a missing snapshot starts at 0).
+        saves_dir/.fhc/fhr_daily_snapshot.json — and daily_snapshot.json too if
+        it's still there (a missing snapshot starts at 0).
         """
         now_utc   = datetime.now(timezone.utc)
         today_str = now_utc.strftime("%Y-%m-%d")
 
         if snap is None:
-            snap = await self._load_daily_snapshot(saves_dir, node)
+            snap = await self._load_daily_snapshot(saves_dir, node, cleanup=persist)
         snap_on_disk = snap          # exactly what's on disk, to skip no-op writes below
         snap = snap_unpacked if snap_unpacked is not None else _unpack_daily_snapshot(snap)
         if snap:
@@ -2591,7 +2628,7 @@ class FH_Report(Plugin):
 
             if closing_daily and persist:
                 top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
-                history    = await self._load_daily_history(saves_dir, node)
+                history    = await self._load_daily_history(saves_dir, node, cleanup=True)
                 # Store the UCID too, so the Podium can show the CURRENT name/rank later.
                 _top_entries = []
                 for pid, p in top_list:
@@ -2826,7 +2863,7 @@ class FH_Report(Plugin):
         campaign_restarted_now = False
         # Must run even with empty campaign_stats: right after a mission change it's
         # what detects the swap and carries today's points over.
-        daily_snap = await self._load_daily_snapshot(saves_dir, node) if needs_daily else {}
+        daily_snap = await self._load_daily_snapshot(saves_dir, node, cleanup=True) if needs_daily else {}
         snap_unpacked = _unpack_daily_snapshot(daily_snap)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             snap_unpacked, campaign_stats, session_stats_raw, players, name_to_ucid_native)
@@ -2839,7 +2876,7 @@ class FH_Report(Plugin):
                 name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
-        daily_history_data = (await self._load_daily_history(saves_dir, source_node)
+        daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
                               if "P" in current_layout else None)
 
         # Waypoint ordering: dump WaypointList (in-memory only) via hot injection

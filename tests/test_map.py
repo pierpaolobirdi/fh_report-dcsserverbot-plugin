@@ -1,5 +1,5 @@
 """Map line under "Front Status": read from DCSServerBot, remembered per instance in
-saves_dir/.fhc/last_map.json, replaced when DCSSB reports another map, nothing shown
+saves_dir/.fhc/fhr_last_map.json, replaced when DCSSB reports another map, nothing shown
 when never known."""
 import asyncio
 import json
@@ -38,7 +38,7 @@ def _cycle(plugin, server, saves, layout="R"):
 
 
 def _map_file(saves):
-    return os.path.join(saves, ".fhc", "last_map.json")
+    return os.path.join(saves, ".fhc", "fhr_last_map.json")
 
 
 def _saves(tmp_path, with_save=True):
@@ -78,7 +78,7 @@ def test_map_is_stored_in_the_instance_fhc_folder(tmp_path):
     saves = _saves(tmp_path)
     _cycle(_plugin(tmp_path, _Channel({})), _MapServer(_Mission("Syria")), saves)
     assert json.load(open(_map_file(saves))) == {"map": "Syria"}
-    assert not [f for f in os.listdir(os.path.dirname(commands.__file__)) if f.startswith("last_map")]
+    assert not [f for f in os.listdir(os.path.dirname(commands.__file__)) if f.startswith(("last_map", "fhr_last_map"))]
 
 
 def test_last_known_map_is_kept_when_no_mission_is_loaded(tmp_path):
@@ -117,9 +117,9 @@ def test_file_is_only_rewritten_when_the_map_changes(tmp_path, monkeypatch):
     plugin = _plugin(tmp_path, ch)
     for _ in range(3):
         _cycle(plugin, _MapServer(_Mission("Syria")), saves)
-    assert [w for w in writes if w.endswith("last_map.json")] == [_map_file(saves)]   # written once
+    assert [w for w in writes if w.endswith("fhr_last_map.json")] == [_map_file(saves)]   # written once
     _cycle(plugin, _MapServer(_Mission("Kola")), saves)
-    assert len([w for w in writes if w.endswith("last_map.json")]) == 2
+    assert len([w for w in writes if w.endswith("fhr_last_map.json")]) == 2
 
 
 def test_same_map_in_file_is_not_rewritten_after_restart(tmp_path, monkeypatch):
@@ -133,7 +133,7 @@ def test_same_map_in_file_is_not_rewritten_after_restart(tmp_path, monkeypatch):
         return await real(node, path, data, log=log)
     monkeypatch.setattr(commands, "write_bytes_to_node", spy)
     _cycle(_plugin(tmp_path, ch), _MapServer(_Mission("Syria")), saves)
-    assert not [w for w in writes if w.endswith("last_map.json")]
+    assert not [w for w in writes if w.endswith("fhr_last_map.json")]
 
 
 def test_new_server_without_saves_folder_stores_nothing_and_stays_quiet(tmp_path, caplog):
@@ -161,7 +161,7 @@ def test_corrupt_or_odd_map_file_is_ignored(tmp_path):
         saves = tmp_path / "s"
         shutil.rmtree(saves, ignore_errors=True)
         (saves / ".fhc").mkdir(parents=True)
-        (saves / ".fhc" / "last_map.json").write_text(content)
+        (saves / ".fhc" / "fhr_last_map.json").write_text(content)
         ch = _Channel({})
         _cycle(_plugin(tmp_path, ch), _MapServer(None), str(saves))
         assert _map_line(ch) == [], content

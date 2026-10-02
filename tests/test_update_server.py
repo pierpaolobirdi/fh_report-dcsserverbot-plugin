@@ -98,7 +98,7 @@ def test_lost_message_id_adopts_existing_message(tmp_path, saves_dir):
 def test_empty_channel_gets_new_message(tmp_path, saves_dir):
     log, ids, _, d = _run(tmp_path, saves_dir, {}, {}, "D")
     assert log == [("send",)] and ids == {"inst": 99}
-    assert os.path.isfile(os.path.join(d, ".fhc", "daily_snapshot.json"))
+    assert os.path.isfile(os.path.join(d, ".fhc", "fhr_daily_snapshot.json"))
 
 
 def test_no_local_folders_for_remote_paths(tmp_path):

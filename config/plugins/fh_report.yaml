@@ -109,8 +109,9 @@
 #   update_interval  - Seconds between embed refreshes              (default: 300)
 #   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
 #                          Manual reset (no commands in this plugin): delete
-#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
-#                          restarts cleanly at 0, it never retroactively counts
+#                          saves_dir/.fhc/fhr_daily_snapshot.json (and the older
+#                          daily_snapshot.json too, if it's still there) — the daily
+#                          counter restarts cleanly at 0, it never retroactively counts
 #                          everything accumulated up to that point.
 #                          Campaign restart is also detected automatically: if both
 #                          total points and total kills drop for common players,
@@ -124,7 +125,7 @@
 #                              sat: 6
 #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
 #                      The map is read from DCSServerBot (never configured here) and the
-#                      last known one is remembered in saves_dir/.fhc/last_map.json;
+#                      last known one is remembered in saves_dir/.fhc/fhr_last_map.json;
 #                      nothing is shown until it is known.
 #                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)

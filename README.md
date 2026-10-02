@@ -271,7 +271,7 @@ Shows up to 7 fields, in priority order: missions completed (any stat key contai
 
 The daily card uses the same daily reset mechanism as daily leaderboard points (see `daily_reset_hour` above). Icons are configurable independently via `session_card_icon` and `daily_card_icon` (default: 🔸 for both).
 
-**Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/daily_snapshot.json` — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
+**Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/fhr_daily_snapshot.json` (and the older `daily_snapshot.json` too, if it is still there) — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
 
 ---
 
@@ -309,7 +309,11 @@ When DCSServerBot knows which map the mission runs on, it's shown as a second li
 🗺️  Afghanistan
 ```
 
-The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is remembered per server in `Saves\.fhc\last_map.json` and replaced when DCSServerBot reports another one; until a map is known, nothing is shown. Hide it with `show_map: false` (it is still tracked, so it appears right away when re-enabled).
+The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is remembered per server in `Saves\.fhc\fhr_last_map.json` and replaced when DCSServerBot reports another one; until a map is known, nothing is shown. Hide it with `show_map: false` (it is still tracked, so it appears right away when re-enabled).
+
+### Files in `.fhc`
+
+Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, `fhr_last_map.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Versions before this prefix used the same names without `fhr_`: they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. On a remote agent node the old file can't be deleted from here; it is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
@@ -388,7 +392,7 @@ When `disable_updates: true`, that instance skips the server entirely on every c
 
 ## Daily Podium
 
-A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), FH_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/daily_history.json`) — no database, no manual steps.
+A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), FH_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
 
 ### Seeing it in the main embed (`P` combined with other letters)
 
