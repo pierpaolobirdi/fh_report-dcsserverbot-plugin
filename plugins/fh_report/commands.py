@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.7"
+FH_REPORT_RELEASE = "14.1.8"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -660,10 +660,9 @@ def _remove_legacy_file(path: str) -> None:
         pass
 
 
-async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> tuple[dict, bool]:
+async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> dict:
     """Read saves_dir/.fhc/fhr_<name>, falling back to the old un-prefixed
-    <name> (files written before the fhr_ prefix existed). Returns
-    (data, read_from_new_file). Writers always use the fhr_ name, so an old
+    <name> (files written before the fhr_ prefix existed). Writers always use the fhr_ name, so an old
     file is read only until the next write creates its fhr_ replacement.
     With cleanup=True (the updater, the only writer), the old file is removed
     the first time the fhr_ file is read back OK — never in the same step that
@@ -672,8 +671,8 @@ async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False)
     if data:
         if cleanup:
             _remove_legacy_file(os.path.join(saves_dir, ".fhc", name))
-        return data, True
-    return await _read_json(node, os.path.join(saves_dir, ".fhc", name)), False
+        return data
+    return await _read_json(node, os.path.join(saves_dir, ".fhc", name))
 
 
 async def run_write_self_test(node, saves_dir: str, log=None) -> None:
@@ -2337,11 +2336,10 @@ class FH_Report(Plugin):
         DCSSB reports a different one. None if it has never been known."""
         instance_name = server.instance.name
         if instance_name not in self._last_maps_saved:       # first look: read the file once
-            data, from_new = await _read_fhr_json(node, saves_dir, "last_map.json", cleanup=True)
+            data = await _read_json(node, self._get_map_file(saves_dir))
             saved = data.get("map") if isinstance(data, dict) else None
             saved = saved.strip() if isinstance(saved, str) else ""
-            # A map found only in the old file still has to be written to the fhr_ one.
-            self._last_maps_saved[instance_name] = saved if from_new else ""
+            self._last_maps_saved[instance_name] = saved
             if saved:
                 self._last_maps[instance_name] = saved
         try:
@@ -2476,7 +2474,7 @@ class FH_Report(Plugin):
         {"campaign_restart": bool, "top": [{"name", "points"[, "ucid"]}]}. A date
         can hold more than one event. {} if missing.
         """
-        return (await _read_fhr_json(node, saves_dir, "daily_history.json", cleanup))[0]
+        return await _read_fhr_json(node, saves_dir, "daily_history.json", cleanup)
 
     async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
         """Write fhr_daily_history.json via write_bytes_to_node (newest date first,
@@ -2496,7 +2494,7 @@ class FH_Report(Plugin):
         """fhr_daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
         callers unpack it with _unpack_daily_snapshot. {} if missing.
         """
-        return (await _read_fhr_json(node, saves_dir, "daily_snapshot.json", cleanup))[0]
+        return await _read_fhr_json(node, saves_dir, "daily_snapshot.json", cleanup)
 
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
         """Write fhr_daily_snapshot.json via write_bytes_to_node."""

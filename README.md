@@ -313,7 +313,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, `fhr_last_map.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Versions before this prefix used the same names without `fhr_`: they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. On a remote agent node the old file can't be deleted from here; it is simply left unused.
+Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, `fhr_last_map.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. On a remote agent node the old file can't be deleted from here; it is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
