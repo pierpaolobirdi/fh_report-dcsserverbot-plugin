@@ -63,6 +63,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `update_interval` | `300` | Seconds between embed refreshes |
 | `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
 | `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
+| `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
 | `bar_length` | `40` | Number of squares in the progress bar |
 | `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
 | `max_zones` | `15` | Max zones per column. Omit for all |
@@ -298,6 +299,17 @@ admin: Admin, SomeSpecificUser
 ```
 
 Comma-separated list — each entry can be a Discord **role name** (as defined in your server) or a specific **username**. Defaults to `Admin` if not set. Anyone not on this list can only ever see their own stats.
+
+### Map in the title (`show_map`)
+
+When DCSServerBot knows which map the mission runs on, it's shown as a second line of the embed title:
+
+```
+📡  Operation Nova314 — FootHold
+🗺️  Afghanistan
+```
+
+The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is remembered per server in `Saves\.fhc\last_map.json` and replaced when DCSServerBot reports another one; until a map is known, nothing is shown. Hide it with `show_map: false` (it is still tracked, so it appears right away when re-enabled).
 
 ### Footer reminder (`show_player_cmd_hint`)
 

@@ -134,6 +134,11 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                            daily_reset_schedule:
 #                              thu: 6
 #                              sat: 6
+#   show_map         - Show the mission's map on a second line of the embed title  (default: true)
+#                      The map is read from DCSServerBot (never configured here) and the
+#                      last known one is remembered in saves_dir/.fhc/last_map.json;
+#                      nothing is shown until it is known.
+#                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
@@ -305,6 +310,7 @@ KNOWN_VARS = {
     "update_interval",
     "daily_reset_hour",
     "daily_reset_schedule",
+    "show_map",
     "bar_length",
     "bar_style_emoji",
     "max_zones",
@@ -346,6 +352,7 @@ DEFAULTS = {
     "report_layout":    "R",
     "update_interval":  300,
     "daily_reset_hour": 0,
+    "show_map":         True,
     "bar_length":       40,
     "bar_style_emoji":  False,
     "max_zones":        15,
@@ -376,6 +383,7 @@ COMMENTS = {
 
     "update_interval":  "# Seconds between embed refreshes",
     "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
+    "show_map":         "# false = hide  |  true = show the map on the title's second line",
     "bar_length":       "# Number of squares in the progress bar",
     "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
     "max_zones":        "# Max zones shown per column (omit for all)",
@@ -630,7 +638,8 @@ def main():
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
     "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points",
-    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day"}
+    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day",
+                 "show_map"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"

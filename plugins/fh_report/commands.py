@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.5"
+FH_REPORT_RELEASE = "14.1.6"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1804,7 +1804,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     # tables section) so the report_layout engine below can add its own
     # fields onto the same embed object.
     embed = discord.Embed(
-        title=_embed_title(campaign_name, map_name),
+        title=_embed_title(campaign_name, map_name if _show_map(cfg) else None),
         description=f"**Front Status — {timestamp}**\n\n{progress}",
         color=0x3498DB
     )
@@ -1876,6 +1876,12 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     return _trim_embed(embed)
 
 
+def _show_map(cfg: dict) -> bool:
+    """show_map: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_map")
+    return True if raw is None else _bool_cfg(raw)
+
+
 def _embed_title(campaign_name: str, map_name: str | None) -> str:
     """Report title; when the map is known it's a second line of the title
     itself, so it shares the title's font. The first line is what identifies
@@ -1896,7 +1902,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     campaign_name = cfg.get("campaign_name", "Foothold Campaign")
     timestamp = f"<t:{int(datetime.now(timezone.utc).timestamp())}:f>"
     embed = discord.Embed(
-        title=_embed_title(campaign_name, map_name),
+        title=_embed_title(campaign_name, map_name if _show_map(cfg) else None),
         description=(f"**Front Status — {timestamp}**\n\n"
                      "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
         color=0x95A5A6

@@ -202,3 +202,32 @@ def test_existing_message_with_map_in_title_is_still_adopted(tmp_path):
 
 def test_overlong_title_stays_within_discords_limit():
     assert len(commands._embed_title("x" * 300, "Syria")) == 256
+
+
+def _title_cfg(**extra):
+    return dict({"campaign_name": "C"}, **extra)
+
+
+def test_show_map_defaults_to_true_and_reads_flexible_values():
+    for cfg, expected in (({}, True), ({"show_map": True}, True), ({"show_map": "true"}, True),
+                          ({"show_map": 1}, True), ({"show_map": False}, False),
+                          ({"show_map": "false"}, False), ({"show_map": 0}, False)):
+        embed = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, _title_cfg(**cfg),
+                                     map_name="Syria")
+        assert (embed.title == "📡  C\n🗺️  Syria") is expected, cfg
+
+
+def test_show_map_false_hides_the_map_everywhere_but_still_tracks_it(tmp_path):
+    for with_save in (True, False):                              # full report and "not started" embed
+        base = tmp_path / str(with_save)
+        base.mkdir()
+        saves, ch = _saves(base, with_save=with_save), _Channel({})
+        plugin = _plugin(base, ch)
+        asyncio.run(plugin._update_server(_MapServer(_Mission("Syria")), {
+            "saves_dir": saves, "channel_id": 5, "campaign_name": "C", "report_layout": "R",
+            "show_map": False}))
+        assert ch.sent.title == "📡  C" and _map_line(ch) == []
+        assert json.load(open(_map_file(saves))) == {"map": "Syria"}      # remembered while hidden
+        asyncio.run(plugin._update_server(_MapServer(None), {
+            "saves_dir": saves, "channel_id": 5, "campaign_name": "C", "report_layout": "R"}))
+        assert ch.sent.title == "📡  C\n🗺️  Syria"                         # appears once enabled

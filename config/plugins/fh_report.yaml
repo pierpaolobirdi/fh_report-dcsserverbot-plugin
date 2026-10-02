@@ -122,6 +122,11 @@
 #                            daily_reset_schedule:
 #                              thu: 6
 #                              sat: 6
+#   show_map         - Show the mission's map on a second line of the embed title  (default: true)
+#                      The map is read from DCSServerBot (never configured here) and the
+#                      last known one is remembered in saves_dir/.fhc/last_map.json;
+#                      nothing is shown until it is known.
+#                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
@@ -291,6 +296,7 @@ DEFAULT:
 #  daily_reset_schedule:
 #    sat: 6
 #    sun: 6
+  show_map: true  # false = hide  |  true = show the map on the title's second line
   bar_length: 40  # Number of squares in the progress bar
   bar_style_emoji: false  # false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)
   max_zones: 15  # Max zones shown per column (omit for all)
@@ -333,6 +339,7 @@ DCS_Server:                             # instance name from nodes.yaml
 #  daily_reset_schedule:
 #    sat: 6
 #    sun: 6
+#  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
@@ -378,6 +385,7 @@ DCS_Server:                             # instance name from nodes.yaml
 #  daily_reset_schedule:
 #    sat: 6
 #    sun: 6
+#  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
