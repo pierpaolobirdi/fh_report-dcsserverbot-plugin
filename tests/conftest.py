@@ -86,7 +86,7 @@ def make_plugin(**attrs):
     p = commands.Fh_Report.__new__(commands.Fh_Report)
     p.log = logging.getLogger("fh_report.tests")
     p._message_ids, p._layout_cycle_index, p._cycle_punishment = {}, {}, None
-    p._last_maps, p._map_probed = {}, set()
+    p._last_maps, p._map_probed, p._session_starts = {}, set(), {}
     for k, v in attrs.items():
         setattr(p, k, v)
     return p

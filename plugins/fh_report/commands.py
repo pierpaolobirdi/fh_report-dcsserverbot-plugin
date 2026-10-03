@@ -17,7 +17,7 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Type
 
 import discord
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.16"
+FH_REPORT_RELEASE = "14.1.17"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -55,7 +55,6 @@ CAREER_HELO_SECONDS   = 3
 CAREER_TRAPS          = 8
 CAREER_KILLS          = 10
 CAREER_DEATHS         = 21
-CAREER_FRIENDLY_KILLS = 18   # blue-on-blue: friendly units/players destroyed
 CAREER_FUEL_LBS       = 30
 
 HOT_STATES = {Status.RUNNING, Status.PAUSED}
@@ -1304,7 +1303,7 @@ def _fmt_compact(n: int) -> str:
     return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
 
 
-def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
+def _build_pilot_card(career: dict, icon: str = "🔸", bnb: int = 0) -> str | None:
     """One-line career card from Foothold_Ranks.lua career stats (fixed/helo
     hours, kills, traps, fuel received, deaths). None if all are zero.
     """
@@ -1315,7 +1314,6 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     traps    = int(career.get(8, 0))
     refuel_lbs = int(career.get(30, 0))
     deaths   = int(career.get(21, 0))
-    friendly = int(career.get(CAREER_FRIENDLY_KILLS, 0))
 
     def _fmt_time(seconds: int) -> str | None:
         """Format seconds as hours (>=1h) or minutes (<1h). None if zero."""
@@ -1335,7 +1333,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
-    if friendly > 0:   parts.append(f"B&B: {friendly}")   # penultimate, never dropped
+    if bnb > 0:        parts.append(f"B&B: {bnb}")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1365,17 +1363,18 @@ def _is_mission_stat(key: str) -> bool:
     return base not in _NON_MISSION_STATS
 
 
-def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
+def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> str | None:
     """One-line session/daily card from raw playerStats keys, in priority
     order: Msn (every mission objective, see _is_mission_stat), Ach, Air
     (Air+Helo), SAM, Ground (Ground Units+Structure+Infantry), Ship, Resc,
     Refuels, Deaths. Capped at 7 entries, dropping the lowest priority first
-    but always keeping Deaths. 'Flight time' is left out on purpose: Foothold
+    but always keeping B&B (blue-on-blue, from DCSSB) and Deaths. 'Flight time' is left out on purpose: Foothold
     only records it for a few transport/helo types, so it would read 0 for
     most pilots. None if everything is zero.
     """
-    if not raw_stats:
+    if not raw_stats and bnb <= 0:
         return None
+    raw_stats = raw_stats or {}
 
     missions = sum(
         int(v) for k, v in raw_stats.items()
@@ -1401,17 +1400,17 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
         (5, f"{ship} Ship") if ship > 0 else None,
         (6, f"{rescues} Resc") if rescues > 0 else None,
         (7, f"{refuels} Refuels") if refuels > 0 else None,
-        (8, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
+        (8, f"B&B: {bnb}") if bnb > 0 else None,
+        (9, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
 
-    # Cap at 7 fields — drop lowest-priority fields first, but always keep deaths
+    # Cap at 7 fields — drop lowest-priority fields first, but always keep
+    # B&B and deaths (ranks 8 and 9)
     if len(candidates) > 7:
-        deaths_entry = next((c for c in candidates if c[0] == 8), None)
-        others       = [c for c in candidates if c[0] != 8]
-        keep_count   = 6 if deaths_entry else 7
-        others       = sorted(others, key=lambda c: c[0])[:keep_count]
-        candidates   = sorted(others + ([deaths_entry] if deaths_entry else []), key=lambda c: c[0])
+        kept   = [c for c in candidates if c[0] >= 8]
+        others = sorted((c for c in candidates if c[0] < 8), key=lambda c: c[0])[:7 - len(kept)]
+        candidates = sorted(others + kept, key=lambda c: c[0])
 
     parts = [label for _, label in candidates]
 
@@ -1532,7 +1531,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                last_seen, session_points: float,
                                daily_points: float, session_stats: dict,
                                mission_status: str,
-                               daily_stats: dict | None = None) -> discord.Embed:
+                               daily_stats: dict | None = None,
+                               bnb: dict | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
     No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
@@ -1588,8 +1588,6 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
         career_lines.append(f"- **Fuel Received:** {_fmt_compact(int(career[CAREER_FUEL_LBS]))} lbs")
-    if career.get(CAREER_FRIENDLY_KILLS, 0) > 0:
-        career_lines.append(f"- **Friendly Kills (B&B):** {int(career[CAREER_FRIENDLY_KILLS])}")
     if career.get(CAREER_DEATHS, 0) > 0:
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
@@ -1597,6 +1595,17 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(
             name=f"🏆 __Career Stats__ (R: {_fmt_num(credits)} — {get_rank(credits)})",
             value="\n".join(career_lines), inline=False)
+
+    # ── Blue-on-blue (from DCSServerBot's Punishment plugin) ────────────
+    if bnb and bnb.get("total"):
+        lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
+                 f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
+        for when, event, points, victim in bnb.get("recent") or []:
+            ts = int(calendar.timegm(when.timetuple()))
+            who = f" — {_safe_code_span(victim)}" if victim else ""
+            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)} ({points:g} pts){who}")
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+        embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
 
     # ── Mission ─────────────────────────────────────────────────────────
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
@@ -1796,15 +1805,18 @@ def _render_layout_tables(
             block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
 
             if show_pilot_card and role == "R":
-                card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon,
+                                         bnb=(data.get("bnb") or {}).get("total", 0))
                 if card:
                     block.append(card)
             if show_session_card and role == "S":
-                s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+                s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon,
+                                             bnb=(data.get("bnb") or {}).get("session", 0))
                 if s_card:
                     block.append(s_card)
             if show_daily_card and role == "D":
-                d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
+                d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon,
+                                             bnb=(data.get("bnb") or {}).get("day", 0))
                 if d_card:
                     block.append(d_card)
 
@@ -1885,8 +1897,10 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 daily_history: dict | None = None,
                 waypoint_map: dict | None = None,
                 name_to_ucid: dict | None = None,
-                map_name: str | None = None) -> discord.Embed:
-    """Build the Discord embed from parsed Foothold data. Display options
+                map_name: str | None = None,
+                bnb: dict | None = None) -> discord.Embed:
+    """Build the Discord embed from parsed Foothold data. `bnb` is
+    {ucid: {"total", "day", "session"}} blue-on-blue counts from DCSSB. Display options
     are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
     campaign_name       = cfg.get("campaign_name", "Foothold Campaign")
     max_zones           = cfg.get("max_zones") or None
@@ -1969,6 +1983,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
             if raw is None and base in srs_idx:
                 raw = srs[srs_idx[base]]
             data["session_stats"] = raw or {}
+        if bnb and "bnb" not in data and data.get("ucid") in bnb:
+            data["bnb"] = bnb[data["ucid"]]
         if "daily_stats" not in data:
             draw = drs.get(name)
             if draw is None and base in drs_idx:
@@ -2148,6 +2164,7 @@ def _pack_daily_snapshot(d: dict, live_names: set | None = None) -> dict:
         "persistence_filename": d.get("persistence_filename", ""),
         "players":              ordered,
         "known_stat_keys":      d.get("known_stat_keys", []),
+        **({"session_start": d["session_start"]} if d.get("session_start") else {}),
     }
 
 
@@ -2162,6 +2179,7 @@ def _unpack_daily_snapshot(raw: dict) -> dict:
     out = {
         "date": raw.get("date", ""), "persistence_filename": raw.get("persistence_filename", ""),
         "known_stat_keys": raw.get("known_stat_keys", []),
+        "session_start": raw.get("session_start", ""),
         "snapshot": {}, "stats_snapshot": {}, "last_daily": {}, "last_daily_stats": {},
         "carry_over": {}, "stats_carry_over": {}, "names": {}, "name_to_ucid": {},
     }
@@ -2367,6 +2385,40 @@ def _reset_hour_today(cfg: dict) -> int:
     return int(cfg.get("daily_reset_hour") or 0)
 
 
+# DCSSB Punishment events that are blue-on-blue (B&B): friendly units destroyed
+# (kill, collision_kill) or hit/damaged (friendly_fire, collision_hit).
+BNB_EVENTS = ("kill", "collision_kill", "friendly_fire", "collision_hit")
+BNB_LABELS = {
+    "kill":           "Team kill",
+    "collision_kill": "Collision kill",
+    "friendly_fire":  "Friendly fire",
+    "collision_hit":  "Collision hit",
+}
+
+
+def _day_start(cfg: dict, now: datetime | None = None) -> datetime:
+    """Most recent daily reset instant (UTC): today's reset hour if it has
+    passed, else yesterday's (each day with its own daily_reset_schedule hour)."""
+    now = now or datetime.now(timezone.utc)
+    schedule = cfg.get("daily_reset_schedule") or {}
+    default  = int(cfg.get("daily_reset_hour") or 0)
+    names    = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    def at(day: datetime) -> datetime:
+        hour = int(schedule[names[day.weekday()]]) if names[day.weekday()] in schedule else default
+        return day.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+    start = at(now)
+    return start if now >= start else at(now - timedelta(days=1))
+
+
+def _parse_utc(text) -> datetime | None:
+    try:
+        return datetime.strptime(str(text), "%Y-%m-%dT%H:%M:%S") if text else None
+    except ValueError:
+        return None
+
+
 async def _resolve_saves_dir(server, cfg: dict) -> str:
     """Configured saves_dir, else <missions dir>/Saves (same as Pretense)."""
     return cfg.get("saves_dir") or os.path.join(await server.get_missions_dir(), "Saves")
@@ -2388,6 +2440,7 @@ class Fh_Report(Plugin):
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
         self._cycle_punishment: dict | None = None
+        self._session_starts: dict[str, str] = {}   # saves_dir -> in-place restart time (UTC ISO)
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -2692,6 +2745,14 @@ class Fh_Report(Plugin):
 
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
+        # An in-place restart (same map, Session Leaderboard back to zero) is the
+        # one session start DCSSB can't tell us; remember when we noticed it.
+        # A map change is not recorded: DCSSB knows that start exactly.
+        session_start = snap.get("session_start", "")
+        if campaign_restarted and not (filename_changed or data_vanished) and persist:
+            session_start = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        self._session_starts[saves_dir] = session_start
+
         # ── Real calendar-day reset (the only thing that closes a day) ─────
         reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
         first_run      = not snap_date
@@ -2825,6 +2886,7 @@ class Fh_Report(Plugin):
             "name_to_ucid":         {**name_to_ucid_snapshot, **(name_to_ucid or {})},
             "names":                {**names_snapshot, **names_by_id},
             "known_stat_keys":      sorted(known_stat_keys),
+            "session_start":        session_start,
         }
         # Only write when something actually changed — with nobody earning
         # points (e.g. an empty server) every cycle would otherwise rewrite
@@ -2834,6 +2896,84 @@ class Fh_Report(Plugin):
             await self._save_daily_snapshot(saves_dir, new_snap, node)
 
         return daily, daily_stats, campaign_restarted
+
+    async def _session_start(self, cur, server_name: str, saves_dir: str) -> datetime | None:
+        """Start of the current session (naive UTC): the later of the current
+        mission's start (DCSSB, via the open cursor) and the last in-place
+        campaign restart noticed. A failing missions lookup only costs the first."""
+        mission_start = None
+        try:
+            await cur.execute("SELECT mission_start FROM missions WHERE server_name = %s "
+                              "ORDER BY id DESC LIMIT 1", (server_name,))
+            row = await cur.fetchone()
+            mission_start = row[0] if row else None
+        except Exception as e:
+            self.log.debug(f"Fh_Report: mission start not available: {e}")
+        restart = _parse_utc(self._session_starts.get(saves_dir))
+        return max((t for t in (mission_start, restart) if t), default=None)
+
+    async def _fetch_bnb(self, server, cfg: dict, saves_dir: str) -> dict:
+        """Blue-on-blue counts per UCID from DCSSB's pu_events:
+        {ucid: {"total", "day", "session"}}. Total is all servers and all the
+        history DCSSB keeps; day and session only count this server since the
+        last daily reset / session start. Empty when the Punishment plugin
+        (its pu_events table) isn't there."""
+        now_day = _day_start(cfg).replace(tzinfo=None)
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    session = await self._session_start(cur, server.name, saves_dir)
+                    await cur.execute("""
+                        SELECT init_id, COUNT(*),
+                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s),
+                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s)
+                        FROM pu_events WHERE event = ANY(%s) GROUP BY init_id
+                    """, (server.name, now_day, server.name, session or datetime.max, list(BNB_EVENTS)))
+                    return {r[0]: {"total": int(r[1]), "day": int(r[2]), "session": int(r[3])}
+                            for r in await cur.fetchall()}
+        except Exception as e:
+            self.log.debug(f"Fh_Report: B&B data not available: {e}")
+            return {}
+
+    async def _fetch_bnb_detail(self, server, cfg: dict, saves_dir: str, ucid: str) -> dict | None:
+        """One player's blue-on-blue detail for /fh_report player, or None when
+        there is nothing (or no Punishment plugin): totals split into destroyed
+        (kill, collision_kill) and damaged (friendly_fire, collision_hit), today
+        and this session on this server, plus the latest events."""
+        day_from = _day_start(cfg).replace(tzinfo=None)
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    session = await self._session_start(cur, server.name, saves_dir)
+                    await cur.execute("""
+                        SELECT event, COUNT(*),
+                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s),
+                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s)
+                        FROM pu_events WHERE init_id = %s AND event = ANY(%s) GROUP BY event
+                    """, (server.name, day_from, server.name, session or datetime.max,
+                          ucid, list(BNB_EVENTS)))
+                    by_event = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
+                    if not by_event:
+                        return None
+                    await cur.execute("""
+                        SELECT e.time, e.event, e.points, t.name
+                        FROM pu_events e LEFT JOIN players t ON t.ucid = e.target_id
+                        WHERE e.init_id = %s AND e.event = ANY(%s)
+                        ORDER BY e.time DESC LIMIT 5
+                    """, (ucid, list(BNB_EVENTS)))
+                    recent = [(r[0], r[1], float(r[2]), r[3]) for r in await cur.fetchall()]
+        except Exception as e:
+            self.log.debug(f"Fh_Report: B&B detail not available: {e}")
+            return None
+        destroyed = ("kill", "collision_kill")
+        return {
+            "total":     sum(v[0] for v in by_event.values()),
+            "day":       sum(v[1] for v in by_event.values()),
+            "session":   sum(v[2] for v in by_event.values()),
+            "destroyed": sum(v[0] for k, v in by_event.items() if k in destroyed),
+            "damaged":   sum(v[0] for k, v in by_event.items() if k not in destroyed),
+            "recent":    recent,
+        }
 
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table."""
@@ -2965,6 +3105,10 @@ class Fh_Report(Plugin):
                 os.path.basename(persistence_file) if persistence_file else None,
                 name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
 
+        bnb = {}
+        if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
+            bnb = await self._fetch_bnb(server, cfg, saves_dir)
+
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
         daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
                               if "P" in current_layout else None)
@@ -3012,6 +3156,7 @@ class Fh_Report(Plugin):
             # old entries by UCID and show the player's current name/rank.
             name_to_ucid      = name_to_ucid if "P" in current_layout else None,
             map_name          = map_name,
+            bnb               = bnb,
         )
 
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
@@ -3448,7 +3593,8 @@ class Fh_Report(Plugin):
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
-            mission_status=mission_status, daily_stats=d_stats
+            mission_status=mission_status, daily_stats=d_stats,
+            bnb=await self._fetch_bnb_detail(srv, cfg, saves_dir, ucid) if ucid else None,
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 

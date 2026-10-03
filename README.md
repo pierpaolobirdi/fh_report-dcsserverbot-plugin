@@ -244,7 +244,7 @@ The icon preceding the card line is configurable via `pilot_card_icon` (default:
 
 ```
 🥇 `Pilot1` — Colonel (R: 241,500)
-·　🔸 129h Fixed · 13h Helo · 47 Kills · 23 Traps · 12k lbs · B&B: 2 · 3 Deaths
+·　🔸 129h Fixed · 13h Helo · 47 Kills · 23 Traps · 12k lbs · 3 Deaths
 🥈 `Pilot2` — Lieutenant Colonel (R: 198,320)
 ·　🔸 89h Fixed · 31 Kills
 ·　⚖️ JAG indictment filed (32 p.p.) 🔨🔨🔨
@@ -256,8 +256,26 @@ Stats shown:
 - Total kills
 - Carrier traps
 - In-flight refuels received
-- `B&B: n` — friendly units or players the pilot has destroyed (blue-on-blue). Foothold takes points and rank credits for each one (`FriendlyFireRankPenalty`) but only records the count, so that is what is shown. Always kept, right before Deaths; it also appears in `/fh_report player`
 - Pilot deaths
+
+### Blue-on-blue (`B&B`)
+
+`B&B: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It counts friendly units or players the pilot destroyed (`kill`, `collision_kill`) **plus** those hit or damaged (`friendly_fire`, `collision_hit`), as recorded by the DCSServerBot **Punishment** plugin (`pu_events`). Without that plugin there is no data and `B&B` is simply left out.
+
+| Card | Counts |
+|---|---|
+| Rank (`show_pilot_card`) | everything DCSServerBot has kept, on all servers |
+| Session (`show_session_card`) | this server since the current session started |
+| Daily (`show_daily_card`) | this server since the last daily reset |
+
+The session starts when a mission is loaded (DCSServerBot's mission start) or when Fh_Report notices an in-place campaign restart (the Session Leaderboard starting again from zero, detected on the next update cycle and stored as `session_start` in `fhr_daily_snapshot.json`).
+
+Things to keep in mind, all coming from how the Punishment plugin records events:
+- Repeated hits on the same target in the same minute are stored as one event, so *damaged* is a minimum.
+- Only events that earn penalty points are stored, so an event configured with 0 points, or a player on the exemption list, leaves no record.
+- Old events are removed by the plugin's `decay` settings (60 days in the sample configuration), which also limits the rank card total.
+
+`/fh_report player` adds a **Blue-on-Blue (B&B)** section with the total (destroyed / damaged), today and session counts, and the latest events with points, date and victim.
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 
