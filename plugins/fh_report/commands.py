@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.31"
+FH_REPORT_RELEASE = "14.1.32"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -606,6 +606,18 @@ def _session_migrate(old: dict) -> dict:
     kind = old.get("fallback_kind") or "first_seen"
     start = old.get("fallback") or old.get("start")
     return {"file": old.get("file", ""), "start": start, "kind": kind, "seen": start} if start else {}
+
+
+def _session_start_for(st: dict, cfg: dict) -> datetime | None:
+    """Session start to count from. A campaign already running when Fh_Report
+    first looked ("first_seen") started at some unknown earlier time, so it
+    counts at least from the daily reset before that first look: the session
+    includes the day, as the Session Leaderboard does. A detected reset counts
+    from the reset."""
+    start = _parse_utc((st or {}).get("start"))
+    if start and st.get("kind") == "first_seen":
+        start = min(start, _day_start(cfg, start.replace(tzinfo=timezone.utc)).replace(tzinfo=None))
+    return start
 
 
 def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
@@ -3024,7 +3036,7 @@ class Fh_Report(Plugin):
         return now
 
     async def _update_session(self, server, saves_dir: str, node, source_node,
-                              persistence_file: str, points: dict, kills: dict) -> datetime:
+                              persistence_file: str, points: dict, kills: dict, cfg: dict | None = None) -> datetime:
         """Notice campaign resets, keep .fhc/fhr_session.json current, and
         return the session start (naive UTC). `points` / `kills` are the
         campaign points and Air+Ground kills per player ID. See the comment above."""
@@ -3044,6 +3056,7 @@ class Fh_Report(Plugin):
         reset = False
         if not old:
             st = {"file": basename, "start": now.strftime(_SESSION_ISO), "kind": "first_seen"}
+            self.log.debug(f"Fh_Report [{server.name}]: campaign {basename} first seen {st['start']} UTC")
             watch = {**cur, "seen": now, "pending": False}
         elif old.get("file") != basename or absent:       # other map, or the save reappeared
             reset, watch = True, {**cur, "seen": now, "pending": False}
@@ -3057,6 +3070,8 @@ class Fh_Report(Plugin):
         if reset:
             st = {"file": basename, "kind": "detected",
                   "start": (await self._reset_moment(server, seen, now)).strftime(_SESSION_ISO)}
+            self.log.info(f"Fh_Report [{server.name}]: new campaign session ({basename}) from {st['start']} UTC "
+                          f"(noticed {now.strftime(_SESSION_ISO)} UTC)")
         elif old:
             st = {k: old[k] for k in ("file", "start", "kind")}
         self._campaign_watch[saves_dir] = watch
@@ -3068,7 +3083,7 @@ class Fh_Report(Plugin):
             await _ensure_fhc_dir(source_node, saves_dir)
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)
-        return _parse_utc(st["start"])
+        return _session_start_for(st, cfg or {})
 
     async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
@@ -3281,7 +3296,7 @@ class Fh_Report(Plugin):
         # Campaign session start (always kept up to date: /fh_report player reads it too)
         session = await self._update_session(
             server, saves_dir, node, source_node, persistence_file, campaign_by_id,
-            {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()})
+            {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()}, cfg)
         bnb = {}
         if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
             bnb = await self._fetch_bnb(
@@ -3773,7 +3788,7 @@ class Fh_Report(Plugin):
 
         sess = await _read_fhr_json(node, saves_dir, "session.json")
         bnb, penalties = (await self._fetch_bnb_detail(
-            srv, cfg, _parse_utc(sess.get("start")), ucid,
+            srv, cfg, _session_start_for(sess, cfg), ucid,
             with_penalties=_bool_cfg(cfg.get("show_punishment")))
             if ucid else (None, None))
         embed = _build_player_report_embed(

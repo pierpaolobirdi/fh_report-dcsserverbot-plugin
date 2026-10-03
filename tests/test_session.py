@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from conftest import FIXTURES, FileNode, commands, make_plugin
 
 T0 = datetime(2026, 10, 3, 12, 0, 0)
+D0 = datetime(2026, 10, 3, 0, 0, 0)     # a campaign first seen at T0 counts from that day's reset
 IDS = [f"{i:032x}" for i in range(1, 6)]
 
 
@@ -97,10 +98,10 @@ class _Game:
 def test_first_look_and_normal_play_keep_the_start(tmp_path, monkeypatch):
     g = _Game(tmp_path, monkeypatch)
     pts, kills = _points()
-    assert g.cycle(0, pts, kills) == T0
+    assert g.cycle(0, pts, kills) == D0
     grown = {i: v + 500 for i, v in pts.items()}
-    assert g.cycle(5, grown, {i: v + 2 for i, v in kills.items()}) == T0
-    assert g.cycle(10, {**grown, IDS[4]: 100}, kills) == T0          # a new pilot joins
+    assert g.cycle(5, grown, {i: v + 2 for i, v in kills.items()}) == D0
+    assert g.cycle(10, {**grown, IDS[4]: 100}, kills) == D0          # a new pilot joins
 
 
 def test_mission_change_to_another_map_is_noticed_at_once(tmp_path, monkeypatch):
@@ -121,7 +122,7 @@ def test_campaign_restarted_from_zero_in_place_needs_a_second_look(tmp_path, mon
     g.cycle(0, pts, kills)
     g.cycle(5, pts, kills)
     g.pool.mission_start = T0 + timedelta(minutes=7)
-    assert g.cycle(10, {}, {}) == T0                                # first look: could be a glitch
+    assert g.cycle(10, {}, {}) == D0                                # first look: could be a glitch
     assert g.cycle(15, {}, {}) == T0 + timedelta(minutes=7)         # second look confirms
     assert g.state()["kind"] == "detected"
     since, until = g.pool.queries[-1][1][1:]
@@ -134,7 +135,7 @@ def test_restarted_campaign_with_new_pilots_already_flying_is_noticed(tmp_path, 
     g.cycle(0, pts, kills)
     low = {i: v * 0.1 for i, v in pts.items()}                     # same pilots, points back near zero
     g.cycle(5, low, {i: 0 for i in kills})
-    assert g.cycle(10, low, {i: 1 for i in kills}) != T0
+    assert g.cycle(10, low, {i: 1 for i in kills}) != D0
 
 
 def test_a_single_bad_read_is_not_a_restart(tmp_path, monkeypatch):
@@ -143,8 +144,8 @@ def test_a_single_bad_read_is_not_a_restart(tmp_path, monkeypatch):
     pts, kills = _points()
     g.cycle(0, pts, kills)
     g.cycle(5, {}, {})                                              # caught half-written
-    assert g.cycle(10, pts, kills) == T0                            # normal again
-    assert g.cycle(15, {}, {}) == T0                                # the glitch has to repeat to count
+    assert g.cycle(10, pts, kills) == D0                            # normal again
+    assert g.cycle(15, {}, {}) == D0                                # the glitch has to repeat to count
 
 
 def test_pilots_leaving_or_a_small_loss_is_not_a_restart(tmp_path, monkeypatch):
@@ -153,9 +154,9 @@ def test_pilots_leaving_or_a_small_loss_is_not_a_restart(tmp_path, monkeypatch):
     g.cycle(0, pts, kills)
     one_left = {IDS[0]: pts[IDS[0]]}
     for minute in (5, 10):
-        assert g.cycle(minute, one_left, {IDS[0]: kills[IDS[0]]}) == T0
+        assert g.cycle(minute, one_left, {IDS[0]: kills[IDS[0]]}) == D0
     penalised = {i: v - 500 for i, v in pts.items()}                # friendly-fire penalty
-    assert g.cycle(15, penalised, kills) == T0
+    assert g.cycle(15, penalised, kills) == D0
 
 
 def test_admin_deleting_the_tracking_files_starts_a_new_session(tmp_path, monkeypatch):
@@ -183,7 +184,7 @@ def test_bot_restart_keeps_the_start_and_still_notices_a_later_reset(tmp_path, m
     g.cycle(0, pts, kills)
     g.cycle(20, pts, kills)                                         # baseline written to disk
     g.restart_bot()                                                 # memory gone
-    assert g.cycle(25, pts, kills) == T0
+    assert g.cycle(25, pts, kills) == D0
     g.pool.mission_start = T0 + timedelta(minutes=27)
     g.cycle(30, {}, {})
     assert g.cycle(35, {}, {}) == T0 + timedelta(minutes=27)
@@ -197,7 +198,7 @@ def test_reset_while_the_bot_was_down_is_noticed_from_the_stored_baseline(tmp_pa
     g.restart_bot()
     g.pool.mission_start = T0 + timedelta(minutes=40)
     g.cycle(60, {}, {})
-    assert g.cycle(65, {}, {}) != T0
+    assert g.cycle(65, {}, {}) != D0
 
 
 def test_state_from_the_creation_time_experiment_is_migrated(tmp_path, monkeypatch):
@@ -206,7 +207,7 @@ def test_state_from_the_creation_time_experiment_is_migrated(tmp_path, monkeypat
     (tmp_path / ".fhc" / "fhr_session.json").write_text(json.dumps({
         "file": "foothold_x.lua", "start": "2026-01-01T00:00:00", "kind": "exact",
         "fallback": "2026-10-03T09:00:00", "fallback_kind": "first_seen", "probe": 1}))
-    assert g.cycle(0, *_points()) == datetime(2026, 10, 3, 9, 0, 0)
+    assert g.cycle(0, *_points()) == D0      # first seen 09:00 -> counted from the day start
 
 
 def test_baseline_is_written_rarely(tmp_path, monkeypatch):
@@ -288,3 +289,28 @@ def test_update_server_follows_a_real_campaign_reset_and_a_map_change(tmp_path, 
     pool.mission_start = None
     _full_cycle(plugin, d, 40, clock)
     assert _state(d)["start"] == "2026-10-03T12:40:00"
+
+
+def test_a_campaign_first_seen_counts_at_least_the_day_it_was_seen_in():
+    """The session is never narrower than the day for a campaign that was already running."""
+    seen = {"start": "2026-10-03T18:30:00", "kind": "first_seen"}
+    assert commands._session_start_for(seen, {"daily_reset_hour": 6}) == datetime(2026, 10, 3, 6, 0)
+    early = {"start": "2026-10-03T03:00:00", "kind": "first_seen"}         # before today's reset
+    assert commands._session_start_for(early, {"daily_reset_hour": 6}) == datetime(2026, 10, 2, 6, 0)
+    sat = {"start": "2026-10-03T18:30:00", "kind": "first_seen"}            # a Saturday with its own hour
+    assert commands._session_start_for(sat, {"daily_reset_hour": 6, "daily_reset_schedule": {"sat": 9}}) \
+        == datetime(2026, 10, 3, 9, 0)
+    # a reset that was actually noticed is the real start, even if it is later than the day's reset
+    assert commands._session_start_for({"start": "2026-10-03T15:00:00", "kind": "detected"}, {}) \
+        == datetime(2026, 10, 3, 15, 0)
+    assert commands._session_start_for({}, {}) is None
+
+
+def test_update_session_returns_the_widened_start_for_a_campaign_first_seen(tmp_path, monkeypatch):
+    g = _Game(tmp_path, monkeypatch)
+    g.clock.at(0)
+    node = commands._UpdateReadCache(g.source)
+    start = asyncio.run(g.plugin._update_session(_Server(), str(tmp_path), node, g.source, str(tmp_path / "f.lua"),
+                                                 {IDS[0]: 100}, {IDS[0]: 1}, {"daily_reset_hour": 4}))
+    assert start == datetime(2026, 10, 3, 4, 0)
+    assert g.state()["start"] == "2026-10-03T12:00:00"                     # what was stored is the first look
