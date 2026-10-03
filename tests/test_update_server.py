@@ -101,7 +101,7 @@ def test_empty_channel_gets_new_message(tmp_path, saves_dir):
     assert os.path.isfile(os.path.join(d, ".fhc", "fhr_daily_snapshot.json"))
 
 
-def test_no_local_folders_for_remote_paths(tmp_path):
-    remote = str(tmp_path / "not" / "here" / "Saves")
-    commands._ensure_local_fhc_dir(remote)
-    assert not os.path.exists(os.path.dirname(remote))
+def test_no_folders_are_created_for_a_saves_dir_that_does_not_exist(tmp_path):
+    missing = str(tmp_path / "not" / "here" / "Saves")
+    asyncio.run(commands._ensure_fhc_dir(FileNode(), missing))
+    assert not os.path.exists(os.path.dirname(missing))

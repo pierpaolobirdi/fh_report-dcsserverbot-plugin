@@ -10,6 +10,7 @@ import asyncio
 import calendar
 import functools
 import importlib.util
+import glob
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.9"
+FH_REPORT_RELEASE = "14.1.10"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -144,11 +145,14 @@ class _UpdateReadCache:
             self._files[path] = await self._node.read_file(path)
         return self._files[path]
 
-    async def list_directory(self, path: str):
-        return await self._node.list_directory(path)
-
     def invalidate(self, path: str) -> None:
         self._files.pop(path, None)
+
+    def __getattr__(self, name):
+        # list_directory, create_directory, remove_file... go straight to the node
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._node, name)
 
 
 def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str | None]:
@@ -223,11 +227,63 @@ def get_rank(credits: float) -> str:
     return RANK_NAMES[rank_idx]
 
 
+def _node_listing(listing) -> tuple[list[str], bool]:
+    """(basenames, newest_first) from a node.list_directory() result. DCSSB
+    returns (directory, [full paths]) ordered newest first; older versions
+    returned plain names, in no particular order."""
+    if isinstance(listing, tuple) and len(listing) == 2:
+        return [os.path.basename(str(p).replace("\\", "/")) for p in listing[1]], True
+    return [os.path.basename(str(p).replace("\\", "/")) for p in listing], False
+
+
+async def _dir_exists(node, path: str) -> bool | None:
+    """Whether `path` is an existing folder on the node; None if that can't be
+    told. list_directory() lists nothing for a missing folder instead of failing,
+    so ask the parent folder for a folder of that name."""
+    parent, name = os.path.split(path.rstrip("/\\"))
+    if not name:
+        return None
+    try:
+        names, _ = _node_listing(await node.list_directory(parent, pattern=glob.escape(name), is_dir=True))
+    except Exception:
+        return None
+    return any(n.lower() == name.lower() for n in names)
+
+
+async def _ensure_fhc_dir(node, saves_dir: str) -> None:
+    """Create saves_dir/.fhc on the node, local or remote: write_file() doesn't
+    create folders. Not done while saves_dir itself is missing (the Foothold
+    mission never ran there)."""
+    if await _dir_exists(node, saves_dir) is False:
+        return
+    fhc = os.path.join(saves_dir, ".fhc")
+    try:
+        if hasattr(node, "create_directory"):
+            await node.create_directory(fhc)
+        elif os.path.isdir(saves_dir):          # older DCSSB: local nodes only
+            os.makedirs(fhc, exist_ok=True)
+    except Exception as e:
+        log.debug(f"FH_Report: could not create {fhc}: {e}")
+
+
+async def _remove_file(node, path: str) -> None:
+    """Best-effort delete through the node (remote nodes too). DCSSB's
+    remove_file() takes a glob pattern, hence the escape. Older DCSSB without
+    it: local delete only."""
+    try:
+        if hasattr(node, "remove_file"):
+            await node.remove_file(glob.escape(path))
+        elif os.path.isfile(path):
+            os.remove(path)
+    except Exception as e:
+        log.debug(f"FH_Report: could not remove {path}: {e}")
+
+
 async def find_persistence_file(saves_dir: str, node) -> str | None:
     """Active Foothold save: the file named in foothold.status (basename
     only — the stored path may be a Windows path invalid on this host),
-    else the newest-named foothold_*.lua in saves_dir. Reads go through
-    `node` so remote agent nodes work.
+    else the most recently modified foothold_*.lua in saves_dir. Reads go
+    through `node` so remote agent nodes work.
     """
     status_file = os.path.join(saves_dir, "foothold.status")
     try:
@@ -249,15 +305,14 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
         pass
     # Fallback: list directory and find foothold_*.lua candidates
     try:
-        entries = await node.list_directory(saves_dir)
+        names, newest_first = _node_listing(await node.list_directory(saves_dir))
         candidates = [
-            os.path.join(saves_dir, e) for e in entries
-            if e.lower().startswith("foothold_") and e.lower().endswith(".lua")
-            and "rank" not in e.lower()
+            n for n in names
+            if n.lower().startswith("foothold_") and n.lower().endswith(".lua") and "rank" not in n.lower()
         ]
         if not candidates:
             return None
-        return sorted(candidates)[-1]
+        return os.path.join(saves_dir, candidates[0] if newest_first else sorted(candidates)[-1])
     except Exception:
         return None
 
@@ -650,16 +705,18 @@ def _fhr_path(saves_dir: str, name: str) -> str:
     return os.path.join(saves_dir, ".fhc", FHR_PREFIX + name)
 
 
-def _remove_legacy_file(path: str) -> None:
-    """Best-effort delete of an old, un-prefixed file. Local nodes only: a
-    remote saves_dir doesn't exist here (no delete API for remote nodes), so
-    the old file just stays there, unused."""
-    try:
-        if os.path.isfile(path):
-            os.remove(path)
-            log.debug(f"FH_Report: removed legacy file {path} (replaced by its {FHR_PREFIX} copy)")
-    except OSError:
-        pass
+_legacy_cleaned: set[str] = set()      # old files already dealt with this run
+
+
+async def _remove_legacy_file(node, path: str) -> None:
+    """Delete an old, un-prefixed file once its fhr_ replacement is confirmed.
+    Once per file and run (a remote delete is an RPC); a file that is already
+    gone is simply a no-op."""
+    if path in _legacy_cleaned:
+        return
+    _legacy_cleaned.add(path)
+    await _remove_file(node, path)
+    log.debug(f"FH_Report: legacy file {path} cleaned up (replaced by its {FHR_PREFIX} copy)")
 
 
 async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> dict:
@@ -672,7 +729,7 @@ async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False)
     data = await _read_json(node, _fhr_path(saves_dir, name))
     if data:
         if cleanup:
-            _remove_legacy_file(os.path.join(saves_dir, ".fhc", name))
+            await _remove_legacy_file(node, os.path.join(saves_dir, ".fhc", name))
         return data
     return await _read_json(node, os.path.join(saves_dir, ".fhc", name))
 
@@ -687,9 +744,8 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     if saves_dir in _write_self_tested:
         return
 
-    try:
-        await node.list_directory(saves_dir)
-    except FileNotFoundError:
+    if await _dir_exists(node, saves_dir) is False:
+        # None = couldn't tell (timeout, permissions...): not assumed missing.
         if log:
             log.debug(
                 f"FH_Report: write self-test skipped for {saves_dir} — the save "
@@ -697,10 +753,6 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
                 f"yet). Will retry on a later cycle once it exists."
             )
         return
-    except Exception:
-        # Inconclusive (timeout, permission issue, etc.) — don't assume the
-        # folder is missing; fall through and run the self-test as normal.
-        pass
 
     _write_self_tested.add(saves_dir)
 
@@ -731,12 +783,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         if log:
             log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
 
-    # Best-effort cleanup, local nodes only (no remote delete API); a leftover
-    # test file on a remote node is harmless.
-    try:
-        os.remove(test_path)
-    except OSError:
-        pass
+    await _remove_file(node, test_path)
 
 
 async def deduplicate_ranks(ranks_file: str, persistence_file, node,
@@ -2253,13 +2300,6 @@ def _reset_hour_today(cfg: dict) -> int:
     return int(cfg.get("daily_reset_hour") or 0)
 
 
-def _ensure_local_fhc_dir(saves_dir: str) -> None:
-    """Create saves_dir/.fhc when saves_dir is on this machine. For a remote
-    agent node the path only exists there, so nothing is created locally."""
-    if os.path.isdir(saves_dir):
-        os.makedirs(os.path.join(saves_dir, ".fhc"), exist_ok=True)
-
-
 async def _resolve_saves_dir(server, cfg: dict) -> str:
     """Configured saves_dir, else <missions dir>/Saves (same as Pretense)."""
     return cfg.get("saves_dir") or os.path.join(await server.get_missions_dir(), "Saves")
@@ -2466,7 +2506,7 @@ class FH_Report(Plugin):
         for readability only).
         """
         path = self._get_history_file(saves_dir)
-        _ensure_local_fhc_dir(saves_dir)
+        await _ensure_fhc_dir(node, saves_dir)
         # Newest date first, for humans only — readers re-sort.
         sorted_data = dict(sorted(data.items(), key=lambda kv: kv[0], reverse=True))
         await write_bytes_to_node(
@@ -2484,7 +2524,7 @@ class FH_Report(Plugin):
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
         """Write fhr_daily_snapshot.json via write_bytes_to_node."""
         path = self._get_daily_file(saves_dir)
-        _ensure_local_fhc_dir(saves_dir)
+        await _ensure_fhc_dir(node, saves_dir)
         await write_bytes_to_node(
             node, path,
             json.dumps(data, indent=2).encode("utf-8"),

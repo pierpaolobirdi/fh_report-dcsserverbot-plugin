@@ -6,7 +6,16 @@ import itertools
 import random
 from datetime import datetime, timezone
 
+import pytest
+
 from conftest import UCID, check_golden, commands, digest, embed_dump
+
+
+@pytest.fixture(autouse=True)
+def _pin_release(monkeypatch):
+    """The footer's length decides how many lines fit in Discord's 6000 characters, so a
+    longer version number (14.1.9 -> 14.1.10) would shift the golden output."""
+    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "12.5.4")
 
 
 def _zone(name, level, active, suspended=False, true_max=None):

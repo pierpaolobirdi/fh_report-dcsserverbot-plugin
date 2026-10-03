@@ -8,10 +8,13 @@ After an intentional output change, regenerate them with:
 
     FH_UPDATE_GOLDEN=1 python -m pytest tests
 """
+import enum
+import glob
 import hashlib
 import json
 import logging
 import os
+import pathlib
 import shutil
 import sys
 
@@ -28,9 +31,18 @@ UPDATE_GOLDEN = os.environ.get("FH_UPDATE_GOLDEN") == "1"
 UCID = [f"{i:032x}" for i in range(100)]
 
 
+class UploadStatus(enum.Enum):
+    OK = 0
+    FILE_EXISTS = 1
+    READ_ERROR = 2
+    WRITE_ERROR = 3
+
+
 class FileNode:
-    """Stand-in for a DCSServerBot node backed by the local filesystem.
-    No write_file(), so writes take the local fallback path."""
+    """Stand-in for a local DCSServerBot node (NodeImpl), behaving like the real one:
+    list_directory returns (directory, full paths, newest first) and does NOT fail for a
+    missing folder; write_file copies a local file and does NOT create folders;
+    remove_file treats its argument as a glob pattern."""
 
     def __init__(self):
         self.reads: list[str] = []
@@ -40,8 +52,34 @@ class FileNode:
         with open(path, "rb") as f:
             return f.read()
 
-    async def list_directory(self, path):
-        return os.listdir(path)
+    async def write_file(self, target, source, overwrite=False):
+        if os.path.exists(target) and not overwrite:
+            return UploadStatus.FILE_EXISTS
+        try:
+            shutil.copy2(source, target)
+            return UploadStatus.OK
+        except Exception:
+            return UploadStatus.WRITE_ERROR
+
+    async def list_directory(self, path, *, pattern="*", order=None, is_dir=False, ignore=None, traverse=False):
+        directory = pathlib.Path(os.path.expandvars(path))
+        patterns = [pattern] if isinstance(pattern, str) else pattern
+        found = []
+        for pat in patterns:
+            for f in (directory.rglob(pat) if traverse else directory.glob(pat)):
+                if f.name in (ignore or []):
+                    continue
+                if (f.is_dir() and is_dir) or (not is_dir and not f.is_dir()):
+                    found.append(f)
+        found.sort(key=os.path.getmtime, reverse=True)
+        return directory.as_posix(), [f.as_posix() for f in found]
+
+    async def create_directory(self, path):
+        os.makedirs(path, exist_ok=True)
+
+    async def remove_file(self, path):
+        for f in glob.glob(path):
+            os.remove(f)
 
 
 def make_plugin(**attrs):
@@ -77,6 +115,14 @@ def check_golden(name: str, results: dict) -> None:
         expected = json.load(f)
     changed = sorted(k for k in expected.keys() | results.keys() if expected.get(k) != results.get(k))
     assert not changed, f"{len(changed)} case(s) differ from {name}, e.g. {changed[:5]}"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_state():
+    """Module-level 'already done this run' markers must not leak between tests."""
+    commands._legacy_cleaned.clear()
+    commands._missing_save_warned.clear()
+    yield
 
 
 @pytest.fixture
