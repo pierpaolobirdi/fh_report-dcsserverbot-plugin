@@ -23,7 +23,7 @@ class _Cursor:
 
     async def fetchone(self):
         q = self.pool.queries[-1]
-        return (A, SEEN) if "discord_id" in q else (SEEN,)
+        return (A, SEEN) if "discord_id" in q else (SEEN,)   # last_seen lookups
 
     async def fetchall(self):
         q = self.pool.queries[-1]
@@ -58,8 +58,13 @@ class _Followup:
         self.sent.append(embed or content)
 
 
-def _invoke(saves_dir, player_name, admin, cfg_extra=None):
+def _invoke(saves_dir, player_name, admin, cfg_extra=None, session_kind="exact"):
     d = saves_dir()
+    if session_kind:   # campaign session state, as kept by the updater
+        import os
+        os.makedirs(os.path.join(d, ".fhc"), exist_ok=True)
+        with open(os.path.join(d, ".fhc", "fhr_session.json"), "w") as f:
+            f.write('{"file": "foothold_x.lua", "start": "2026-10-03T10:00:00", "kind": "%s"}' % session_kind)
     pool, followup = _Pool(), _Followup()
     srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public"})()
     plugin = make_plugin(apool=pool)
@@ -77,7 +82,7 @@ def _invoke(saves_dir, player_name, admin, cfg_extra=None):
 def test_self_lookup_uses_one_connection(saves_dir):
     pool, sent = _invoke(saves_dir, None, admin=False)
     # one connection for the account lookup, one for the optional BoB detail
-    assert pool.connections == 2 and len(pool.queries) == 4   # lookup, mission start, BoB x2
+    assert pool.connections == 2 and len(pool.queries) == 3   # lookup, BoB x2
     assert sum("discord_id" in q for q in pool.queries) == 1
     embed = sent[0]
     assert embed.title == "👤 Player — Zarpa"
@@ -89,7 +94,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     assert pool.connections == 2 and sent[0].title == "👤 Player — Zarpa"
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
-    assert "**Session:** 1 (since <t:" in bnb and "**Today:** 3" in bnb
+    assert "**Session:** 1 (since <t:" in bnb and "(since ~" not in bnb and "**Today:** 3" in bnb
     assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
     assert "_Showing the latest 2 of 5 incidents._" in bnb
     assert "Team kill → `Viper`" in bnb and "Friendly fire → AI unit (T-72B)" in bnb and "pts" not in bnb
@@ -126,9 +131,6 @@ def test_fetch_bnb_counts_and_degrades_without_missionstats_plugin():
             if "missionstats" in query and self.pool.broken:
                 raise RuntimeError('relation "missionstats" does not exist')
 
-        async def fetchone(self):
-            return (SEEN.replace(tzinfo=None),)
-
         async def fetchall(self):
             return [(A, 5, 3, 1)]
 
@@ -146,9 +148,9 @@ def test_fetch_bnb_counts_and_degrades_without_missionstats_plugin():
     srv = type("S", (), {"name": "Public"})()
     pool = Pool()
     plugin = make_plugin(apool=pool)
-    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s", [A])) == {A: {"total": 5, "day": 3, "session": 1}}
+    assert asyncio.run(plugin._fetch_bnb(srv, {}, None, [A])) == {A: {"total": 5, "day": 3, "session": 1}}
     pool.broken = True
-    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s", [A])) == {}
+    assert asyncio.run(plugin._fetch_bnb(srv, {}, None, [A])) == {}
 
 
 def test_penalties_in_force_follow_show_punishment(saves_dir):
@@ -184,3 +186,14 @@ def test_bnb_session_unknown_without_a_start():
     bnb = {"total": 1, "day": 1, "session": 0, "destroyed": 1, "damaged": 0, "session_start": None, "recent": []}
     e = commands._build_player_report_embed("P", {}, None, None, 0, 0, {}, "ok", bnb=bnb)
     assert "**Session:** unknown" in next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
+
+
+def test_session_kind_marks_detected_start_as_approximate(saves_dir):
+    _, sent = _invoke(saves_dir, A, admin=True, session_kind="detected")
+    bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
+    assert "(since ~<t:" in bnb
+
+
+def test_session_unknown_without_state_file(saves_dir):
+    _, sent = _invoke(saves_dir, A, admin=True, session_kind=None)
+    assert "**Session:** unknown" in next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value

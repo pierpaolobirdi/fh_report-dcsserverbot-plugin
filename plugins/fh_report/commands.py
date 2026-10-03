@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.27"
+FH_REPORT_RELEASE = "14.1.28"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -574,6 +574,94 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
         if num_match:
             result[zone_name] = int(num_match.group(1))
     return result
+
+
+# ── Campaign session start ────────────────────────────────────────────────────
+# "Session" is the life of the Foothold campaign: it starts when the tracking
+# (save) file of the map/mission is first created and survives mission reloads.
+# Foothold writes no start date inside the file and DCSSB can't read file
+# times, so the start is (best first):
+#   exact          creation time of the save file, asked once to the running
+#                  mission (lfs.attributes), see probe_save_created
+#   detected       when Fh_Report saw the file appear / change name / get reset
+#   first_seen     when Fh_Report first saw this campaign (older campaigns)
+# State lives in .fhc/fhr_session.json, written by the updater only.
+
+_SESSION_ISO = "%Y-%m-%dT%H:%M:%S"
+
+
+def _new_session(basename: str, now: datetime, kind: str) -> dict:
+    iso = now.strftime(_SESSION_ISO)
+    return {"file": basename, "start": iso, "kind": kind, "fallback": iso,
+            "fallback_kind": kind, "probe": None, "verified": False, "bad": False}
+
+
+def _session_next(old: dict, basename: str, now: datetime, reset: bool) -> dict:
+    """State for this cycle: a new session when there is none yet (first_seen,
+    the campaign may be older), or the save file changed name / reappeared /
+    was reset in place (detected, within one update cycle of it happening)."""
+    if not old or not old.get("start"):
+        return _new_session(basename, now, "first_seen")
+    if old.get("file") != basename or reset:
+        return _new_session(basename, now, "detected")
+    return old
+
+
+def _session_apply_probe(st: dict, created: int, now: datetime) -> dict:
+    """Fold a creation-time reading of the save file into the state. A reading
+    is only trusted if it is plausible (not in the future, not later than the
+    moment we first saw the file) and, on the next probe, identical to the
+    first one: a platform that reports the last write instead of the creation
+    would otherwise make the session look like it restarts at every save."""
+    st = dict(st)
+    fallback = _parse_utc(st.get("fallback"))
+    now_epoch = calendar.timegm(now.timetuple())
+    plausible = (946684800 < created <= now_epoch + 60 and
+                 (fallback is None or created <= calendar.timegm(fallback.timetuple()) + 300))
+    if st["kind"] == "exact":
+        if abs(created - (st.get("probe") or 0)) <= 2:
+            st["verified"] = True
+            return st
+        plausible = False
+    if not plausible:
+        st.update(bad=True, kind=st["fallback_kind"], start=st["fallback"], verified=False)
+        return st
+    st.update(kind="exact", probe=created, verified=False,
+              start=datetime.fromtimestamp(created, timezone.utc).strftime(_SESSION_ISO))
+    return st
+
+
+def _save_created_lua(src: str, out: str) -> str:
+    """Lua for the mission: write the creation/modification time of the save
+    file `src` as JSON to `out`. Read-only on the campaign. On Windows lfs
+    'change' is the file's creation time."""
+    return (
+        "if lfs and io then "
+        f"local _s=[=[{src}]=] local _o=[=[{out}]=] "
+        "local _a=lfs.attributes(_s) "
+        "if _a then local _f=io.open(_o,'w') if _f then "
+        "_f:write('{\"file\":\"'..(_s:match('[^/\\\\]+$') or '')"
+        "..'\",\"created\":'..tostring(math.floor(_a.change or 0))"
+        "..',\"modified\":'..tostring(math.floor(_a.modification or 0))..'}') "
+        "_f:close() end end end"
+    )
+
+
+async def probe_save_created(server, saves_dir: str, node, source_node, persistence_file: str) -> int | None:
+    """Ask the running mission for the save file's creation time (epoch).
+    None if it can't be read or answered for another file."""
+    out = _fhr_path(saves_dir, "save_created.json")
+    await _ensure_fhc_dir(source_node, saves_dir)
+    await _do_script(server, _save_created_lua(persistence_file, out))
+    await asyncio.sleep(1.5)
+    node.invalidate(out)
+    data = await _read_json(node, out)
+    if data.get("file") != os.path.basename(persistence_file):
+        return None
+    try:
+        return int(data["created"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 _unsupported_version_warned: set[str] = set()
@@ -1576,7 +1664,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if bnb and bnb.get("total"):
         sess_start = bnb.get("session_start")
         if sess_start:
-            since = f" (since <t:{int(calendar.timegm(sess_start.timetuple()))}:t>)"
+            approx = "" if bnb.get("session_kind") == "exact" else "~"   # ~ = detected, not the file's own date
+            since = f" (since {approx}<t:{int(calendar.timegm(sess_start.timetuple()))}:t>)"
             session_txt = f"**Session:** {bnb['session']}{since}"
         else:
             session_txt = "**Session:** unknown"
@@ -2197,7 +2286,6 @@ def _pack_daily_snapshot(d: dict, live_names: set | None = None) -> dict:
         "persistence_filename": d.get("persistence_filename", ""),
         "players":              ordered,
         "known_stat_keys":      d.get("known_stat_keys", []),
-        **({"session_start": d["session_start"]} if d.get("session_start") else {}),
     }
 
 
@@ -2212,7 +2300,6 @@ def _unpack_daily_snapshot(raw: dict) -> dict:
     out = {
         "date": raw.get("date", ""), "persistence_filename": raw.get("persistence_filename", ""),
         "known_stat_keys": raw.get("known_stat_keys", []),
-        "session_start": raw.get("session_start", ""),
         "snapshot": {}, "stats_snapshot": {}, "last_daily": {}, "last_daily_stats": {},
         "carry_over": {}, "stats_carry_over": {}, "names": {}, "name_to_ucid": {},
     }
@@ -2503,7 +2590,8 @@ class Fh_Report(Plugin):
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
         self._cycle_punishment: dict | None = None
-        self._session_starts: dict[str, str] = {}   # saves_dir -> in-place restart time (UTC ISO)
+        self._campaign_reset: dict[str, bool] = {}   # saves_dir -> data reset in place seen by the daily pass
+        self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -2808,13 +2896,10 @@ class Fh_Report(Plugin):
 
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
-        # An in-place restart (same map, Session Leaderboard back to zero) is the
-        # one session start DCSSB can't tell us; remember when we noticed it.
-        # A map change is not recorded: DCSSB knows that start exactly.
-        session_start = snap.get("session_start", "")
-        if campaign_restarted and not (filename_changed or data_vanished) and persist:
-            session_start = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
-        self._session_starts[saves_dir] = session_start
+        # Tell the session tracker (see _update_session) that the campaign data
+        # was reset in place: the Foothold save was recreated empty, or points and
+        # kills both dropped. A new save FILE name is detected there directly.
+        self._campaign_reset[saves_dir] = bool(campaign_restarted or data_vanished)
 
         # ── Real calendar-day reset (the only thing that closes a day) ─────
         reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
@@ -2949,7 +3034,6 @@ class Fh_Report(Plugin):
             "name_to_ucid":         {**name_to_ucid_snapshot, **(name_to_ucid or {})},
             "names":                {**names_snapshot, **names_by_id},
             "known_stat_keys":      sorted(known_stat_keys),
-            "session_start":        session_start,
         }
         # Only write when something actually changed — with nobody earning
         # points (e.g. an empty server) every cycle would otherwise rewrite
@@ -2960,22 +3044,31 @@ class Fh_Report(Plugin):
 
         return daily, daily_stats, campaign_restarted
 
-    async def _session_start(self, cur, server_name: str, saves_dir: str) -> datetime | None:
-        """Start of the current session (naive UTC): the later of the current
-        mission's start (DCSSB, via the open cursor) and the last in-place
-        campaign restart noticed. A failing missions lookup only costs the first."""
-        mission_start = None
-        try:
-            await cur.execute("SELECT mission_start FROM missions WHERE server_name = %s "
-                              "ORDER BY id DESC LIMIT 1", (server_name,))
-            row = await cur.fetchone()
-            mission_start = row[0] if row else None
-        except Exception as e:
-            self.log.debug(f"Fh_Report: mission start not available: {e}")
-        restart = _parse_utc(self._session_starts.get(saves_dir))
-        return max((t for t in (mission_start, restart) if t), default=None)
+    async def _update_session(self, server, saves_dir: str, node, source_node,
+                              persistence_file: str, reset: bool = False) -> dict:
+        """Keep .fhc/fhr_session.json current and return {"start", "kind"}
+        (start = naive UTC datetime). See the module comment above."""
+        basename = os.path.basename(persistence_file)
+        old = await _read_fhr_json(node, saves_dir, "session.json")
+        absent = saves_dir in self._campaign_absent
+        self._campaign_absent.discard(saves_dir)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        st = _session_next(old, basename, now, reset or absent)
+        if server.status in HOT_STATES and not st["bad"] and not (st["kind"] == "exact" and st["verified"]):
+            try:
+                created = await probe_save_created(server, saves_dir, node, source_node, persistence_file)
+            except Exception as e:
+                self.log.debug(f"Fh_Report: save creation time not available: {e}")
+                created = None
+            if created:
+                st = _session_apply_probe(st, created, now)
+        if st != old:
+            await _ensure_fhc_dir(source_node, saves_dir)
+            await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
+                                      json.dumps(st, indent=2).encode("utf-8"), log=self.log)
+        return {"start": _parse_utc(st["start"]), "kind": st["kind"]}
 
-    async def _fetch_bnb(self, server, cfg: dict, saves_dir: str, ucids: list) -> dict:
+    async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
         {ucid: {"total", "day", "session"}}. Total is every server and all the
         history kept; day and session only count this server since the last
@@ -2986,7 +3079,6 @@ class Fh_Report(Plugin):
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
-                    session = await self._session_start(cur, server.name, saves_dir)
                     await cur.execute(_BNB_INCIDENTS_SQL + """
                         SELECT init_id, COUNT(*),
                                COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
@@ -3000,19 +3092,20 @@ class Fh_Report(Plugin):
             self.log.debug(f"Fh_Report: BoB data not available: {e}")
             return {}
 
-    async def _fetch_bnb_detail(self, server, cfg: dict, saves_dir: str, ucid: str,
+    async def _fetch_bnb_detail(self, server, cfg: dict, session: tuple, ucid: str,
                                 with_penalties: bool = False) -> tuple[dict | None, dict | None]:
         """One player's detail for /fh_report player: (bnb, penalties).
         bnb: totals split into destroyed / damaged, today and this session on
         this server, plus the latest incidents. penalties (only when asked):
         what Punishment still holds against the player after decay, by event.
-        Each is None when there is nothing or the plugin's table is missing."""
+        Each is None when there is nothing or the plugin's table is missing.
+        `session` is (start, kind) from the session tracker (_session_state)."""
         day_from = _day_start(cfg).replace(tzinfo=None)
         bnb = penalties = None
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
-                    session = await self._session_start(cur, server.name, saves_dir)
+                    session, session_kind = session
                     params = {"ucids": [ucid], "server": server.name, "day": day_from,
                               "session": session or datetime.max, "limit": BNB_RECENT}
                     try:
@@ -3036,7 +3129,7 @@ class Fh_Report(Plugin):
                                 "destroyed": by_kind.get("kill", (0, 0, 0))[0],
                                 "damaged":   by_kind.get("hit", (0, 0, 0))[0],
                                 "recent":    [tuple(r) for r in await cur.fetchall()],
-                                "session_start": session,
+                                "session_start": session, "session_kind": session_kind,
                             }
                     except Exception as e:
                         self.log.debug(f"Fh_Report: BoB detail not available: {e}")
@@ -3167,6 +3260,8 @@ class Fh_Report(Plugin):
         # Waypoint sorting also needs it: its campaign-restart detection triggers
         # the waypoint cache refresh.
         needs_daily = needs_daily or _bool_cfg(cfg.get("sort_zones_by_waypoint"))
+        # The session BoB count needs the in-place campaign reset detection too.
+        needs_daily = needs_daily or _bool_cfg(cfg.get("show_session_card"))
         daily_pts: dict = {}
         daily_stats: dict = {}
         campaign_restarted_now = False
@@ -3184,13 +3279,15 @@ class Fh_Report(Plugin):
                 os.path.basename(persistence_file) if persistence_file else None,
                 name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
 
+        # Campaign session start (always kept up to date: /fh_report player reads it too)
+        session = await self._update_session(
+            server, saves_dir, node, source_node, persistence_file,
+            reset=self._campaign_reset.pop(saves_dir, False))
         bnb = {}
         if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
-            if not needs_daily:   # the daily pass is what refreshes the session-restart marker
-                self._session_starts[saves_dir] = _unpack_daily_snapshot(
-                    await self._load_daily_snapshot(saves_dir, node)).get("session_start", "")
             bnb = await self._fetch_bnb(
-                server, cfg, saves_dir, [d["ucid"] for d in players.values() if d.get("ucid")])
+                server, cfg, session["start"],
+                [d["ucid"] for d in players.values() if d.get("ucid")])
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
         daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
@@ -3250,6 +3347,7 @@ class Fh_Report(Plugin):
         "not started" embed, with the rank table if Foothold_Ranks.lua exists.
         Logged once (DEBUG) per instance, not every cycle."""
         instance_name = server.instance.name
+        self._campaign_absent.add(saves_dir)   # the save reappearing marks a new campaign session
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
             self.log.debug(
@@ -3673,8 +3771,10 @@ class Fh_Report(Plugin):
         else:
             mission_status = f"⏹️ **{self._public_server_name(server)}** Mission not running."
 
+        sess = await _read_fhr_json(node, saves_dir, "session.json")
         bnb, penalties = (await self._fetch_bnb_detail(
-            srv, cfg, saves_dir, ucid, with_penalties=_bool_cfg(cfg.get("show_punishment")))
+            srv, cfg, (_parse_utc(sess.get("start")), sess.get("kind")), ucid,
+            with_penalties=_bool_cfg(cfg.get("show_punishment")))
             if ucid else (None, None))
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
