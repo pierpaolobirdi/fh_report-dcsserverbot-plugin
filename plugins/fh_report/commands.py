@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.10"
+FH_REPORT_RELEASE = "14.1.11"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -66,21 +66,52 @@ async def _do_script(server, lua: str) -> None:
     await server.send_to_dcs({"command": "do_script", "script": lua})
 
 
-# ── Lua table helpers (brace counting) ───────────────────────────────────────
+# ── Lua table helpers ─────────────────────────────────────────────────────────
+# Foothold writes EVERY string (player names, keys) with string.format('%q'): double
+# quotes, a '"' inside becomes \", a backslash becomes \\, a newline becomes backslash +
+# newline, and an apostrophe stays as is. So a quoted string is matched with its
+# escapes, never "up to the next quote of any kind".
+
+_LUA_STR = r'"[^"\\]*(?:\\[\s\S][^"\\]*)*"|\'[^\'\\]*(?:\\[\s\S][^\'\\]*)*\''
+_LUA_TOKEN = re.compile(r"[{}]|" + _LUA_STR)                 # a brace, or a whole string (skipped)
+_LUA_KEY = re.compile(r"\[\s*(" + _LUA_STR + r")\s*\]\s*=\s*\{")
+_LUA_NUM = re.compile(r"\[\s*(" + _LUA_STR + r")\s*\]\s*=\s*(-?\d+(?:\.\d+)?)")
+_UCID_PAIR = re.compile(r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*(" + _LUA_STR + ")")
+_LUA_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _lua_unquote(token: str) -> str:
+    """The text of a quoted Lua string token (quotes and escapes included)."""
+    body = token[1:-1]
+    if "\\" not in body:
+        return body
+
+    def one(m):
+        c = m.group(1)
+        return chr(int(c)) if c.isdigit() else _LUA_ESCAPES.get(c, c)
+    return re.sub(r"\\(\d{1,3}|[\s\S])", one, body)
+
+
+def _lua_quote(text: str) -> str:
+    """text as Lua's string.format('%q') writes it."""
+    return '"' + (text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\\n")
+                  .replace("\r", "\\r").replace("\0", "\\000")) + '"'
+
 
 def _lua_block(text: str, brace_pos: int) -> tuple[str, int]:
     """`brace_pos` is the index of a '{' in `text`. Returns (inner content,
-    index just past the matching '}'), using brace counting so it's robust
-    to any indentation/nesting in Foothold's Lua files."""
-    depth, i, n = 1, brace_pos + 1, len(text)
-    while i < n and depth > 0:
-        c = text[i]
-        if c == "{":
+    index just past the matching '}'). Braces inside quoted strings (a player
+    named "Joe :}") don't count; indentation and nesting don't matter."""
+    depth = 1
+    for m in _LUA_TOKEN.finditer(text, brace_pos + 1):
+        tok = m.group()
+        if tok == "{":
             depth += 1
-        elif c == "}":
+        elif tok == "}":
             depth -= 1
-        i += 1
-    return text[brace_pos + 1:i - 1], i
+            if depth == 0:
+                return text[brace_pos + 1:m.start()], m.end()
+    return text[brace_pos + 1:], len(text)               # unbalanced (a half-written file)
 
 
 def _lua_table(text: str, pattern: str) -> str | None:
@@ -92,21 +123,48 @@ def _lua_table(text: str, pattern: str) -> str | None:
     return _lua_block(text, m.end() - 1)[0]
 
 
-def _lua_entries(block: str, key_pattern: str):
-    """Yield (key, inner) for every `["key"]={...}` (or single-quoted) whose
-    key matches `key_pattern`."""
-    for m in re.finditer(r"\[[\"'](" + key_pattern + r")[\"']\]\s*=\s*\{", block):
-        yield m.group(1), _lua_block(block, m.end() - 1)[0]
+def _lua_entries(block: str, ucid_only: bool = False):
+    """Yield (key, inner) for each top-level `["key"]={...}` entry of `block`
+    (either quote style, escapes decoded). ucid_only keeps only 32-hex UCID keys."""
+    pos = 0
+    while True:
+        m = _LUA_KEY.search(block, pos)
+        if not m:
+            return
+        inner, pos = _lua_block(block, m.end() - 1)
+        key = _lua_unquote(m.group(1))
+        if not ucid_only or _UCID_RE.fullmatch(key):
+            yield key, inner
+
+
+def _find_entry(text: str, key: str):
+    """The match of the first `["key"]={` whose decoded key is `key`, or None."""
+    for m in _LUA_KEY.finditer(text):
+        if _lua_unquote(m.group(1)) == key:
+            return m
+    return None
+
+
+def _lua_field_str(block: str, field: str) -> str | None:
+    """The string assigned to `["field"]=` in `block` (decoded), or None."""
+    q = re.escape(field)
+    m = re.search(r"\[\s*(?:\"" + q + r"\"|\'" + q + r"\')\s*\]\s*=\s*(" + _LUA_STR + ")", block)
+    return _lua_unquote(m.group(1)) if m else None
 
 
 def _lua_numbers(block: str, skip: tuple[str, ...] = ()) -> dict:
     """{key: int|float} for every quoted-key numeric assignment in `block`."""
     out = {}
-    for m in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', block):
-        key, val = m.group(1), m.group(2)
+    for m in _LUA_NUM.finditer(block):
+        key, val = _lua_unquote(m.group(1)), m.group(2)
         if key not in skip:
             out[key] = float(val) if "." in val else int(val)
     return out
+
+
+def _ucid_names(text: str) -> list[tuple[str, str]]:
+    """(ucid, name) for every `["<ucid>"]="name"` pair (the ucidToName tables)."""
+    return [(m.group(1), _lua_unquote(m.group(2))) for m in _UCID_PAIR.finditer(text)]
 
 
 def _lua_num_str(value: float) -> str:
@@ -115,9 +173,6 @@ def _lua_num_str(value: float) -> str:
 
 _RANKS_PLAYERS_RE  = r"RankSave\[[\"']players[\"']\]\s*=\s*\{"
 _PLAYER_STATS_RE   = r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{"
-_UCID_TO_NAME_RE   = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]"
-_ANY_KEY           = r"[^\"']+"
-_UCID_KEY          = r"[a-f0-9]{32}"
 
 
 def _ranks_version(content: str) -> int | None:
@@ -317,19 +372,18 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
         return None
 
 
+_ZONE_NAME_RE = re.compile(r"zonePersistance\[[\"']zones[\"']\]\[\s*(" + _LUA_STR + r")\s*\]")
+_ZONE_BLOCK_RE = re.compile(
+    r"zonePersistance\[[\"']zones[\"']\]\[\s*(" + _LUA_STR + r")\s*\] = \{(.*?)(?=\nzonePersistance|\Z)", re.DOTALL)
+
+
 async def parse_zones(filepath: str, node) -> dict:
     """Parse zone persistence file. Returns {'blue': [...], 'red': [...]}."""
     data = await node.read_file(filepath)
     content = data.decode("utf-8", errors="replace")
 
     zones = {"blue": [], "red": [], "neutral": 0}
-    zone_names = [
-        a or b for a, b in
-        re.findall(
-            r'zonePersistance\[["\']zones["\']\]\[(?:"([^"]+)"|\x27([^\x27]+)\x27)\]',
-            content
-        )
-    ]
+    zone_names = [_lua_unquote(t) for t in _ZONE_NAME_RE.findall(content)]
 
     # BLUE-only extra slots (ZoneCommander:addExtraSlot): +1 per zone, +1 more
     # when globalExtraUnlock is true. RED has its own mechanic, not handled here.
@@ -339,11 +393,8 @@ async def parse_zones(filepath: str, node) -> dict:
     # One pass over the file: first ` = {` block per zone, up to the next
     # top-level zonePersistance line.
     zone_blocks: dict[str, str] = {}
-    for m in re.finditer(
-        r"zonePersistance\[[\"']zones[\"']\]\[(?:\"([^\"]+)\"|'([^']+)')\] = \{(.*?)(?=\nzonePersistance|\Z)",
-        content, re.DOTALL
-    ):
-        zone_blocks.setdefault(m.group(1) or m.group(2), m.group(3))
+    for m in _ZONE_BLOCK_RE.finditer(content):
+        zone_blocks.setdefault(_lua_unquote(m.group(1)), m.group(2))
 
     for zone in zone_names:
         block = zone_blocks.get(zone)
@@ -449,14 +500,13 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
 
         # Old format: name-keyed, stats inline in the player block.
         # New format (4.9.1+): UCID-keyed, "name" + nested "stats" table.
-        for key, player_block in _lua_entries(block, _ANY_KEY if version is None else _UCID_KEY):
+        for key, player_block in _lua_entries(block, ucid_only=version is not None):
             if version is None:
                 name, stats_block = key, player_block
             else:
-                name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', player_block)
-                if not name_m:
+                name = _lua_field_str(player_block, "name")
+                if not name:
                     continue
-                name = name_m.group(1)
                 stats_block = _lua_table(player_block, r'\[(?:"stats"|\'stats\')\]\s*=\s*\{')
                 if stats_block is None:
                     continue
@@ -474,8 +524,8 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
             # use it opportunistically if so, costs nothing if absent.
             ucid_block = _lua_table(content, r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{")
             if ucid_block:
-                for um in re.finditer(_UCID_TO_NAME_RE, ucid_block):
-                    name_to_ucid[um.group(2)] = um.group(1)
+                for ucid, name in _ucid_names(ucid_block):
+                    name_to_ucid[name] = ucid
 
         return results, raw_all, name_to_ucid
     except Exception:
@@ -566,12 +616,12 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     excluded = set(excluded_ucids or [])
     # Old format: name-keyed, UCID resolved via the separate ucidToName table.
     name_to_ucid = (
-        {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, content)}
+        {name: ucid for ucid, name in _ucid_names(content)}
         if version is None else {}
     )
 
     players = {}
-    for key, block in _lua_entries(players_block, _ANY_KEY if version is None else _UCID_KEY):
+    for key, block in _lua_entries(players_block, ucid_only=version is not None):
         credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
         if not credit_m:
             continue
@@ -580,10 +630,10 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
             ucid = name_to_ucid.get(clean_name)
         else:
             ucid = key
-            name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', block)
-            if not name_m:
+            name = _lua_field_str(block, "name")
+            if not name:
                 continue
-            clean_name = name_m.group(1).strip()
+            clean_name = name.strip()
         if len(clean_name) < 2 or (ucid and ucid in excluded):
             continue
 
@@ -812,7 +862,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     last_seen_re = r"(\[[\x27\x22]lastSeen[\x27\x22]\]\s*=\s*)([\d.]+)"
 
     entries: dict[str, dict] = {}
-    for name, block in _lua_entries(players_block, _ANY_KEY):
+    for name, block in _lua_entries(players_block):
         cr_m = re.search(credits_re, block)
         if cr_m and len(name) >= 2:
             ls_m = re.search(last_seen_re, block)
@@ -829,7 +879,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     if not duplicates:
         return False
 
-    raw_to_ucid = {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, original)}
+    raw_to_ucid = {name: ucid for ucid, name in _ucid_names(original)}
     ranks_data  = original
     modified    = False
 
@@ -856,7 +906,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
 
         # ── Remove each raw entry ─────────────────────────────────────────
         for raw in raw_names:
-            m = re.search(r"\[[\x27\x22]" + re.escape(raw) + r"[\x27\x22]\]\s*=\s*\{", ranks_data)
+            m = _find_entry(ranks_data, raw)
             if not m:
                 log.warning(f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
                 continue
@@ -876,15 +926,14 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
             inner = re.sub(last_seen_re, lambda mm: mm.group(1) + _lua_num_str(max_last_seen), inner, count=1)
         else:
             inner = inner.rstrip() + f'\n    ["lastSeen"]={_lua_num_str(max_last_seen)},\n  '
-        new_entry  = '  ["' + canonical + '"]={' + inner + '},\n'
+        new_entry  = "  [" + _lua_quote(canonical) + "]={" + inner + "},\n"
         ranks_data = re.sub(r'(RankSave\[[\'\"]players[\'\"]\]\s*=\s*\{)',
                             lambda mm: mm.group(1) + "\n" + new_entry, ranks_data, count=1)
 
         # ── Update ucidToName ─────────────────────────────────────────────
-        for q in ('"', "'"):
-            old_e = f'[{q}{ucid}{q}]={q}{name_with_ucid}{q}'
-            if old_e in ranks_data:
-                ranks_data = ranks_data.replace(old_e, f'["{ucid}"]="{canonical}"', 1)
+        for m in _UCID_PAIR.finditer(ranks_data):
+            if m.group(1) == ucid and _lua_unquote(m.group(2)) == name_with_ucid:
+                ranks_data = ranks_data[:m.start()] + f'["{ucid}"]={_lua_quote(canonical)}' + ranks_data[m.end():]
                 break
 
         modified = True
