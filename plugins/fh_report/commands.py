@@ -3056,7 +3056,7 @@ class Fh_Report(Plugin):
         reset = False
         if not old:
             st = {"file": basename, "start": now.strftime(_SESSION_ISO), "kind": "first_seen"}
-            self.log.debug(f"Fh_Report [{server.name}]: campaign {basename} first seen {st['start']} UTC")
+            self.log.debug(f"Fh_Report [{server.instance.name}]: campaign {basename} first seen {st['start']} UTC")
             watch = {**cur, "seen": now, "pending": False}
         elif old.get("file") != basename or absent:       # other map, or the save reappeared
             reset, watch = True, {**cur, "seen": now, "pending": False}
@@ -3070,7 +3070,7 @@ class Fh_Report(Plugin):
         if reset:
             st = {"file": basename, "kind": "detected",
                   "start": (await self._reset_moment(server, seen, now)).strftime(_SESSION_ISO)}
-            self.log.info(f"Fh_Report [{server.name}]: new campaign session ({basename}) from {st['start']} UTC "
+            self.log.info(f"Fh_Report [{server.instance.name}]: new campaign session ({basename}) from {st['start']} UTC "
                           f"(noticed {now.strftime(_SESSION_ISO)} UTC)")
         elif old:
             st = {k: old[k] for k in ("file", "start", "kind")}
