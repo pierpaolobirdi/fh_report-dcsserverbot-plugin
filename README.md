@@ -61,7 +61,8 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
 | `update_interval` | `300` | Seconds between embed refreshes |
-| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
+| `daily_reset_hour` | `0` | Hour when daily points reset, in the `daily_reset_timezone` (UTC unless you set it) |
+| `daily_reset_timezone` | `UTC` | Time zone of `daily_reset_hour` and `daily_reset_schedule`: `UTC`, `local` or an IANA name such as `Europe/Madrid` — see [Daily reset time zone](#daily-reset-time-zone) |
 | `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
 | `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
 | `bar_length` | `40` | Number of squares in the progress bar |
@@ -429,9 +430,28 @@ The plugin never creates **duplicate messages**: before posting, it checks the c
 
 ---
 
+## Daily reset time zone
+
+`daily_reset_hour` and `daily_reset_schedule` are in UTC unless you set `daily_reset_timezone`:
+
+```yaml
+DEFAULT:
+  daily_reset_hour: 6
+  daily_reset_timezone: Europe/Madrid   # reset at 06:00 Madrid time, all year round
+```
+
+- `UTC` (default): as before.
+- An IANA name (`Europe/Madrid`, `America/New_York`, `Pacific/Auckland`...): the hour is the local wall-clock hour and follows summer/winter time by itself, so the reset does not drift by an hour twice a year. The weekdays of `daily_reset_schedule` are the weekdays in that zone. Recommended.
+- `local`: the local time of the machine running the bot. Handy, but it has the machine's offset at the moment of each check, so it can be an hour off on the day the clocks change; use an IANA name if that matters.
+- An unknown name falls back to UTC and logs a warning.
+
+It moves everything that depends on the daily reset: the Daily table, the Podium day labels and the daily `BoB` count. After changing it, one daily period is longer or shorter than 24 hours as the counters switch to the new hour (nothing is lost). The dates in the Podium are the dates in that zone from then on.
+
+---
+
 ## Daily Podium
 
-A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), Fh_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
+A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or in your `daily_reset_timezone`, or on a detected campaign restart), Fh_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
 
 ### Seeing it in the main embed (`P` combined with other letters)
 

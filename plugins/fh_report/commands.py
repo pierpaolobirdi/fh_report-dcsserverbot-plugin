@@ -17,7 +17,8 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 from typing import Type
 
 import discord
@@ -34,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.32"
+FH_REPORT_RELEASE = "14.1.33"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2472,10 +2473,34 @@ def _updates_enabled(cfg: dict) -> bool:
     return not _bool_cfg(cfg.get("disable_updates"))
 
 
+_tz_warned: set[str] = set()
+
+
+def _reset_tz(cfg: dict) -> tzinfo:
+    """Time zone the daily reset hour is written in (daily_reset_timezone):
+    UTC (default), "local" (the machine running the bot), or an IANA name such
+    as Europe/Madrid, which follows summer/winter time by itself. An unknown
+    name falls back to UTC with one warning."""
+    name = str(cfg.get("daily_reset_timezone") or "UTC").strip()
+    if name.lower() in ("utc", "gmt", "z"):
+        return timezone.utc
+    if name.lower() == "local":
+        return datetime.now().astimezone().tzinfo
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        if name not in _tz_warned:
+            _tz_warned.add(name)
+            log.warning(f"Fh_Report: daily_reset_timezone {name!r} is not a known time zone "
+                        f"(use UTC, local or a name like Europe/Madrid) — using UTC.")
+        return timezone.utc
+
+
 def _reset_hour_today(cfg: dict) -> int:
-    """daily_reset_hour, overridden by today's entry in daily_reset_schedule."""
+    """daily_reset_hour, overridden by today's entry in daily_reset_schedule
+    (the weekday is the one in daily_reset_timezone)."""
     schedule = cfg.get("daily_reset_schedule") or {}
-    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).weekday()]
+    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).astimezone(_reset_tz(cfg)).weekday()]
     if today in schedule:
         return int(schedule[today])
     return int(cfg.get("daily_reset_hour") or 0)
@@ -2523,9 +2548,11 @@ WITH ff AS (
 
 
 def _day_start(cfg: dict, now: datetime | None = None) -> datetime:
-    """Most recent daily reset instant (UTC): today's reset hour if it has
-    passed, else yesterday's (each day with its own daily_reset_schedule hour)."""
-    now = now or datetime.now(timezone.utc)
+    """Most recent daily reset instant (as an aware UTC datetime): today's
+    reset hour if it has passed, else yesterday's (each day with its own
+    daily_reset_schedule hour), the hours being in daily_reset_timezone."""
+    tz = _reset_tz(cfg)
+    now = (now or datetime.now(timezone.utc)).astimezone(tz)
     schedule = cfg.get("daily_reset_schedule") or {}
     default  = int(cfg.get("daily_reset_hour") or 0)
     names    = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -2535,7 +2562,7 @@ def _day_start(cfg: dict, now: datetime | None = None) -> datetime:
         return day.replace(hour=hour, minute=0, second=0, microsecond=0)
 
     start = at(now)
-    return start if now >= start else at(now - timedelta(days=1))
+    return (start if now >= start else at(now - timedelta(days=1))).astimezone(timezone.utc)
 
 
 def _parse_utc(text) -> datetime | None:
@@ -2800,9 +2827,11 @@ class Fh_Report(Plugin):
                               live_names: set | None = None,
                               snap: dict | None = None,
                               persist: bool = True,
-                              snap_unpacked: dict | None = None) -> tuple[dict, dict, bool]:
+                              snap_unpacked: dict | None = None,
+                              tz: tzinfo = timezone.utc) -> tuple[dict, dict, bool]:
         """Today's points and stat deltas per player ID, against the baseline
-        snapshot taken at reset_hour UTC. Returns (daily_pts, daily_stats,
+        snapshot taken at reset_hour in time zone `tz` (daily_reset_timezone,
+        UTC by default). Returns (daily_pts, daily_stats,
         campaign_restarted).
 
         Inputs are already grouped by player ID (see _group_by_player_id), so
@@ -2819,8 +2848,8 @@ class Fh_Report(Plugin):
         saves_dir/.fhc/fhr_daily_snapshot.json — and daily_snapshot.json too if
         it's still there (a missing snapshot starts at 0).
         """
-        now_utc   = datetime.now(timezone.utc)
-        today_str = now_utc.strftime("%Y-%m-%d")
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        today_str = now_local.strftime("%Y-%m-%d")
 
         if snap is None:
             snap = await self._load_daily_snapshot(saves_dir, node, cleanup=persist)
@@ -2873,9 +2902,9 @@ class Fh_Report(Plugin):
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
         # ── Real calendar-day reset (the only thing that closes a day) ─────
-        reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+        reset_time     = now_local.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
         first_run      = not snap_date
-        date_reset_due = (not first_run) and snap_date != today_str and now_utc >= reset_time
+        date_reset_due = (not first_run) and snap_date != today_str and now_local >= reset_time
 
         if first_run:
             # No prior day to close or carry over — start completely fresh.
@@ -2886,7 +2915,7 @@ class Fh_Report(Plugin):
 
         elif date_reset_due:
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
-            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
+            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 {tz}{reason}")
 
             # Close the day for the Podium from the current snapshot/carry_over (which
             # already include earlier mid-day swaps); last_daily_saved covers a swap
@@ -3291,7 +3320,8 @@ class Fh_Report(Plugin):
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
-                name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
+                name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked,
+                tz=_reset_tz(cfg))
 
         # Campaign session start (always kept up to date: /fh_report player reads it too)
         session = await self._update_session(
@@ -3759,7 +3789,7 @@ class Fh_Report(Plugin):
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
             name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap,
-            persist=False, snap_unpacked=snap_unpacked)
+            persist=False, snap_unpacked=snap_unpacked, tz=_reset_tz(cfg))
         d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 

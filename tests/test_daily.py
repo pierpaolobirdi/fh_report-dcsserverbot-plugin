@@ -83,3 +83,59 @@ def test_persist_false_writes_nothing(tmp_path, fake_clock):
     assert snap_file.read_text() == '{"date": "2026-09-01", "snapshot": {"x": 1}}'
     assert not (tmp_path / ".fhc" / "fhr_daily_history.json").exists()
     assert not (tmp_path / ".fhc" / "fhr_daily_snapshot.json").exists()
+
+
+# ── daily_reset_timezone ───────────────────────────────────────────────────────
+
+def test_reset_timezone_names():
+    from datetime import timezone as tzmod
+    assert commands._reset_tz({}) is tzmod.utc
+    assert commands._reset_tz({"daily_reset_timezone": "gmt"}) is tzmod.utc
+    assert str(commands._reset_tz({"daily_reset_timezone": "Europe/Madrid"})) == "Europe/Madrid"
+    assert commands._reset_tz({"daily_reset_timezone": "Nowhere/Land"}) is tzmod.utc     # warns, never crashes
+    assert commands._reset_tz({"daily_reset_timezone": "local"}).utcoffset(None) is not None
+
+
+def test_day_start_in_a_local_timezone_follows_summer_and_winter_time():
+    cfg = {"daily_reset_hour": 6, "daily_reset_timezone": "Europe/Madrid"}
+    # 3 Oct (summer time, UTC+2): 06:00 Madrid = 04:00 UTC
+    after = real_datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, after) == real_datetime(2026, 10, 3, 4, 0, tzinfo=timezone.utc)
+    before = real_datetime(2026, 10, 3, 3, 0, tzinfo=timezone.utc)                  # still the previous period
+    assert commands._day_start(cfg, before) == real_datetime(2026, 10, 2, 4, 0, tzinfo=timezone.utc)
+    # 3 Nov (winter time, UTC+1): the same 06:00 Madrid is 05:00 UTC
+    winter = real_datetime(2026, 11, 3, 9, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, winter) == real_datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    # the default is unchanged
+    assert commands._day_start({"daily_reset_hour": 6}, after) == real_datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc)
+
+
+def test_schedule_weekdays_are_the_ones_of_the_timezone():
+    cfg = {"daily_reset_hour": 6, "daily_reset_schedule": {"sun": 9}, "daily_reset_timezone": "Pacific/Auckland"}
+    # Sat 3 Oct 21:00 UTC is already Sunday 4 Oct 10:00 in Auckland (UTC+13): Sunday's 9 applies
+    now = real_datetime(2026, 10, 3, 21, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, now) == real_datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)   # Sun 09:00 NZ
+
+
+def test_the_daily_counters_roll_over_at_local_midnight_not_utc_midnight(tmp_path, fake_clock):
+    saves = str(tmp_path)
+    (tmp_path / ".fhc").mkdir()
+    plugin = make_plugin()
+    ids, madrid = UCID[:2], commands._reset_tz({"daily_reset_timezone": "Europe/Madrid"})
+
+    async def step(hours_from, tz):
+        fake_clock.now = real_datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc) + timedelta(hours=hours_from)
+        snap = await plugin._load_daily_snapshot(saves, FileNode())
+        pts = {u: 100 * (hours_from + 1) for u in ids}
+        return await plugin._compute_daily_points(saves, pts, {}, 0, FileNode(), "f.lua", {}, {}, set(pts), snap, tz=tz)
+
+    async def run(tz):
+        await step(0, tz)                       # 12:00 UTC, 14:00 Madrid
+        before = (await step(9, tz))[0]         # 21:00 UTC, 23:00 Madrid, same day in both
+        after = (await step(11, tz))[0]         # 23:00 UTC = 01:00 Madrid next day
+        return before, after
+    utc_before, utc_after = asyncio.run(run(timezone.utc))
+    assert utc_after[ids[0]] > utc_before[ids[0]] > 0                # UTC: still the same day, still accumulating
+    (tmp_path / ".fhc" / "fhr_daily_snapshot.json").unlink()
+    mad_before, mad_after = asyncio.run(run(madrid))
+    assert mad_before[ids[0]] > 0 and mad_after.get(ids[0], 0) == 0   # Madrid: a new day started, the counter restarted
