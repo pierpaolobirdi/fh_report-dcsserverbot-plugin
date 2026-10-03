@@ -272,12 +272,12 @@ Stats shown:
 | Session (`show_session_card`) | this server since the current session started |
 | Daily (`show_daily_card`) | this server since the last daily reset |
 
-**Session** here is the life of the Foothold campaign (the *Session Leaderboard*): it starts when the tracking files of that map/mission are first created, and it keeps going through mission reloads. Foothold writes no start date inside the file and DCSServerBot cannot read file dates, so the start is, best first:
-- **Exact** (`since 18:42`): while the mission is running, Fh_Report asks it once for the creation time of the save file (a tiny read-only Lua script, like the waypoint dump) and keeps it in `fhr_session.json`. On the next cycle it asks again and trusts the value only if it is identical, so a system that reports the last write instead of the creation falls back automatically.
-- **Detected** (`since ~18:42`): the moment Fh_Report saw the save appear after the "campaign not started" screen, change its file name, or be reset in place (empty save, or points and kills dropping together). It is late by up to one `update_interval`.
-- **First seen** (`since ~`): for a campaign already running when Fh_Report first looked at it, until a restart or an exact reading replaces it.
+**Session** here is the life of the Foothold campaign (the *Session Leaderboard*): it starts when the campaign is reset and keeps going through mission reloads. A campaign is reset in two ways: Foothold does it by itself when the campaign is won (it empties the *same* save file and reloads the mission seconds later, so the file's creation date says nothing), or an admin deletes the tracking files in `Saves`. Foothold stores no start date and DCSServerBot cannot read file dates, so Fh_Report notices the reset and dates it:
+- **Noticed** when the save reappears after the "campaign not started" screen, changes file name, or is reset in place (empty save, or points and kills dropping together), within one `update_interval`.
+- **Dated** at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed if there was none or the gap is over an hour. The embed shows `since ~18:42`, the `~` meaning an estimate good to a minute or two.
+- A campaign already running when Fh_Report first looked at it has no known start: counts run `from 18:42, when first seen` until the next reset.
 
-A new exact reading is requested only after a detected restart or while no verified value exists, never on every cycle. If the mission is not running, the detected/first-seen value is used.
+The state is kept in `.fhc/fhr_session.json`.
 
 `/fh_report player` adds, before Career Stats:
 - **Blue-on-Blue (BoB)**: total (destroyed / damaged), today and session counts, and the latest incidents with date and victim (the player's name, or `AI unit (type)`).
@@ -338,7 +338,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, `fhr_session.json` with the campaign session start, and `fhr_save_created.json`, the answer to the creation-time probe); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 

@@ -58,7 +58,7 @@ class _Followup:
         self.sent.append(embed or content)
 
 
-def _invoke(saves_dir, player_name, admin, cfg_extra=None, session_kind="exact"):
+def _invoke(saves_dir, player_name, admin, cfg_extra=None, session_kind="detected"):
     d = saves_dir()
     if session_kind:   # campaign session state, as kept by the updater
         import os
@@ -94,7 +94,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     assert pool.connections == 2 and sent[0].title == "👤 Player — Zarpa"
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
-    assert "**Session:** 1 (since <t:" in bnb and "(since ~" not in bnb and "**Today:** 3" in bnb
+    assert "**Session:** 1 (since ~<t:" in bnb and "**Today:** 3" in bnb
     assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
     assert "_Showing the latest 2 of 5 incidents._" in bnb
     assert "Team kill → `Viper`" in bnb and "Friendly fire → AI unit (T-72B)" in bnb and "pts" not in bnb
@@ -188,10 +188,10 @@ def test_bnb_session_unknown_without_a_start():
     assert "**Session:** unknown" in next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
 
 
-def test_session_kind_marks_detected_start_as_approximate(saves_dir):
-    _, sent = _invoke(saves_dir, A, admin=True, session_kind="detected")
+def test_first_seen_session_is_labelled_as_a_lower_bound(saves_dir):
+    _, sent = _invoke(saves_dir, A, admin=True, session_kind="first_seen")
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
-    assert "(since ~<t:" in bnb
+    assert "(counting from <t:" in bnb and "when first seen)" in bnb
 
 
 def test_session_unknown_without_state_file(saves_dir):

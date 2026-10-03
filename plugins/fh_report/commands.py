@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.28"
+FH_REPORT_RELEASE = "14.1.29"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -577,91 +577,40 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
 
 
 # ── Campaign session start ────────────────────────────────────────────────────
-# "Session" is the life of the Foothold campaign: it starts when the tracking
-# (save) file of the map/mission is first created and survives mission reloads.
-# Foothold writes no start date inside the file and DCSSB can't read file
-# times, so the start is (best first):
-#   exact          creation time of the save file, asked once to the running
-#                  mission (lfs.attributes), see probe_save_created
-#   detected       when Fh_Report saw the file appear / change name / get reset
-#   first_seen     when Fh_Report first saw this campaign (older campaigns)
+# "Session" is the life of the Foothold campaign (the Session Leaderboard). It
+# starts when the campaign is reset, which Foothold does by emptying the SAME
+# save file (so the file's creation date means nothing) and restarting the
+# mission, or when an admin deletes the tracking files. No start date is stored
+# anywhere, so the start is the moment a reset is noticed, narrowed to the
+# mission (re)start DCSServerBot recorded in the window since the campaign was
+# last seen intact (Foothold restarts the mission a few seconds after a reset).
+#   detected    a reset was noticed (save reappeared, new file name, reset in place)
+#   first_seen  a campaign already running when Fh_Report first looked at it
 # State lives in .fhc/fhr_session.json, written by the updater only.
 
 _SESSION_ISO = "%Y-%m-%dT%H:%M:%S"
+_SESSION_WINDOW = timedelta(hours=1)    # widest "last seen intact -> noticed" gap still narrowed
+_SESSION_SEEN_EVERY = timedelta(minutes=15)   # how often "last seen intact" is written to disk
 
 
-def _new_session(basename: str, now: datetime, kind: str) -> dict:
-    iso = now.strftime(_SESSION_ISO)
-    return {"file": basename, "start": iso, "kind": kind, "fallback": iso,
-            "fallback_kind": kind, "probe": None, "verified": False, "bad": False}
+def _new_session(basename: str, now: datetime, kind: str, start: datetime | None = None) -> dict:
+    return {"file": basename, "start": (start or now).strftime(_SESSION_ISO), "kind": kind,
+            "seen": now.strftime(_SESSION_ISO)}
 
 
-def _session_next(old: dict, basename: str, now: datetime, reset: bool) -> dict:
-    """State for this cycle: a new session when there is none yet (first_seen,
-    the campaign may be older), or the save file changed name / reappeared /
-    was reset in place (detected, within one update cycle of it happening)."""
-    if not old or not old.get("start"):
-        return _new_session(basename, now, "first_seen")
-    if old.get("file") != basename or reset:
-        return _new_session(basename, now, "detected")
-    return old
+def _session_migrate(old: dict) -> dict:
+    """fhr_session.json written by 14.1.28 (creation-time probe) -> this format."""
+    if not old or old.get("kind") in ("detected", "first_seen"):
+        return old
+    kind = old.get("fallback_kind") or "first_seen"
+    start = old.get("fallback") or old.get("start")
+    return {"file": old.get("file", ""), "start": start, "kind": kind, "seen": start} if start else {}
 
 
-def _session_apply_probe(st: dict, created: int, now: datetime) -> dict:
-    """Fold a creation-time reading of the save file into the state. A reading
-    is only trusted if it is plausible (not in the future, not later than the
-    moment we first saw the file) and, on the next probe, identical to the
-    first one: a platform that reports the last write instead of the creation
-    would otherwise make the session look like it restarts at every save."""
-    st = dict(st)
-    fallback = _parse_utc(st.get("fallback"))
-    now_epoch = calendar.timegm(now.timetuple())
-    plausible = (946684800 < created <= now_epoch + 60 and
-                 (fallback is None or created <= calendar.timegm(fallback.timetuple()) + 300))
-    if st["kind"] == "exact":
-        if abs(created - (st.get("probe") or 0)) <= 2:
-            st["verified"] = True
-            return st
-        plausible = False
-    if not plausible:
-        st.update(bad=True, kind=st["fallback_kind"], start=st["fallback"], verified=False)
-        return st
-    st.update(kind="exact", probe=created, verified=False,
-              start=datetime.fromtimestamp(created, timezone.utc).strftime(_SESSION_ISO))
-    return st
-
-
-def _save_created_lua(src: str, out: str) -> str:
-    """Lua for the mission: write the creation/modification time of the save
-    file `src` as JSON to `out`. Read-only on the campaign. On Windows lfs
-    'change' is the file's creation time."""
-    return (
-        "if lfs and io then "
-        f"local _s=[=[{src}]=] local _o=[=[{out}]=] "
-        "local _a=lfs.attributes(_s) "
-        "if _a then local _f=io.open(_o,'w') if _f then "
-        "_f:write('{\"file\":\"'..(_s:match('[^/\\\\]+$') or '')"
-        "..'\",\"created\":'..tostring(math.floor(_a.change or 0))"
-        "..',\"modified\":'..tostring(math.floor(_a.modification or 0))..'}') "
-        "_f:close() end end end"
-    )
-
-
-async def probe_save_created(server, saves_dir: str, node, source_node, persistence_file: str) -> int | None:
-    """Ask the running mission for the save file's creation time (epoch).
-    None if it can't be read or answered for another file."""
-    out = _fhr_path(saves_dir, "save_created.json")
-    await _ensure_fhc_dir(source_node, saves_dir)
-    await _do_script(server, _save_created_lua(persistence_file, out))
-    await asyncio.sleep(1.5)
-    node.invalidate(out)
-    data = await _read_json(node, out)
-    if data.get("file") != os.path.basename(persistence_file):
-        return None
-    try:
-        return int(data["created"])
-    except (KeyError, TypeError, ValueError):
-        return None
+def _session_is_reset(old: dict, basename: str, reset: bool) -> bool:
+    """A new campaign session begins when there is a previous one and its save
+    file changed name, reappeared after the "not started" screen, or was reset in place."""
+    return bool(old) and (old.get("file") != basename or reset)
 
 
 _unsupported_version_warned: set[str] = set()
@@ -1664,8 +1613,11 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if bnb and bnb.get("total"):
         sess_start = bnb.get("session_start")
         if sess_start:
-            approx = "" if bnb.get("session_kind") == "exact" else "~"   # ~ = detected, not the file's own date
-            since = f" (since {approx}<t:{int(calendar.timegm(sess_start.timetuple()))}:t>)"
+            stamp = f"<t:{int(calendar.timegm(sess_start.timetuple()))}:t>"
+            if bnb.get("session_kind") == "first_seen":   # campaign was already running: a lower bound
+                since = f" (counting from {stamp}, when first seen)"
+            else:
+                since = f" (since ~{stamp})"
             session_txt = f"**Session:** {bnb['session']}{since}"
         else:
             session_txt = "**Session:** unknown"
@@ -2592,6 +2544,7 @@ class Fh_Report(Plugin):
         self._cycle_punishment: dict | None = None
         self._campaign_reset: dict[str, bool] = {}   # saves_dir -> data reset in place seen by the daily pass
         self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
+        self._campaign_seen: dict[str, datetime] = {}   # saves_dir -> last cycle the campaign was read intact
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -3044,25 +2997,49 @@ class Fh_Report(Plugin):
 
         return daily, daily_stats, campaign_restarted
 
+    async def _reset_moment(self, server, seen: datetime | None, now: datetime) -> datetime:
+        """When a campaign reset noticed at `now` most likely happened: Foothold
+        restarts the mission seconds after a reset, so the first mission start
+        DCSServerBot recorded since the campaign was last seen intact. `now`
+        when there is none, or the window is too wide to say."""
+        if seen and timedelta(0) < now - seen <= _SESSION_WINDOW:
+            try:
+                async with self.apool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT MIN(mission_start) FROM missions "
+                            "WHERE server_name = %s AND mission_start > %s AND mission_start <= %s",
+                            (server.name, seen, now))
+                        row = await cur.fetchone()
+                        if row and row[0]:
+                            return row[0]
+            except Exception as e:
+                self.log.debug(f"Fh_Report: mission start not available: {e}")
+        return now
+
     async def _update_session(self, server, saves_dir: str, node, source_node,
                               persistence_file: str, reset: bool = False) -> dict:
         """Keep .fhc/fhr_session.json current and return {"start", "kind"}
         (start = naive UTC datetime). See the module comment above."""
         basename = os.path.basename(persistence_file)
-        old = await _read_fhr_json(node, saves_dir, "session.json")
+        raw = await _read_fhr_json(node, saves_dir, "session.json")
+        old = _session_migrate(raw)
+        # 14.1.28 left this behind (file creation probe, since removed)
+        await _remove_legacy_file(source_node, _fhr_path(saves_dir, "save_created.json"))
         absent = saves_dir in self._campaign_absent
         self._campaign_absent.discard(saves_dir)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        st = _session_next(old, basename, now, reset or absent)
-        if server.status in HOT_STATES and not st["bad"] and not (st["kind"] == "exact" and st["verified"]):
-            try:
-                created = await probe_save_created(server, saves_dir, node, source_node, persistence_file)
-            except Exception as e:
-                self.log.debug(f"Fh_Report: save creation time not available: {e}")
-                created = None
-            if created:
-                st = _session_apply_probe(st, created, now)
-        if st != old:
+        seen = (self._campaign_seen.get(saves_dir) or _parse_utc(old.get("seen"))) if old else None
+        if not old:
+            st = _new_session(basename, now, "first_seen")
+        elif _session_is_reset(old, basename, reset or absent):
+            st = _new_session(basename, now, "detected", await self._reset_moment(server, seen, now))
+        else:
+            st = dict(old)
+            if now - (_parse_utc(old.get("seen")) or now) >= _SESSION_SEEN_EVERY:
+                st["seen"] = now.strftime(_SESSION_ISO)
+        self._campaign_seen[saves_dir] = now
+        if st != raw:
             await _ensure_fhc_dir(source_node, saves_dir)
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)

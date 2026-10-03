@@ -1,136 +1,157 @@
-"""Campaign session start: state machine, plausibility checks and the probe flow."""
+"""Campaign session start: first sight, resets, and narrowing to DCSSB's mission start."""
 import asyncio
 import json
-import os
-import shutil
-import subprocess
-from datetime import datetime
-
-import pytest
+from datetime import datetime, timedelta
 
 from conftest import FileNode, commands, make_plugin
 
-NOW = datetime(2026, 10, 3, 18, 0, 0)
-EPOCH = int(datetime(2026, 10, 3, 17, 0, 0, tzinfo=commands.timezone.utc).timestamp())   # an hour before NOW
+T0 = datetime(2026, 10, 3, 12, 0, 0)
 
 
-def test_first_sight_is_first_seen_and_a_new_file_is_detected():
-    st = commands._session_next({}, "foothold_a.lua", NOW, reset=False)
-    assert st["kind"] == "first_seen" and st["start"] == "2026-10-03T18:00:00"
-    later = datetime(2026, 10, 3, 19, 0, 0)
-    assert commands._session_next(st, "foothold_a.lua", later, reset=False) is st            # nothing happened
-    assert commands._session_next(st, "foothold_b.lua", later, reset=False)["kind"] == "detected"   # other file
-    assert commands._session_next(st, "foothold_a.lua", later, reset=True)["start"] == "2026-10-03T19:00:00"
+class _Cur:
+    def __init__(self, pool):
+        self.pool = pool
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+    async def execute(self, query, args):
+        self.pool.queries.append((query, args))
+
+    async def fetchone(self):
+        return (self.pool.mission_start,)
 
 
-def test_probe_makes_the_start_exact_then_verifies_it():
-    st = commands._new_session("foothold_a.lua", NOW, "first_seen")
-    st = commands._session_apply_probe(st, EPOCH, NOW)
-    assert st["kind"] == "exact" and st["start"] == "2026-10-03T17:00:00" and not st["verified"]
-    st = commands._session_apply_probe(st, EPOCH, NOW)            # same answer again: trusted
-    assert st["verified"] and st["kind"] == "exact" and not st["bad"]
+class _Conn(_Cur):
+    def cursor(self):
+        return _Cur(self.pool)
 
 
-def test_probe_that_changes_between_readings_is_rejected():
-    """A system reporting the last write instead of the creation moves on every save."""
-    st = commands._session_apply_probe(commands._new_session("f.lua", NOW, "detected"), EPOCH, NOW)
-    st = commands._session_apply_probe(st, EPOCH + 300, NOW)
-    assert st["bad"] and st["kind"] == "detected" and st["start"] == "2026-10-03T18:00:00"
+class _Pool:
+    def __init__(self, mission_start=None):
+        self.mission_start, self.queries = mission_start, []
 
-
-@pytest.mark.parametrize("created", [0, 500, 4_000_000_000])
-def test_implausible_probe_is_ignored(created):
-    st = commands._session_apply_probe(commands._new_session("f.lua", NOW, "first_seen"), created, NOW)
-    assert st["bad"] and st["kind"] == "first_seen"
-
-
-def test_probe_later_than_first_sight_is_rejected():
-    later_than_seen = int(datetime(2026, 10, 3, 17, 59, 0, tzinfo=commands.timezone.utc).timestamp()) + 3600 * 0
-    st = commands._new_session("f.lua", datetime(2026, 10, 3, 12, 0, 0), "first_seen")   # seen at 12:00
-    assert commands._session_apply_probe(st, later_than_seen, NOW)["bad"]               # claims creation at 17:59
+    def connection(self):
+        return _Conn(self)
 
 
 class _Server:
-    def __init__(self, status):
-        self.status = status
+    name = "Public"
 
 
-def _updater(tmp_path, monkeypatch, created, status=commands.Status.RUNNING):
-    """Plugin + node where the injected Lua is replaced by a fake that answers `created`."""
-    calls = []
+def _plugin(pool=None):
+    p = make_plugin(apool=pool or _Pool())
+    return p
 
-    async def fake_do_script(server, lua):
-        calls.append(lua)
-        out = tmp_path / ".fhc" / "fhr_save_created.json"
-        out.parent.mkdir(exist_ok=True)
-        out.write_text(json.dumps({"file": "foothold_x.lua", "created": created[0], "modified": created[0]}))
 
-    async def no_sleep(_):
-        pass
-    monkeypatch.setattr(commands, "_do_script", fake_do_script)
-    monkeypatch.setattr(commands.asyncio, "sleep", no_sleep)
-    plugin = make_plugin()
+def _run(plugin, tmp_path, now, reset=False, name="foothold_x.lua", monkeypatch=None):
     source = FileNode()
-
-    def run(reset=False):
-        node = commands._UpdateReadCache(source)
-        return asyncio.run(plugin._update_session(_Server(status), str(tmp_path), node, source,
-                                                  str(tmp_path / "foothold_x.lua"), reset=reset))
-    return plugin, run, calls
+    node = commands._UpdateReadCache(source)
+    return asyncio.run(plugin._update_session(_Server(), str(tmp_path), node, source,
+                                              str(tmp_path / name), reset=reset))
 
 
 def _state(tmp_path):
     return json.loads((tmp_path / ".fhc" / "fhr_session.json").read_text())
 
 
-def test_updater_goes_first_seen_to_exact_to_verified_and_stops_probing(tmp_path, monkeypatch):
-    created = [EPOCH]
-    plugin, run, calls = _updater(tmp_path, monkeypatch, created)
-    got = run()
-    assert got["kind"] == "exact" and len(calls) == 1 and not _state(tmp_path)["verified"]
-    run()                                   # second cycle: verification probe
-    assert _state(tmp_path)["verified"] and len(calls) == 2
-    run()
-    assert len(calls) == 2                  # verified: no more injections
+class _Clock:
+    """Fixes the 'now' the updater sees."""
+    def __init__(self, monkeypatch):
+        self.now = T0
+        outer = self
+
+        class _DT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return outer.now.replace(tzinfo=tz) if tz else outer.now
+        monkeypatch.setattr(commands, "datetime", _DT)
+
+    def at(self, minutes):
+        self.now = T0 + timedelta(minutes=minutes)
 
 
-def test_a_reset_starts_over_and_probes_again(tmp_path, monkeypatch):
-    created = [EPOCH]
-    plugin, run, calls = _updater(tmp_path, monkeypatch, created)
-    run(); run()
-    created[0] = EPOCH + 1800               # the save was recreated 30 min later
-    got = run(reset=True)
-    assert len(calls) == 3
-    assert _state(tmp_path)["kind"] in ("detected", "exact")
+def test_a_campaign_already_running_is_first_seen(tmp_path, monkeypatch):
+    clock = _Clock(monkeypatch)
+    got = _run(_plugin(), tmp_path, clock.now)
+    assert got["kind"] == "first_seen" and got["start"] == T0
+    assert _state(tmp_path)["start"] == "2026-10-03T12:00:00"
 
 
-def test_save_reappearing_after_the_not_started_screen_is_a_new_session(tmp_path, monkeypatch):
-    created = [EPOCH]
-    plugin, run, calls = _updater(tmp_path, monkeypatch, created, status=commands.Status.STOPPED)
-    first = run()
-    assert first["kind"] == "first_seen" and not calls        # mission not running: no probe
-    plugin._campaign_absent.add(str(tmp_path))               # the save went missing in between
-    assert run()["kind"] == "detected"
-    assert str(tmp_path) not in plugin._campaign_absent
+def test_nothing_happening_keeps_the_start(tmp_path, monkeypatch):
+    clock, plugin = _Clock(monkeypatch), _plugin()
+    _run(plugin, tmp_path, clock.now)
+    clock.at(5)
+    got = _run(plugin, tmp_path, clock.now)
+    assert got["start"] == T0 and got["kind"] == "first_seen"
 
 
-def test_unstable_platform_falls_back_to_detection(tmp_path, monkeypatch):
-    created = [EPOCH]
-    plugin, run, calls = _updater(tmp_path, monkeypatch, created)
-    run()
-    created[0] = EPOCH + 3600                # next read differs: not a creation time
-    got = run()
-    assert got["kind"] == "first_seen" and _state(tmp_path)["bad"]
-    run()
-    assert len(calls) == 2                   # gave up on this file
+def test_reset_in_place_is_detected_at_the_mission_restart(tmp_path, monkeypatch):
+    """Foothold empties the same file and reloads the mission seconds later: the
+    session starts at that mission start, not when the next cycle noticed."""
+    clock = _Clock(monkeypatch)
+    restart = T0 + timedelta(minutes=7)
+    plugin = _plugin(_Pool(mission_start=restart))
+    _run(plugin, tmp_path, clock.now)
+    clock.at(5)
+    _run(plugin, tmp_path, clock.now)
+    clock.at(10)                                            # reset noticed 3 min after the restart
+    got = _run(plugin, tmp_path, clock.now, reset=True)
+    assert got == {"start": restart, "kind": "detected"}
+    sql, args = plugin.apool.queries[-1]
+    assert args == ("Public", T0 + timedelta(minutes=5), T0 + timedelta(minutes=10))   # since last seen intact
 
 
-@pytest.mark.skipif(shutil.which("lua5.1") is None and shutil.which("lua") is None, reason="no Lua interpreter")
-def test_injected_lua_runs_and_writes_valid_json(tmp_path):
-    out = tmp_path / "out.json"
-    src = r"C:\Users\x\Saved Games\DCS\Missions\Saves\foothold_Syria.lua"
-    script = ("lfs = {attributes = function(p) return {change = 1790000000, modification = 1790003600} end}\n"
-              + commands._save_created_lua(src, str(out)))
-    (tmp_path / "t.lua").write_text(script)
-    subprocess.run([shutil.which("lua5.1") or shutil.which("lua"), str(tmp_path / "t.lua")], check=True)
-    assert json.loads(out.read_text()) == {"file": "foothold_Syria.lua", "created": 1790000000, "modified": 1790003600}
+def test_reset_without_a_mission_restart_starts_when_noticed(tmp_path, monkeypatch):
+    clock = _Clock(monkeypatch)
+    plugin = _plugin(_Pool(mission_start=None))             # admin deleted the files, no reload
+    _run(plugin, tmp_path, clock.now)
+    clock.at(5)
+    assert _run(plugin, tmp_path, clock.now, reset=True)["start"] == clock.now
+
+
+def test_a_wide_gap_is_not_narrowed(tmp_path, monkeypatch):
+    """Bot down for hours: any mission start in that gap could be an ordinary restart."""
+    clock = _Clock(monkeypatch)
+    plugin = _plugin(_Pool(mission_start=T0 + timedelta(hours=1)))
+    _run(plugin, tmp_path, clock.now)
+    plugin._campaign_seen.clear()                           # as after a bot restart
+    clock.at(60 * 5)
+    got = _run(plugin, tmp_path, clock.now, reset=True)
+    assert got["start"] == clock.now and not plugin.apool.queries
+
+
+def test_new_save_file_name_and_save_reappearing_are_new_sessions(tmp_path, monkeypatch):
+    clock, plugin = _Clock(monkeypatch), _plugin()
+    _run(plugin, tmp_path, clock.now)
+    clock.at(5)
+    assert _run(plugin, tmp_path, clock.now, name="FootHold_CA_v0.3.lua")["kind"] == "detected"
+    clock.at(10)
+    plugin._campaign_absent.add(str(tmp_path))              # "campaign not started" was shown in between
+    got = _run(plugin, tmp_path, clock.now, name="FootHold_CA_v0.3.lua")
+    assert got["kind"] == "detected" and got["start"] == clock.now and not plugin._campaign_absent
+
+
+def test_state_written_by_the_creation_time_probe_is_migrated(tmp_path, monkeypatch):
+    """14.1.28 stored a (wrong) file creation date as an 'exact' start."""
+    clock, plugin = _Clock(monkeypatch), _plugin()
+    (tmp_path / ".fhc").mkdir()
+    (tmp_path / ".fhc" / "fhr_session.json").write_text(json.dumps({
+        "file": "foothold_x.lua", "start": "2026-01-01T00:00:00", "kind": "exact",
+        "fallback": "2026-10-03T09:00:00", "fallback_kind": "first_seen", "probe": 1, "verified": True, "bad": False}))
+    got = _run(plugin, tmp_path, clock.now)
+    assert got == {"start": datetime(2026, 10, 3, 9, 0, 0), "kind": "first_seen"}
+
+
+def test_seen_is_written_to_disk_only_every_so_often(tmp_path, monkeypatch):
+    clock, plugin = _Clock(monkeypatch), _plugin()
+    _run(plugin, tmp_path, clock.now)
+    clock.at(5)
+    _run(plugin, tmp_path, clock.now)
+    assert _state(tmp_path)["seen"] == "2026-10-03T12:00:00"      # not rewritten every cycle
+    clock.at(16)
+    _run(plugin, tmp_path, clock.now)
+    assert _state(tmp_path)["seen"] == "2026-10-03T12:16:00"
