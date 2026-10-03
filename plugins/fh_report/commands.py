@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.26"
+FH_REPORT_RELEASE = "14.1.27"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1574,8 +1574,15 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
 
     # ── Blue-on-blue (from DCSServerBot's Mission Statistics) ───────────
     if bnb and bnb.get("total"):
-        lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
-                 f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
+        sess_start = bnb.get("session_start")
+        if sess_start:
+            since = f" (since <t:{int(calendar.timegm(sess_start.timetuple()))}:t>)"
+            session_txt = f"**Session:** {bnb['session']}{since}"
+        else:
+            session_txt = "**Session:** unknown"
+        head = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
+                f"- {session_txt} · **Today:** {bnb['day']}"]
+        events = []
         for when, kind, target_id, victim, target_type in bnb.get("recent") or []:
             ts = int(calendar.timegm(when.timetuple()))
             if victim:
@@ -1584,9 +1591,17 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                 who = " → unknown player"
             else:   # no player UCID on the victim: an AI unit
                 who = f" → AI unit ({target_type})" if target_type else " → AI unit"
-            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(kind, kind)}{who}")
+            events.append(f"· <t:{ts}:d> {BNB_LABELS.get(kind, kind)}{who}")
+        # Fit Discord's 1024-character field value: drop the oldest lines first,
+        # keeping room for the note that says the list is partial.
+        def _render(n: int) -> str:
+            note = [f"_Showing the latest {n} of {bnb['total']} incidents._"] if n < bnb["total"] else []
+            return "\n".join(head + events[:n] + note)
+        shown = len(events)
+        while shown > 0 and len(_render(shown)) > 1024:
+            shown -= 1
         embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
-        embed.add_field(name="⚠️ __Blue-on-Blue (BoB)__", value="\n".join(lines)[:1024], inline=False)
+        embed.add_field(name="⚠️ __Blue-on-Blue (BoB)__", value=_render(shown)[:1024], inline=False)
 
     # ── Penalties in force (Punishment plugin, after decay) ─────────────
     if penalties and penalties.get("total", 0) >= 1:
@@ -2410,6 +2425,7 @@ def _reset_hour_today(cfg: dict) -> int:
 # group is dropped when a kill of that victim type landed in that minute,
 # so a kill is never counted twice. BoB = destroyed (kills) + damaged (hits).
 BNB_LABELS = {"kill": "Team kill", "hit": "Friendly fire"}
+BNB_RECENT = 10   # latest incidents listed in /fh_report player (the embed says when partial)
 PU_LABELS = {
     "kill":           "Team kill",
     "collision_kill": "Collision kill",
@@ -2998,7 +3014,7 @@ class Fh_Report(Plugin):
                 async with conn.cursor() as cur:
                     session = await self._session_start(cur, server.name, saves_dir)
                     params = {"ucids": [ucid], "server": server.name, "day": day_from,
-                              "session": session or datetime.max}
+                              "session": session or datetime.max, "limit": BNB_RECENT}
                     try:
                         await cur.execute(_BNB_INCIDENTS_SQL + """
                             SELECT kind, COUNT(*),
@@ -3011,7 +3027,7 @@ class Fh_Report(Plugin):
                             await cur.execute(_BNB_INCIDENTS_SQL + """
                                 SELECT i.time, i.kind, i.target_id, t.name, i.target_type
                                 FROM incidents i LEFT JOIN players t ON t.ucid = i.target_id
-                                ORDER BY i.time DESC LIMIT 5
+                                ORDER BY i.time DESC LIMIT %(limit)s
                             """, params)
                             bnb = {
                                 "total":     sum(v[0] for v in by_kind.values()),
@@ -3020,6 +3036,7 @@ class Fh_Report(Plugin):
                                 "destroyed": by_kind.get("kill", (0, 0, 0))[0],
                                 "damaged":   by_kind.get("hit", (0, 0, 0))[0],
                                 "recent":    [tuple(r) for r in await cur.fetchall()],
+                                "session_start": session,
                             }
                     except Exception as e:
                         self.log.debug(f"Fh_Report: BoB detail not available: {e}")
@@ -3169,6 +3186,9 @@ class Fh_Report(Plugin):
 
         bnb = {}
         if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
+            if not needs_daily:   # the daily pass is what refreshes the session-restart marker
+                self._session_starts[saves_dir] = _unpack_daily_snapshot(
+                    await self._load_daily_snapshot(saves_dir, node)).get("session_start", "")
             bnb = await self._fetch_bnb(
                 server, cfg, saves_dir, [d["ucid"] for d in players.values() if d.get("ucid")])
 

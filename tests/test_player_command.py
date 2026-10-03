@@ -89,8 +89,10 @@ def test_admin_lookup_by_ucid(saves_dir):
     assert pool.connections == 2 and sent[0].title == "👤 Player — Zarpa"
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
-    assert "**Today:** 3 · **Session:** 1" in bnb
-    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire → AI unit (T-72B)") and "pts" not in bnb
+    assert "**Session:** 1 (since <t:" in bnb and "**Today:** 3" in bnb
+    assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
+    assert "_Showing the latest 2 of 5 incidents._" in bnb
+    assert "Team kill → `Viper`" in bnb and "Friendly fire → AI unit (T-72B)" in bnb and "pts" not in bnb
     assert not any("Penalties" in f.name for f in sent[0].fields)   # show_punishment is off
 
 
@@ -158,3 +160,27 @@ def test_penalties_in_force_follow_show_punishment(saves_dir):
     assert "JAG's investigation (15 p.p.) 🔨🔨" in pen          # 10.8 + 4.8 = 15.6 p.p.
     assert "Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)" in pen
     assert "decay" in pen
+
+
+def test_bnb_list_is_trimmed_to_the_field_limit_and_says_so():
+    from datetime import datetime
+    when = datetime(2026, 10, 3, 12, 0)
+    recent = [(when, "hit", None, None, "X" * 60)] * 10
+    bnb = {"total": 25, "day": 3, "session": 2, "destroyed": 5, "damaged": 20,
+           "session_start": when, "recent": recent}
+    e = commands._build_player_report_embed("P", {}, None, None, 0, 0, {}, "ok", bnb=bnb)
+    value = next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
+    assert len(value) <= 1024
+    shown = value.count("Friendly fire")
+    assert 0 < shown < 10 and f"_Showing the latest {shown} of 25 incidents._" in value
+    bnb["recent"], bnb["total"] = recent[:3], 3
+    value = next(f.value for f in commands._build_player_report_embed(
+        "P", {}, None, None, 0, 0, {}, "ok", bnb=bnb).fields if "Blue-on-Blue" in f.name)
+    assert "Showing" not in value and value.count("Friendly fire") == 3
+
+
+def test_bnb_session_unknown_without_a_start():
+    from datetime import datetime
+    bnb = {"total": 1, "day": 1, "session": 0, "destroyed": 1, "damaged": 0, "session_start": None, "recent": []}
+    e = commands._build_player_report_embed("P", {}, None, None, 0, 0, {}, "ok", bnb=bnb)
+    assert "**Session:** unknown" in next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
