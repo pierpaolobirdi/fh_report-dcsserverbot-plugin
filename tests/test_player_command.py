@@ -191,3 +191,33 @@ def test_bnb_session_unknown_without_a_start():
 def test_session_unknown_without_state_file(saves_dir):
     _, sent = _invoke(saves_dir, A, admin=True, session_kind=None)
     assert "**Session:** n/a" in next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
+
+
+def _stats_table(bnb, session=None, daily=None):
+    e = commands._build_player_report_embed(
+        "P", {}, None, None, 100, 20, session if session is not None else {"Air": 3, "SAM": 1, "Deaths": 2},
+        "ok", daily_stats=daily if daily is not None else {"Air": 1}, bnb=bnb)
+    return next(f.value for f in e.fields if "Session Stats" in f.name or f.value.startswith("```"))
+
+
+def test_bob_is_a_row_of_the_session_and_daily_stats_table():
+    bnb = {"total": 9, "day": 1, "session": 4, "destroyed": 3, "damaged": 6, "recent": []}
+    rows = [l.split() for l in _stats_table(bnb).splitlines()[3:-1]]
+    names = [r[0] for r in rows]
+    assert names == ["Air", "SAM", "BoB", "Deaths"]                  # penultimate, before Deaths
+    assert rows[2] == ["BoB", "4", "1"]                              # session 4, daily 1
+    assert rows[1] == ["SAM", "1", "-"]                              # the other categories are untouched
+
+
+def test_bob_row_is_left_out_when_zero_or_unknown():
+    assert "BoB" not in _stats_table({"total": 5, "day": 0, "session": 0, "destroyed": 5, "damaged": 0, "recent": []})
+    assert "BoB" not in _stats_table(None)
+    assert "BoB" not in _stats_table({"total": 5, "day": 0, "session": 5, "session_known": False,
+                                     "destroyed": 5, "damaged": 0, "recent": []})
+    only_day = _stats_table({"total": 5, "day": 2, "session": 0, "destroyed": 5, "damaged": 0, "recent": []})
+    assert [l.split() for l in only_day.splitlines() if l.startswith("BoB")] == [["BoB", "-", "2"]]
+
+
+def test_bob_is_not_mistaken_for_a_mission_objective():
+    assert not commands._is_mission_stat("BoB")
+    assert commands._build_session_card({"Air": 1, "BoB": 3}).count("Msn") == 0

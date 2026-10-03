@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.30"
+FH_REPORT_RELEASE = "14.1.31"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1397,7 +1397,7 @@ _NON_MISSION_STATS = frozenset({
     "Air", "Helo", "Ground Units", "Ship", "SAM", "Structure", "Infantry",
     "Demolition kill", "Deaths", "Captured by enemy", "Zone capture",
     "Zone upgrade", "Zone supply delivery", "Pilot Rescue", "Refueling",
-    "Points", "Points spent", "Flight time", "Achievement",
+    "Points", "Points spent", "Flight time", "Achievement", "BoB",
 })
 
 
@@ -1505,10 +1505,12 @@ def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
     full-detail stats sections: Missions (every mission objective, incl.
     map-specific ones — see _is_mission_stat), Achievement, Air, Helo, SAM,
     Infantry, Ground Units, Structure, Ship, Pilot Rescue, Refueling, any
-    other known keys (alphabetical), then Deaths always last."""
+    other known keys (alphabetical), BoB, then Deaths always last."""
     def rank(key: str) -> tuple[int, str]:
         if key == "Deaths":
             return (99, key)
+        if key == "BoB":
+            return (98, "\uffff")   # penultimate: after every other category, right before Deaths
         if key in _STAT_KEY_ORDER:
             return (_STAT_KEY_ORDER.index(key) + 1, key)
         if _is_mission_stat(key):
@@ -1608,6 +1610,13 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
 
     # ── Session + Daily stats in one aligned table (Points shown in the title) ─
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+    # BoB (blue-on-blue, from DCSSB) is one more row of the table, with its session
+    # and daily counts like any other category; absent when zero.
+    session_stats = dict(session_stats or {})
+    if bnb and bnb.get("session_known", True) and bnb.get("session"):
+        session_stats["BoB"] = bnb["session"]
+    if bnb and daily_stats is not None and bnb.get("day"):
+        daily_stats = {**daily_stats, "BoB": bnb["day"]}
     other_stats = {k: v for k, v in session_stats.items() if k != "Points"} if session_stats else {}
     daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v} if daily_stats else {}
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]

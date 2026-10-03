@@ -279,6 +279,7 @@ Stats shown:
 The start is dated at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed when there is none or the gap is over an hour. A campaign already running when Fh_Report first looks at it counts from that moment. The state, with a small baseline of pilots so a bot restart does not lose track, is kept in `.fhc/fhr_session.json`.
 
 `/fh_report player` adds, before Career Stats:
+- the **Session Stats / Daily** table gets a `BoB` row (session and daily counts side by side, second-to-last, before Deaths; left out when both are zero);
 - **Blue-on-Blue (BoB)**: total (destroyed / damaged), today and session counts, and the latest incidents with date and victim (the player's name, or `AI unit (type)`).
 - **Penalties in force** (only with `show_punishment: true`, from the **Punishment** plugin): the level, name and hammers the player currently holds, as in the main embed, plus what sustains it by event (`Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)`). These are the points left **after Punishment's decay**: they drop level by level and the section disappears once they reach zero, while the BoB history stays. Punishment counts everything it sanctions (not only BoB) and cannot be tied to one specific BoB incident.
 
