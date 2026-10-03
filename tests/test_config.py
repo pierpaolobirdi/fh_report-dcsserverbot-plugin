@@ -97,3 +97,51 @@ def test_server_block_override_is_not_flagged_obsolete(tmp_path):
 ])
 def test_updates_enabled(cfg, expected):
     assert commands._updates_enabled(cfg) is expected
+
+
+# ── daily reset times are HH:MM ────────────────────────────────────────────────
+
+_OLD_TIMES = """DEFAULT:
+  admin: Admin  # x
+  daily_reset_hour: 4  # old: a plain hour
+  daily_reset_schedule:
+    sat: 7
+    sun: 7  # weekend
+  show_map: true  # x
+
+"Public":
+  channel_id: 1
+  campaign_name: "C"
+  daily_reset_hour: 6
+  daily_reset_schedule:
+    mon: 5
+    fri: "22"
+"""
+
+
+def test_migration_turns_whole_hours_into_hh_mm_and_nothing_else(tmp_path):
+    migrated, out = _migrate(tmp_path, _OLD_TIMES)
+    assert re.search(r"^  daily_reset_hour: 4:00  #", migrated, re.M)
+    assert "    sat: 7:00" in migrated and re.search(r"^    sun: 7:00  # weekend$", migrated, re.M)
+    server = migrated.split('"Public":')[1]
+    assert "  daily_reset_hour: 6:00" in server and "    mon: 5:00" in server and "    fri: 22:00" in server
+    assert "4 → 4:00" in out
+    again, _ = _migrate(tmp_path, migrated)
+    assert again == migrated                                          # a second run changes nothing
+
+
+def test_migration_leaves_hh_mm_values_alone(tmp_path):
+    text = _OLD_TIMES.replace("daily_reset_hour: 4 ", "daily_reset_hour: 8:30 ").replace("sat: 7\n", "sat: 07:15\n")
+    migrated, _ = _migrate(tmp_path, text)
+    assert re.search(r"^  daily_reset_hour: 8:30  #", migrated, re.M) and "    sat: 07:15" in migrated
+
+
+def test_migration_adds_a_missing_reset_time_as_0_00(tmp_path):
+    text = _OLD_TIMES.replace("  daily_reset_hour: 4  # old: a plain hour\n", "")
+    migrated, _ = _migrate(tmp_path, text)
+    assert re.search(r"^  daily_reset_hour: 0:00  # ", migrated, re.M)
+
+
+def test_the_commented_examples_in_the_template_use_the_new_format():
+    text = open(YAML, encoding="utf-8").read()
+    assert not re.search(r"^#?\s*(sat|sun|thu): \d{1,2}\s*$", text, re.M)

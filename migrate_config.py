@@ -119,12 +119,16 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   daily_reset_hour     - Hour when the daily points counter resets  (default: 0)
-#                          The hour is in the time zone of this server's `timezone` in
+#   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
+#                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
+#                          number (4) still works and means 4:00. The counters are
+#                          checked every update_interval, so the change shows in the
+#                          first update after that time.
+#                          The time is in the time zone of this server's `timezone` in
 #                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
 #                          for example `timezone: Europe/Madrid` on the instance; it follows
 #                          summer/winter time by itself). Without one, or without the
-#                          Scheduler plugin, the hour is UTC. There is no separate setting
+#                          Scheduler plugin, the time is UTC. There is no separate setting
 #                          here: change the Scheduler's timezone and the reset moves with it
 #                          (one daily period is then longer or shorter than 24 hours, once).
 #                          Manual reset (no commands in this plugin): delete
@@ -135,14 +139,14 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                          Campaign restart is also detected automatically: if both
 #                          total points and total kills drop for common players,
 #                          the daily snapshot resets on its own — no action needed.
-#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
-#                          Only define the days that differ from daily_reset_hour.
+#   daily_reset_schedule - Optional: override the reset time for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour (same HH:MM format).
 #                          Days: mon, tue, wed, thu, fri, sat, sun
 #                          The days are the days in that same time zone.
-#                          Example: reset at midnight except Thursday and Saturday at 6am:
+#                          Example: reset at midnight except Thursday at 6:00 and Saturday at 7:30:
 #                            daily_reset_schedule:
-#                              thu: 6
-#                              sat: 6
+#                              thu: 6:00
+#                              sat: 7:30
 #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
 #                      The map is read from DCSServerBot (never configured here) and the
 #                      last known one is kept while the bot runs; if none is known yet it
@@ -367,7 +371,7 @@ DEFAULTS = {
     "admin":            "Admin",
     "report_layout":    "R",
     "update_interval":  300,
-    "daily_reset_hour": 0,
+    "daily_reset_hour": "0:00",
     "show_map":         True,
     "bar_length":       40,
     "bar_style_emoji":  False,
@@ -398,7 +402,7 @@ COMMENTS = {
     "report_layout":    "# Letters D/P/S/R, any order/subset — see header",
 
     "update_interval":  "# Seconds between embed refreshes",
-    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
+    "daily_reset_hour": "# HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)",
     "show_map":         "# false = hide  |  true = show the map on the title's second line",
     "bar_length":       "# Number of squares in the progress bar",
     "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
@@ -633,6 +637,31 @@ def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
     return content, changes
 
 
+_DAYS = "mon|tue|wed|thu|fri|sat|sun"
+
+
+def migrate_reset_times(content: str) -> tuple[str, list[str]]:
+    """daily_reset_hour and the days of daily_reset_schedule used to be a plain
+    hour (4); they are now HH:MM (4:00). A plain whole number becomes H:00 and
+    nothing else changes: values that already have a ':' are left alone, so
+    running this again does nothing. Also refreshes the commented-out examples."""
+    changes: list[str] = []
+
+    def fix(key_pattern: str):
+        nonlocal content
+
+        def _replacer(m):
+            changes.append(f"{m.group(2).strip()}: {m.group(3)} → {m.group(3)}:00")
+            return f"{m.group(1)}{m.group(3)}:00{m.group(4)}"
+        content = re.sub(
+            rf"^((?:[ \t]*#)?[ \t]*({key_pattern})[ \t]*:[ \t]*)[\"']?(\d{{1,2}})[\"']?([ \t]*(?:#.*)?)$",
+            _replacer, content, flags=re.MULTILINE)
+
+    fix("daily_reset_hour")
+    fix(_DAYS)
+    return content, changes
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: migrate_config.py <path_to_fh_report.yaml>")
@@ -690,6 +719,13 @@ def main():
     if podium_rename_changes:
         print("  Renamed:")
         for item in podium_rename_changes:
+            print(f"    {item}")
+
+    # ── 1e. Reset times: a plain hour (4) becomes HH:MM (4:00) — format only.
+    content, time_changes = migrate_reset_times(content)
+    if time_changes:
+        print("  Daily reset times are now HH:MM:")
+        for item in time_changes:
             print(f"    {item}")
 
     # ── 1d. Remove keys of features retired from Fh_Report ──────────────────

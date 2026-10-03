@@ -163,3 +163,75 @@ def test_the_daily_counters_roll_over_at_local_midnight_not_utc_midnight(tmp_pat
     (tmp_path / ".fhc" / "fhr_daily_snapshot.json").unlink()
     mad_before, mad_after = asyncio.run(run(MADRID))
     assert mad_before[ids[0]] > 0 and mad_after.get(ids[0], 0) == 0   # Madrid: a new day started, the counter restarted
+
+
+# ── reset times are HH:MM ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("value, expected", [
+    ("8:30", (8, 30)), ("08:30", (8, 30)), ("15:30", (15, 30)), (" 6:05 ", (6, 5)), ("0:00", (0, 0)),
+    (4, (4, 0)), ("4", (4, 0)), (0, (0, 0)), (23, (23, 0)), ("23:59", (23, 59)),
+    (510, (8, 30)), (930, (15, 30)),             # an unquoted 8:30 / 15:30 read by a YAML 1.1 reader
+    (None, (0, 0)), ("", (0, 0)),
+])
+def test_hh_mm_values(value, expected):
+    assert commands._parse_hhmm(value) == expected
+
+
+@pytest.mark.parametrize("bad", ["24:00", "8:60", "ocho", "8:5", "-1", 24, 59, 1440, True, 8.5, "8:30:00"])
+def test_invalid_times_fall_back_to_the_default(bad):
+    assert commands._parse_hhmm(bad) == (0, 0)
+    assert commands._parse_hhmm(bad, (6, 0)) == (6, 0)
+
+
+def test_today_reset_time_with_minutes_and_a_per_day_override():
+    cfg = {"daily_reset_hour": "8:30", "daily_reset_schedule": {"sat": "7:15", "sun": 9}}
+    tz = commands._tz_from_name("Europe/Madrid")
+
+    def at(day):
+        class _FakeNow(real_datetime):
+            @classmethod
+            def now(cls, tz_=None):
+                return real_datetime(2026, 10, day, 12, 0, tzinfo=timezone.utc)
+        return _FakeNow
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    try:
+        mp.setattr(commands, "datetime", at(3))      # Saturday
+        assert commands._reset_time_today(cfg, tz) == (7, 15)
+        mp.setattr(commands, "datetime", at(4))      # Sunday
+        assert commands._reset_time_today(cfg, tz) == (9, 0)
+        mp.setattr(commands, "datetime", at(5))      # Monday: the default
+        assert commands._reset_time_today(cfg, tz) == (8, 30)
+    finally:
+        mp.undo()
+
+
+def test_day_start_honours_the_minutes():
+    cfg = {"daily_reset_hour": "8:30"}
+    before = real_datetime(2026, 10, 3, 8, 29, tzinfo=timezone.utc)
+    after = real_datetime(2026, 10, 3, 8, 31, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, before) == real_datetime(2026, 10, 2, 8, 30, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, after) == real_datetime(2026, 10, 3, 8, 30, tzinfo=timezone.utc)
+
+
+def test_the_daily_counters_roll_over_at_08_30_not_at_08_00(tmp_path, fake_clock):
+    saves = str(tmp_path)
+    (tmp_path / ".fhc").mkdir()
+    plugin = make_plugin()
+    ids = UCID[:2]
+
+    async def step(minute, tag):
+        fake_clock.now = real_datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc) + timedelta(minutes=minute)
+        snap = await plugin._load_daily_snapshot(saves, FileNode())
+        pts = {u: 100 + minute for u in ids}
+        return (await plugin._compute_daily_points(saves, pts, {}, (8, 30), FileNode(), "f.lua", {}, {}, set(pts), snap))[0]
+
+    async def run():
+        await step(0, "06:00")                # first look: day starts here
+        await step(1440 + 0, "next day 06:00")    # the next day, before the reset time
+        at_0815 = await step(1440 + 135, "08:15")
+        at_0845 = await step(1440 + 165, "08:45")
+        return at_0815, at_0845
+    at_0815, at_0845 = asyncio.run(run())
+    assert at_0815[ids[0]] > 0                # 08:15, before 08:30: still the old period, accumulating
+    assert at_0845.get(ids[0], 0) == 0        # 08:45, after 08:30: a new period started

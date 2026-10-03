@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.34"
+FH_REPORT_RELEASE = "14.1.35"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2493,14 +2493,50 @@ def _tz_from_name(name) -> tzinfo:
         return timezone.utc
 
 
-def _reset_hour_today(cfg: dict, tz: tzinfo = timezone.utc) -> int:
-    """daily_reset_hour, overridden by today's entry in daily_reset_schedule
-    (the weekday is the one in the reset time zone `tz`)."""
+_HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
+_hhmm_warned: set[str] = set()
+
+
+def _parse_hhmm(value, default: tuple[int, int] = (0, 0)) -> tuple[int, int]:
+    """(hour, minute) from a daily reset setting. Accepts "8:30", "08:30",
+    "15:30"; a plain number is an hour (4 or "4" = 4:00, the pre-HH:MM
+    format). An integer of 60 or more is how a YAML 1.1 reader (PyYAML) turns an
+    unquoted H:MM into minutes of the day (8:30 -> 510), so it is read back as
+    that; DCSServerBot's own reader (ruamel) keeps it as text. Anything else
+    falls back to `default` with one warning."""
+    parsed = None
+    if isinstance(value, bool) or value is None or value == "":
+        parsed = None if isinstance(value, bool) else default
+    elif isinstance(value, int):
+        if 0 <= value <= 23:
+            parsed = (value, 0)
+        elif 60 <= value <= 1439:
+            parsed = divmod(value, 60)
+    elif isinstance(value, str):
+        text = value.strip()
+        m = _HHMM.match(text)
+        if m:
+            parsed = (int(m.group(1)), int(m.group(2)))
+        elif text.isdigit():
+            parsed = (int(text), 0)
+    if parsed is None or not (0 <= parsed[0] <= 23 and 0 <= parsed[1] <= 59):
+        key = repr(value)
+        if key not in _hhmm_warned:
+            _hhmm_warned.add(key)
+            log.warning(f"Fh_Report: daily reset time {value!r} is not a valid HH:MM (00:00 to 23:59, "
+                        f"for example 8:30) — using {default[0]}:{default[1]:02d}.")
+        return default
+    return parsed
+
+
+def _reset_time_today(cfg: dict, tz: tzinfo = timezone.utc) -> tuple[int, int]:
+    """(hour, minute) of today's daily reset: daily_reset_hour, overridden by
+    today's entry in daily_reset_schedule (today is the weekday in the reset
+    time zone `tz`)."""
+    base = _parse_hhmm(cfg.get("daily_reset_hour"))
     schedule = cfg.get("daily_reset_schedule") or {}
     today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).astimezone(tz).weekday()]
-    if today in schedule:
-        return int(schedule[today])
-    return int(cfg.get("daily_reset_hour") or 0)
+    return _parse_hhmm(schedule[today], base) if today in schedule else base
 
 
 # Blue-on-blue (BoB) = friendly fire as DCS reported it (DCSSB Mission
@@ -2550,12 +2586,13 @@ def _day_start(cfg: dict, now: datetime | None = None, tz: tzinfo = timezone.utc
     daily_reset_schedule hour), the hours being in the reset time zone `tz`."""
     now = (now or datetime.now(timezone.utc)).astimezone(tz)
     schedule = cfg.get("daily_reset_schedule") or {}
-    default  = int(cfg.get("daily_reset_hour") or 0)
+    default  = _parse_hhmm(cfg.get("daily_reset_hour"))
     names    = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
     def at(day: datetime) -> datetime:
-        hour = int(schedule[names[day.weekday()]]) if names[day.weekday()] in schedule else default
-        return day.replace(hour=hour, minute=0, second=0, microsecond=0)
+        name = names[day.weekday()]
+        hour, minute = _parse_hhmm(schedule[name], default) if name in schedule else default
+        return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     start = at(now)
     return (start if now >= start else at(now - timedelta(days=1))).astimezone(timezone.utc)
@@ -2816,7 +2853,7 @@ class Fh_Report(Plugin):
         return campaign_by_id, session_by_id, names_by_id, name_to_ucid
 
     async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
-                              session_stats_raw: dict, reset_hour: int, node,
+                              session_stats_raw: dict, reset_hour: int | tuple, node,
                               persistence_filename: str | None = None,
                               name_to_ucid: dict | None = None,
                               names_by_id: dict | None = None,
@@ -2826,7 +2863,7 @@ class Fh_Report(Plugin):
                               snap_unpacked: dict | None = None,
                               tz: tzinfo = timezone.utc) -> tuple[dict, dict, bool]:
         """Today's points and stat deltas per player ID, against the baseline
-        snapshot taken at reset_hour in time zone `tz` (the server's Scheduler
+        snapshot taken at reset_hour (an hour, or an (hour, minute) pair) in time zone `tz` (the server's Scheduler
         timezone, UTC without one). Returns (daily_pts, daily_stats,
         campaign_restarted).
 
@@ -2898,7 +2935,8 @@ class Fh_Report(Plugin):
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
         # ── Real calendar-day reset (the only thing that closes a day) ─────
-        reset_time     = now_local.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+        reset_h, reset_m = reset_hour if isinstance(reset_hour, tuple) else (int(reset_hour), 0)
+        reset_time     = now_local.replace(hour=reset_h, minute=reset_m, second=0, microsecond=0)
         first_run      = not snap_date
         date_reset_due = (not first_run) and snap_date != today_str and now_local >= reset_time
 
@@ -2911,7 +2949,7 @@ class Fh_Report(Plugin):
 
         elif date_reset_due:
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
-            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 {tz}{reason}")
+            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_h:02d}:{reset_m:02d} {tz}{reason}")
 
             # Close the day for the Podium from the current snapshot/carry_over (which
             # already include earlier mid-day swaps); last_daily_saved covers a swap
@@ -3323,7 +3361,7 @@ class Fh_Report(Plugin):
         live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
             tz = self._reset_tz(server)
-            reset_hour = _reset_hour_today(cfg, tz)
+            reset_hour = _reset_time_today(cfg, tz)
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
@@ -3792,7 +3830,7 @@ class Fh_Report(Plugin):
 
         # Daily points — reuse the same snapshot-based computation as the embed
         tz = self._reset_tz(srv)
-        reset_hour = _reset_hour_today(cfg, tz)
+        reset_hour = _reset_time_today(cfg, tz)
         daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,

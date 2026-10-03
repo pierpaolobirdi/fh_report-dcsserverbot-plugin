@@ -107,12 +107,16 @@
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   daily_reset_hour     - Hour when the daily points counter resets  (default: 0)
-#                          The hour is in the time zone of this server's `timezone` in
+#   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
+#                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
+#                          number (4) still works and means 4:00. The counters are
+#                          checked every update_interval, so the change shows in the
+#                          first update after that time.
+#                          The time is in the time zone of this server's `timezone` in
 #                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
 #                          for example `timezone: Europe/Madrid` on the instance; it follows
 #                          summer/winter time by itself). Without one, or without the
-#                          Scheduler plugin, the hour is UTC. There is no separate setting
+#                          Scheduler plugin, the time is UTC. There is no separate setting
 #                          here: change the Scheduler's timezone and the reset moves with it
 #                          (one daily period is then longer or shorter than 24 hours, once).
 #                          Manual reset (no commands in this plugin): delete
@@ -123,14 +127,14 @@
 #                          Campaign restart is also detected automatically: if both
 #                          total points and total kills drop for common players,
 #                          the daily snapshot resets on its own — no action needed.
-#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
-#                          Only define the days that differ from daily_reset_hour.
+#   daily_reset_schedule - Optional: override the reset time for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour (same HH:MM format).
 #                          Days: mon, tue, wed, thu, fri, sat, sun
 #                          The days are the days in that same time zone.
-#                          Example: reset at midnight except Thursday and Saturday at 6am:
+#                          Example: reset at midnight except Thursday at 6:00 and Saturday at 7:30:
 #                            daily_reset_schedule:
-#                              thu: 6
-#                              sat: 6
+#                              thu: 6:00
+#                              sat: 7:30
 #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
 #                      The map is read from DCSServerBot (never configured here) and the
 #                      last known one is kept while the bot runs; if none is known yet it
@@ -307,10 +311,10 @@ DEFAULT:
   admin: Admin  # Comma-separated Discord role name(s) and/or username(s)
   report_layout: R  # Letters D/P/S/R, any order/subset — see header
   update_interval: 300  # Seconds between embed refreshes
-  daily_reset_hour: 0  # Hour (UTC) when daily points reset (0 = midnight UTC)
+  daily_reset_hour: 0:00  # HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
   show_map: true  # false = hide  |  true = show the map on the title's second line
   bar_length: 40  # Number of squares in the progress bar
   bar_style_emoji: false  # false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)
@@ -350,10 +354,10 @@ DCS_Server:                             # instance name from nodes.yaml
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300
-#  daily_reset_hour: 0
+#  daily_reset_hour: 0:00
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
 #  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15
@@ -396,10 +400,10 @@ DCS_Server:                             # instance name from nodes.yaml
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300
-#  daily_reset_hour: 0
+#  daily_reset_hour: 0:00
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
 #  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15

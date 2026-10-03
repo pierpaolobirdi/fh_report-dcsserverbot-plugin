@@ -61,8 +61,8 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
 | `update_interval` | `300` | Seconds between embed refreshes |
-| `daily_reset_hour` | `0` | Hour when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time zone](#daily-reset-time-zone) |
-| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
+| `daily_reset_hour` | `0:00` | Time (`HH:MM`, 24 h, e.g. `8:30`) when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time](#daily-reset-time) |
+| `daily_reset_schedule` | — | Per-day reset time override (`HH:MM`, e.g. a different time on weekends) |
 | `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
 | `bar_length` | `40` | Number of squares in the progress bar |
 | `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
@@ -429,7 +429,21 @@ The plugin never creates **duplicate messages**: before posting, it checks the c
 
 ---
 
-## Daily reset time zone
+## Daily reset time
+
+The reset time is written as `HH:MM` on a 24-hour clock, with minutes if you want them, and each weekday can have its own:
+
+```yaml
+DEFAULT:
+  daily_reset_hour: 8:30          # 08:30 (08:30 and 15:30 are valid too)
+  daily_reset_schedule:
+    sat: 7:00
+    sun: 15:30
+```
+
+A plain number is still read as an hour (`4` means `4:00`), so a configuration written for the older versions keeps working; the installer rewrites those to `4:00` and touches nothing else. An invalid value (`24:00`, `8:60`, `ocho`) falls back to `0:00` and logs a warning once. The counters are checked every `update_interval`, so a reset shows in the first update after its time.
+
+### Time zone
 
 `daily_reset_hour` and `daily_reset_schedule` are written in the time zone DCSServerBot already knows for the server: the `timezone` of that instance in the **Scheduler** plugin (`config/plugins/scheduler.yaml`). Fh_Report has no time zone setting of its own.
 
