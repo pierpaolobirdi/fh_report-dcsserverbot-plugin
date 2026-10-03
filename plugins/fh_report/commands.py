@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.29"
+FH_REPORT_RELEASE = "14.1.30"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -578,24 +578,25 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
 
 # ── Campaign session start ────────────────────────────────────────────────────
 # "Session" is the life of the Foothold campaign (the Session Leaderboard). It
-# starts when the campaign is reset, which Foothold does by emptying the SAME
-# save file (so the file's creation date means nothing) and restarting the
-# mission, or when an admin deletes the tracking files. No start date is stored
-# anywhere, so the start is the moment a reset is noticed, narrowed to the
-# mission (re)start DCSServerBot recorded in the window since the campaign was
-# last seen intact (Foothold restarts the mission a few seconds after a reset).
-#   detected    a reset was noticed (save reappeared, new file name, reset in place)
-#   first_seen  a campaign already running when Fh_Report first looked at it
-# State lives in .fhc/fhr_session.json, written by the updater only.
+# starts when the campaign is reset: Foothold empties the SAME save file and
+# restarts the mission (so the file's creation date means nothing), or an admin
+# deletes the tracking files, or the map changes (another save file). Nothing
+# stores the start, so a reset is noticed and dated here. It is only used to
+# count things since then (BoB), never shown.
+#   - save file name changed / save reappeared after "campaign not started":
+#     a new session at once.
+#   - save reset in place (every known player gone, or points and kills both
+#     dropped): confirmed on a second look one cycle later, so a read caught
+#     while Foothold is rewriting the file can't restart the session.
+#   - the start is dated at the mission start DCSServerBot recorded since the
+#     campaign was last seen intact (Foothold reloads the mission right after a
+#     reset), or the moment it was noticed.
+# State (start, last seen intact, a small baseline of players) lives in
+# .fhc/fhr_session.json, written by the updater only.
 
 _SESSION_ISO = "%Y-%m-%dT%H:%M:%S"
 _SESSION_WINDOW = timedelta(hours=1)    # widest "last seen intact -> noticed" gap still narrowed
-_SESSION_SEEN_EVERY = timedelta(minutes=15)   # how often "last seen intact" is written to disk
-
-
-def _new_session(basename: str, now: datetime, kind: str, start: datetime | None = None) -> dict:
-    return {"file": basename, "start": (start or now).strftime(_SESSION_ISO), "kind": kind,
-            "seen": now.strftime(_SESSION_ISO)}
+_SESSION_SEEN_EVERY = timedelta(minutes=15)   # how often the baseline is written to disk
 
 
 def _session_migrate(old: dict) -> dict:
@@ -607,10 +608,21 @@ def _session_migrate(old: dict) -> dict:
     return {"file": old.get("file", ""), "start": start, "kind": kind, "seen": start} if start else {}
 
 
-def _session_is_reset(old: dict, basename: str, reset: bool) -> bool:
-    """A new campaign session begins when there is a previous one and its save
-    file changed name, reappeared after the "not started" screen, or was reset in place."""
-    return bool(old) and (old.get("file") != basename or reset)
+def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
+    """Has the campaign been reset in place between two readings? `prev` and
+    `cur` are {"points": {id: points}, "kills": {id: Air+Ground kills}}.
+    True when nobody known is left, or points AND kills both fell for the
+    players present in both (the rule the daily counter uses too)."""
+    if not prev or not prev.get("points"):
+        return False
+    common = set(prev["points"]) & set(cur["points"])
+    if not common:
+        return sum(prev["points"].values()) > 0
+    prev_pts = sum(prev["points"][i] for i in common)
+    cur_pts = sum(cur["points"][i] for i in common)
+    prev_kills = sum(prev["kills"].get(i, 0) for i in common)
+    cur_kills = sum(cur["kills"].get(i, 0) for i in common)
+    return prev_pts > 0 and cur_pts < prev_pts * 0.5 and prev_kills > 0 and cur_kills < prev_kills
 
 
 _unsupported_version_warned: set[str] = set()
@@ -1611,16 +1623,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
 
     # ── Blue-on-blue (from DCSServerBot's Mission Statistics) ───────────
     if bnb and bnb.get("total"):
-        sess_start = bnb.get("session_start")
-        if sess_start:
-            stamp = f"<t:{int(calendar.timegm(sess_start.timetuple()))}:t>"
-            if bnb.get("session_kind") == "first_seen":   # campaign was already running: a lower bound
-                since = f" (counting from {stamp}, when first seen)"
-            else:
-                since = f" (since ~{stamp})"
-            session_txt = f"**Session:** {bnb['session']}{since}"
-        else:
-            session_txt = "**Session:** unknown"
+        session_txt = f"**Session:** {bnb['session']}" if bnb.get("session_known", True) else "**Session:** n/a"
         head = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
                 f"- {session_txt} · **Today:** {bnb['day']}"]
         events = []
@@ -2542,9 +2545,8 @@ class Fh_Report(Plugin):
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
         self._cycle_punishment: dict | None = None
-        self._campaign_reset: dict[str, bool] = {}   # saves_dir -> data reset in place seen by the daily pass
         self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
-        self._campaign_seen: dict[str, datetime] = {}   # saves_dir -> last cycle the campaign was read intact
+        self._campaign_watch: dict[str, dict] = {}   # saves_dir -> last intact reading, for _update_session
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -2849,11 +2851,6 @@ class Fh_Report(Plugin):
 
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
-        # Tell the session tracker (see _update_session) that the campaign data
-        # was reset in place: the Foothold save was recreated empty, or points and
-        # kills both dropped. A new save FILE name is detected there directly.
-        self._campaign_reset[saves_dir] = bool(campaign_restarted or data_vanished)
-
         # ── Real calendar-day reset (the only thing that closes a day) ─────
         reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
         first_run      = not snap_date
@@ -3018,30 +3015,51 @@ class Fh_Report(Plugin):
         return now
 
     async def _update_session(self, server, saves_dir: str, node, source_node,
-                              persistence_file: str, reset: bool = False) -> dict:
-        """Keep .fhc/fhr_session.json current and return {"start", "kind"}
-        (start = naive UTC datetime). See the module comment above."""
+                              persistence_file: str, points: dict, kills: dict) -> datetime:
+        """Notice campaign resets, keep .fhc/fhr_session.json current, and
+        return the session start (naive UTC). `points` / `kills` are the
+        campaign points and Air+Ground kills per player ID. See the comment above."""
         basename = os.path.basename(persistence_file)
         raw = await _read_fhr_json(node, saves_dir, "session.json")
         old = _session_migrate(raw)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cur = {"points": dict(points), "kills": dict(kills)}
         absent = saves_dir in self._campaign_absent
         self._campaign_absent.discard(saves_dir)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        seen = (self._campaign_seen.get(saves_dir) or _parse_utc(old.get("seen"))) if old else None
+
+        watch = self._campaign_watch.get(saves_dir)
+        if watch is None and old and old.get("file") == basename and old.get("base"):   # after a bot restart
+            watch = {**old["base"], "seen": _parse_utc(old.get("seen")), "pending": False}
+        seen = (watch or {}).get("seen") or _parse_utc((old or {}).get("seen"))
+
+        reset = False
         if not old:
-            st = _new_session(basename, now, "first_seen")
-        elif _session_is_reset(old, basename, reset or absent):
-            st = _new_session(basename, now, "detected", await self._reset_moment(server, seen, now))
+            st = {"file": basename, "start": now.strftime(_SESSION_ISO), "kind": "first_seen"}
+            watch = {**cur, "seen": now, "pending": False}
+        elif old.get("file") != basename or absent:       # other map, or the save reappeared
+            reset, watch = True, {**cur, "seen": now, "pending": False}
+        elif _campaign_looks_reset(watch, cur):
+            if watch.get("pending"):                      # second look agrees: it's a reset
+                reset, watch = True, {**cur, "seen": now, "pending": False}
+            else:                                         # keep the old baseline, look again next cycle
+                watch = {**watch, "pending": True}
         else:
-            st = dict(old)
-            if now - (_parse_utc(old.get("seen")) or now) >= _SESSION_SEEN_EVERY:
-                st["seen"] = now.strftime(_SESSION_ISO)
-        self._campaign_seen[saves_dir] = now
-        if st != raw:
+            watch = {**cur, "seen": now, "pending": False}
+        if reset:
+            st = {"file": basename, "kind": "detected",
+                  "start": (await self._reset_moment(server, seen, now)).strftime(_SESSION_ISO)}
+        elif old:
+            st = {k: old[k] for k in ("file", "start", "kind")}
+        self._campaign_watch[saves_dir] = watch
+
+        stale = not raw or now - (_parse_utc(raw.get("seen")) or now) >= _SESSION_SEEN_EVERY
+        if reset or not old or raw.get("start") != st["start"] or raw.get("file") != st["file"] or (stale and not watch["pending"]):
+            st.update(seen=(watch["seen"] or now).strftime(_SESSION_ISO),
+                      base={"points": watch["points"], "kills": watch["kills"]})
             await _ensure_fhc_dir(source_node, saves_dir)
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)
-        return {"start": _parse_utc(st["start"]), "kind": st["kind"]}
+        return _parse_utc(st["start"])
 
     async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
@@ -3067,20 +3085,19 @@ class Fh_Report(Plugin):
             self.log.debug(f"Fh_Report: BoB data not available: {e}")
             return {}
 
-    async def _fetch_bnb_detail(self, server, cfg: dict, session: tuple, ucid: str,
+    async def _fetch_bnb_detail(self, server, cfg: dict, session: datetime | None, ucid: str,
                                 with_penalties: bool = False) -> tuple[dict | None, dict | None]:
         """One player's detail for /fh_report player: (bnb, penalties).
         bnb: totals split into destroyed / damaged, today and this session on
         this server, plus the latest incidents. penalties (only when asked):
         what Punishment still holds against the player after decay, by event.
         Each is None when there is nothing or the plugin's table is missing.
-        `session` is (start, kind) from the session tracker (_session_state)."""
+        `session` is the campaign session start (naive UTC), or None when unknown."""
         day_from = _day_start(cfg).replace(tzinfo=None)
         bnb = penalties = None
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
-                    session, session_kind = session
                     params = {"ucids": [ucid], "server": server.name, "day": day_from,
                               "session": session or datetime.max, "limit": BNB_RECENT}
                     try:
@@ -3104,7 +3121,7 @@ class Fh_Report(Plugin):
                                 "destroyed": by_kind.get("kill", (0, 0, 0))[0],
                                 "damaged":   by_kind.get("hit", (0, 0, 0))[0],
                                 "recent":    [tuple(r) for r in await cur.fetchall()],
-                                "session_start": session, "session_kind": session_kind,
+                                "session_known": session is not None,
                             }
                     except Exception as e:
                         self.log.debug(f"Fh_Report: BoB detail not available: {e}")
@@ -3235,8 +3252,6 @@ class Fh_Report(Plugin):
         # Waypoint sorting also needs it: its campaign-restart detection triggers
         # the waypoint cache refresh.
         needs_daily = needs_daily or _bool_cfg(cfg.get("sort_zones_by_waypoint"))
-        # The session BoB count needs the in-place campaign reset detection too.
-        needs_daily = needs_daily or _bool_cfg(cfg.get("show_session_card"))
         daily_pts: dict = {}
         daily_stats: dict = {}
         campaign_restarted_now = False
@@ -3256,12 +3271,12 @@ class Fh_Report(Plugin):
 
         # Campaign session start (always kept up to date: /fh_report player reads it too)
         session = await self._update_session(
-            server, saves_dir, node, source_node, persistence_file,
-            reset=self._campaign_reset.pop(saves_dir, False))
+            server, saves_dir, node, source_node, persistence_file, campaign_by_id,
+            {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()})
         bnb = {}
         if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
             bnb = await self._fetch_bnb(
-                server, cfg, session["start"],
+                server, cfg, session,
                 [d["ucid"] for d in players.values() if d.get("ucid")])
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
@@ -3323,6 +3338,7 @@ class Fh_Report(Plugin):
         Logged once (DEBUG) per instance, not every cycle."""
         instance_name = server.instance.name
         self._campaign_absent.add(saves_dir)   # the save reappearing marks a new campaign session
+        self._campaign_watch.pop(saves_dir, None)
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
             self.log.debug(
@@ -3748,7 +3764,7 @@ class Fh_Report(Plugin):
 
         sess = await _read_fhr_json(node, saves_dir, "session.json")
         bnb, penalties = (await self._fetch_bnb_detail(
-            srv, cfg, (_parse_utc(sess.get("start")), sess.get("kind")), ucid,
+            srv, cfg, _parse_utc(sess.get("start")), ucid,
             with_penalties=_bool_cfg(cfg.get("show_punishment")))
             if ucid else (None, None))
         embed = _build_player_report_embed(

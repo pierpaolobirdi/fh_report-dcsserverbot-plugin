@@ -94,7 +94,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     assert pool.connections == 2 and sent[0].title == "👤 Player — Zarpa"
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
-    assert "**Session:** 1 (since ~<t:" in bnb and "**Today:** 3" in bnb
+    assert "**Session:** 1 ·" in bnb and "since" not in bnb and "**Today:** 3" in bnb
     assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
     assert "_Showing the latest 2 of 5 incidents._" in bnb
     assert "Team kill → `Viper`" in bnb and "Friendly fire → AI unit (T-72B)" in bnb and "pts" not in bnb
@@ -169,7 +169,7 @@ def test_bnb_list_is_trimmed_to_the_field_limit_and_says_so():
     when = datetime(2026, 10, 3, 12, 0)
     recent = [(when, "hit", None, None, "X" * 60)] * 10
     bnb = {"total": 25, "day": 3, "session": 2, "destroyed": 5, "damaged": 20,
-           "session_start": when, "recent": recent}
+           "recent": recent}
     e = commands._build_player_report_embed("P", {}, None, None, 0, 0, {}, "ok", bnb=bnb)
     value = next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
     assert len(value) <= 1024
@@ -183,17 +183,11 @@ def test_bnb_list_is_trimmed_to_the_field_limit_and_says_so():
 
 def test_bnb_session_unknown_without_a_start():
     from datetime import datetime
-    bnb = {"total": 1, "day": 1, "session": 0, "destroyed": 1, "damaged": 0, "session_start": None, "recent": []}
+    bnb = {"total": 1, "day": 1, "session": 0, "destroyed": 1, "damaged": 0, "session_known": False, "recent": []}
     e = commands._build_player_report_embed("P", {}, None, None, 0, 0, {}, "ok", bnb=bnb)
-    assert "**Session:** unknown" in next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
-
-
-def test_first_seen_session_is_labelled_as_a_lower_bound(saves_dir):
-    _, sent = _invoke(saves_dir, A, admin=True, session_kind="first_seen")
-    bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
-    assert "(counting from <t:" in bnb and "when first seen)" in bnb
+    assert "**Session:** n/a" in next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
 
 
 def test_session_unknown_without_state_file(saves_dir):
     _, sent = _invoke(saves_dir, A, admin=True, session_kind=None)
-    assert "**Session:** unknown" in next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
+    assert "**Session:** n/a" in next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value

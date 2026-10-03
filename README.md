@@ -272,12 +272,11 @@ Stats shown:
 | Session (`show_session_card`) | this server since the current session started |
 | Daily (`show_daily_card`) | this server since the last daily reset |
 
-**Session** here is the life of the Foothold campaign (the *Session Leaderboard*): it starts when the campaign is reset and keeps going through mission reloads. A campaign is reset in two ways: Foothold does it by itself when the campaign is won (it empties the *same* save file and reloads the mission seconds later, so the file's creation date says nothing), or an admin deletes the tracking files in `Saves`. Foothold stores no start date and DCSServerBot cannot read file dates, so Fh_Report notices the reset and dates it:
-- **Noticed** when the save reappears after the "campaign not started" screen, changes file name, or is reset in place (empty save, or points and kills dropping together), within one `update_interval`.
-- **Dated** at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed if there was none or the gap is over an hour. The embed shows `since ~18:42`, the `~` meaning an estimate good to a minute or two.
-- A campaign already running when Fh_Report first looked at it has no known start: counts run `from 18:42, when first seen` until the next reset.
+**Session** here is the life of the Foothold campaign (the *Session Leaderboard*): it starts when the campaign is reset and keeps going through mission reloads. It is only used to count things since then (the session `BoB`); no date is ever shown. A reset is noticed when:
+- the **save file changes name** (another map) or **reappears** after the "campaign not started" screen (the admin deleted the tracking files): a new session right away;
+- the save is **reset in place** (Foothold empties the *same* file when a campaign is won, so the file's creation date says nothing): every known pilot gone, or points and kills both dropping. It is confirmed on a second look one cycle later, so a read that catches the file while Foothold is rewriting it cannot restart the session.
 
-The state is kept in `.fhc/fhr_session.json`.
+The start is dated at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed when there is none or the gap is over an hour. A campaign already running when Fh_Report first looks at it counts from that moment. The state, with a small baseline of pilots so a bot restart does not lose track, is kept in `.fhc/fhr_session.json`.
 
 `/fh_report player` adds, before Career Stats:
 - **Blue-on-Blue (BoB)**: total (destroyed / damaged), today and session counts, and the latest incidents with date and victim (the player's name, or `AI unit (type)`).
