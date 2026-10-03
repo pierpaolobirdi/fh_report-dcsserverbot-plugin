@@ -74,3 +74,11 @@ def test_strip_callsign():
     }
     for raw, expected in cases.items():
         assert commands.strip_callsign(raw) == expected, raw
+
+
+def test_pilot_card_blue_on_blue_is_penultimate():
+    from conftest import commands
+    card = commands._build_pilot_card({10: 47, 18: 2, 21: 3})
+    assert card.endswith("47 Kills · B&B: 2 · 3 Deaths")
+    assert "B&B" not in commands._build_pilot_card({10: 47, 21: 3})
+    assert commands._build_pilot_card({18: 1}).endswith("B&B: 1")

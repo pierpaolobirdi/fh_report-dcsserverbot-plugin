@@ -244,7 +244,7 @@ The icon preceding the card line is configurable via `pilot_card_icon` (default:
 
 ```
 🥇 `Pilot1` — Colonel (R: 241,500)
-·　🔸 129h Fixed · 13h Helo · 47 Kills · 23 Traps · 12k lbs · 3 Deaths
+·　🔸 129h Fixed · 13h Helo · 47 Kills · 23 Traps · 12k lbs · B&B: 2 · 3 Deaths
 🥈 `Pilot2` — Lieutenant Colonel (R: 198,320)
 ·　🔸 89h Fixed · 31 Kills
 ·　⚖️ JAG indictment filed (32 p.p.) 🔨🔨🔨
@@ -256,6 +256,7 @@ Stats shown:
 - Total kills
 - Carrier traps
 - In-flight refuels received
+- `B&B: n` — friendly units or players the pilot has destroyed (blue-on-blue). Foothold takes points and rank credits for each one (`FriendlyFireRankPenalty`) but only records the count, so that is what is shown. Always kept, right before Deaths; it also appears in `/fh_report player`
 - Pilot deaths
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)

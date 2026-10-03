@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.15"
+FH_REPORT_RELEASE = "14.1.16"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -55,6 +55,7 @@ CAREER_HELO_SECONDS   = 3
 CAREER_TRAPS          = 8
 CAREER_KILLS          = 10
 CAREER_DEATHS         = 21
+CAREER_FRIENDLY_KILLS = 18   # blue-on-blue: friendly units/players destroyed
 CAREER_FUEL_LBS       = 30
 
 HOT_STATES = {Status.RUNNING, Status.PAUSED}
@@ -1314,6 +1315,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     traps    = int(career.get(8, 0))
     refuel_lbs = int(career.get(30, 0))
     deaths   = int(career.get(21, 0))
+    friendly = int(career.get(CAREER_FRIENDLY_KILLS, 0))
 
     def _fmt_time(seconds: int) -> str | None:
         """Format seconds as hours (>=1h) or minutes (<1h). None if zero."""
@@ -1333,6 +1335,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
+    if friendly > 0:   parts.append(f"B&B: {friendly}")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1585,6 +1588,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
         career_lines.append(f"- **Fuel Received:** {_fmt_compact(int(career[CAREER_FUEL_LBS]))} lbs")
+    if career.get(CAREER_FRIENDLY_KILLS, 0) > 0:
+        career_lines.append(f"- **Friendly Kills (B&B):** {int(career[CAREER_FRIENDLY_KILLS])}")
     if career.get(CAREER_DEATHS, 0) > 0:
         career_lines.append(f"- **Pilot Deaths:** {int(career[CAREER_DEATHS])}")
     if career_lines:
