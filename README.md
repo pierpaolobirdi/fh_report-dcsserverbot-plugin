@@ -85,7 +85,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
-| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs-disable_updates) below |
+| `enable_updates` | `true` | `false` = this instance never reads, posts, or edits anything for this server — see [Enabling or disabling per instance](#enabling-or-disabling-per-instance-enable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
@@ -369,24 +369,38 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 ---
 
-## Duplicate installs (`disable_updates`)
+## Enabling or disabling per instance (`enable_updates`)
 
-If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, running one config next to the master and another on an agent box that hosts that instance — both installations will try to manage the same Discord message.
+Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (the key is the instance name from `nodes.yaml`). `enable_updates` lets you switch any of them on or off without deleting its settings.
 
-Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing Fh_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
+- `enable_updates: true` (default) — normal operation.
+- `enable_updates: false` — that instance never reads files, posts or edits anything, as if it weren't in the config at all. Its settings stay in the file, so you can turn it back on later.
 
-What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `report_layout`, `bar_style_emoji`, etc.) every time either one refreshes.
-
-To avoid that, set `disable_updates: true` on every duplicate copy except the one that should actually be in control:
+Because `DEFAULT` is merged into every block, you can also work the other way round: switch everything off by default and enable only the instances you want.
 
 ```yaml
-DCS_Server:
+DEFAULT:
+  enable_updates: false      # off unless an instance says otherwise
+
+DCS.foothold1:
+  enable_updates: true       # Fh_Report active here
   channel_id: 1458145804685541508
-  campaign_name: "Operation — FootHold"
-  disable_updates: true   # this copy stays completely silent for this server
+  campaign_name: "Operation A"
+
+DCS.foothold2:               # inherits false: stays silent
+  channel_id: 1458145804685541509
+  campaign_name: "Operation B"
 ```
 
-When `disable_updates: true`, that instance skips the server entirely on every cycle — no file reads, no posts, no edits — as if it weren't listed in the config at all. Omitting the option (or leaving it `false`) is the normal, default behavior.
+Changes are picked up when the plugin is reloaded (or the bot restarts).
+
+The older `disable_updates: true` still works exactly like `enable_updates: false`; if both are set, `enable_updates` wins.
+
+### Duplicate installs
+
+If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, one config next to the master and another on an agent box hosting that instance — both installations would try to manage the same Discord message.
+
+The plugin never creates **duplicate messages**: before posting, it checks the channel for an existing Fh_Report message for that campaign and adopts it. But both configs would still keep **updating that same message**, flipping it between their settings. To avoid that, set `enable_updates: false` on every duplicate copy except the one that should be in control.
 
 ---
 

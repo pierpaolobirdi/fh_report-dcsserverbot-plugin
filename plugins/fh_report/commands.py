@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.14"
+FH_REPORT_RELEASE = "14.1.15"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2345,6 +2345,14 @@ def _bool_cfg(value) -> bool:
     return False
 
 
+def _updates_enabled(cfg: dict) -> bool:
+    """enable_updates (default true) switches an instance on or off. The older
+    disable_updates: true is still honoured when enable_updates isn't set."""
+    if cfg.get("enable_updates") is not None:
+        return _bool_cfg(cfg["enable_updates"])
+    return not _bool_cfg(cfg.get("disable_updates"))
+
+
 def _reset_hour_today(cfg: dict) -> int:
     """daily_reset_hour, overridden by today's entry in daily_reset_schedule."""
     schedule = cfg.get("daily_reset_schedule") or {}
@@ -2846,9 +2854,9 @@ class Fh_Report(Plugin):
 
         instance_name = server.instance.name
 
-        if _bool_cfg(cfg.get("disable_updates")):
-            # Silenced instance (e.g. a duplicate install elsewhere in the cluster
-            # posting to the same channel): no read, no post.
+        if not _updates_enabled(cfg):
+            # Switched-off instance (or a duplicate install elsewhere in the
+            # cluster posting to the same channel): no read, no post.
             return
 
         channel_id    = _single_channel_id(cfg.get("channel_id"))

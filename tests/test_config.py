@@ -1,10 +1,11 @@
 """migrate_config.py, the yaml template and the plugin's option reads must stay in sync."""
 import os
+import pytest
 import re
 import subprocess
 import sys
 
-from conftest import ROOT
+from conftest import ROOT, commands
 
 sys.path.insert(0, ROOT)
 import migrate_config as mc  # noqa: E402
@@ -82,3 +83,17 @@ def test_server_block_override_is_not_flagged_obsolete(tmp_path):
     assert "not_a_real_option" in flagged        # the check does look at this block...
     assert "show_map" not in flagged             # ...and show_map is a known option
     assert "  show_map: false" in migrated        # the override is left alone
+
+
+@pytest.mark.parametrize("cfg, expected", [
+    ({}, True),
+    ({"enable_updates": True}, True),
+    ({"enable_updates": False}, False),
+    ({"enable_updates": "false"}, False),
+    ({"disable_updates": True}, False),
+    ({"disable_updates": False}, True),
+    ({"enable_updates": True, "disable_updates": True}, True),
+    ({"enable_updates": False, "disable_updates": False}, False),
+])
+def test_updates_enabled(cfg, expected):
+    assert commands._updates_enabled(cfg) is expected

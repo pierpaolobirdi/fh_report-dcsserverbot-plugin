@@ -273,16 +273,22 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
-#   disable_updates  - Silence this instance's embed entirely      (default: false)
-#                      false = normal operation
-#                      true  = this instance never reads, posts, or edits
+#   enable_updates   - Switch Fh_Report on/off for this instance   (default: true)
+#                      true  = normal operation
+#                      false = this instance never reads, posts, or edits
 #                              anything for this server — as if it weren't
-#                              in the config at all. Useful when the same
-#                              Foothold instance is reachable from more than
-#                              one fh_report installation in the same cluster
-#                              (e.g. one config per agent box) — set this to
-#                              true on every duplicate copy except the one
-#                              that should actually post.
+#                              in the config at all (its settings stay in the
+#                              file, so you can switch it back on later).
+#                              Also useful when the same Foothold instance is
+#                              reachable from more than one fh_report
+#                              installation in the same cluster (e.g. one
+#                              config per agent box) — set this to false on
+#                              every duplicate copy except the one that should
+#                              actually post.
+#                              Can be set in DEFAULT (e.g. false) and turned on
+#                              only for the instances that should have it.
+#                      The old disable_updates: true still works the same as
+#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -336,6 +342,7 @@ KNOWN_VARS = {
     "podium_combined_min3_latest_day",
     "show_punishment",
     "excluded_ucids",
+    "enable_updates",
     "disable_updates",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
