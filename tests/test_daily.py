@@ -85,43 +85,67 @@ def test_persist_false_writes_nothing(tmp_path, fake_clock):
     assert not (tmp_path / ".fhc" / "fhr_daily_snapshot.json").exists()
 
 
-# ── daily_reset_timezone ───────────────────────────────────────────────────────
+# ── daily reset time zone (the Scheduler plugin's `timezone`) ──────────────────
 
-def test_reset_timezone_names():
+MADRID = commands._tz_from_name("Europe/Madrid")
+
+
+def test_time_zone_names():
     from datetime import timezone as tzmod
-    assert commands._reset_tz({}) is tzmod.utc
-    assert commands._reset_tz({"daily_reset_timezone": "gmt"}) is tzmod.utc
-    assert str(commands._reset_tz({"daily_reset_timezone": "Europe/Madrid"})) == "Europe/Madrid"
-    assert commands._reset_tz({"daily_reset_timezone": "Nowhere/Land"}) is tzmod.utc     # warns, never crashes
-    assert commands._reset_tz({"daily_reset_timezone": "local"}).utcoffset(None) is not None
+    assert commands._tz_from_name(None) is tzmod.utc
+    assert commands._tz_from_name("") is tzmod.utc
+    assert commands._tz_from_name("gmt") is tzmod.utc
+    assert str(commands._tz_from_name("Europe/Madrid")) == "Europe/Madrid"
+    assert commands._tz_from_name("Nowhere/Land") is tzmod.utc          # warns, never crashes
+
+
+def _plugin_with_scheduler(config):
+    plugin = make_plugin()
+
+    def get_config(server, plugin_name=None, **_):
+        assert plugin_name == "scheduler"
+        if isinstance(config, Exception):
+            raise config
+        return config
+    plugin.get_config = get_config
+    return plugin
+
+
+def test_the_reset_zone_comes_from_the_scheduler_plugin_or_falls_back_to_utc():
+    from datetime import timezone as tzmod
+    assert str(_plugin_with_scheduler({"timezone": "Europe/Madrid"})._reset_tz(object())) == "Europe/Madrid"
+    assert _plugin_with_scheduler({})._reset_tz(object()) is tzmod.utc                      # no timezone set
+    assert _plugin_with_scheduler(ValueError('Plugin "scheduler" not found!'))._reset_tz(object()) is tzmod.utc
+    assert _plugin_with_scheduler({"timezone": "Bad/Zone"})._reset_tz(object()) is tzmod.utc
 
 
 def test_day_start_in_a_local_timezone_follows_summer_and_winter_time():
-    cfg = {"daily_reset_hour": 6, "daily_reset_timezone": "Europe/Madrid"}
+    cfg = {"daily_reset_hour": 6}
     # 3 Oct (summer time, UTC+2): 06:00 Madrid = 04:00 UTC
     after = real_datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)
-    assert commands._day_start(cfg, after) == real_datetime(2026, 10, 3, 4, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, after, MADRID) == real_datetime(2026, 10, 3, 4, 0, tzinfo=timezone.utc)
     before = real_datetime(2026, 10, 3, 3, 0, tzinfo=timezone.utc)                  # still the previous period
-    assert commands._day_start(cfg, before) == real_datetime(2026, 10, 2, 4, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, before, MADRID) == real_datetime(2026, 10, 2, 4, 0, tzinfo=timezone.utc)
     # 3 Nov (winter time, UTC+1): the same 06:00 Madrid is 05:00 UTC
     winter = real_datetime(2026, 11, 3, 9, 0, tzinfo=timezone.utc)
-    assert commands._day_start(cfg, winter) == real_datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
-    # the default is unchanged
-    assert commands._day_start({"daily_reset_hour": 6}, after) == real_datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, winter, MADRID) == real_datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    # without a zone nothing changes
+    assert commands._day_start(cfg, after) == real_datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc)
 
 
 def test_schedule_weekdays_are_the_ones_of_the_timezone():
-    cfg = {"daily_reset_hour": 6, "daily_reset_schedule": {"sun": 9}, "daily_reset_timezone": "Pacific/Auckland"}
+    cfg = {"daily_reset_hour": 6, "daily_reset_schedule": {"sun": 9}}
+    auckland = commands._tz_from_name("Pacific/Auckland")
     # Sat 3 Oct 21:00 UTC is already Sunday 4 Oct 10:00 in Auckland (UTC+13): Sunday's 9 applies
     now = real_datetime(2026, 10, 3, 21, 0, tzinfo=timezone.utc)
-    assert commands._day_start(cfg, now) == real_datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)   # Sun 09:00 NZ
+    assert commands._day_start(cfg, now, auckland) == real_datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)
 
 
 def test_the_daily_counters_roll_over_at_local_midnight_not_utc_midnight(tmp_path, fake_clock):
     saves = str(tmp_path)
     (tmp_path / ".fhc").mkdir()
     plugin = make_plugin()
-    ids, madrid = UCID[:2], commands._reset_tz({"daily_reset_timezone": "Europe/Madrid"})
+    ids = UCID[:2]
 
     async def step(hours_from, tz):
         fake_clock.now = real_datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc) + timedelta(hours=hours_from)
@@ -137,5 +161,5 @@ def test_the_daily_counters_roll_over_at_local_midnight_not_utc_midnight(tmp_pat
     utc_before, utc_after = asyncio.run(run(timezone.utc))
     assert utc_after[ids[0]] > utc_before[ids[0]] > 0                # UTC: still the same day, still accumulating
     (tmp_path / ".fhc" / "fhr_daily_snapshot.json").unlink()
-    mad_before, mad_after = asyncio.run(run(madrid))
+    mad_before, mad_after = asyncio.run(run(MADRID))
     assert mad_before[ids[0]] > 0 and mad_after.get(ids[0], 0) == 0   # Madrid: a new day started, the counter restarted

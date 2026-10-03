@@ -107,8 +107,14 @@
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   daily_reset_hour     - Hour when the daily points counter resets, in the time zone
-#                          of daily_reset_timezone (UTC unless you set it)  (default: 0)
+#   daily_reset_hour     - Hour when the daily points counter resets  (default: 0)
+#                          The hour is in the time zone of this server's `timezone` in
+#                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
+#                          for example `timezone: Europe/Madrid` on the instance; it follows
+#                          summer/winter time by itself). Without one, or without the
+#                          Scheduler plugin, the hour is UTC. There is no separate setting
+#                          here: change the Scheduler's timezone and the reset moves with it
+#                          (one daily period is then longer or shorter than 24 hours, once).
 #                          Manual reset (no commands in this plugin): delete
 #                          saves_dir/.fhc/fhr_daily_snapshot.json (and the older
 #                          daily_snapshot.json too, if it's still there) — the daily
@@ -120,24 +126,11 @@
 #   daily_reset_schedule - Optional: override reset hour for specific days of the week.
 #                          Only define the days that differ from daily_reset_hour.
 #                          Days: mon, tue, wed, thu, fri, sat, sun
-#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                          The days are the days in that same time zone.
+#                          Example: reset at midnight except Thursday and Saturday at 6am:
 #                            daily_reset_schedule:
 #                              thu: 6
 #                              sat: 6
-#   daily_reset_timezone - Time zone daily_reset_hour and daily_reset_schedule are written in
-#                          (default: UTC)
-#                          UTC            = as before
-#                          local          = the local time of the machine running the bot
-#                          Europe/Madrid  = any IANA name; follows summer/winter time by itself
-#                                           (recommended over "local" if the machine's own
-#                                           time zone differs from your players')
-#                          Example: reset at 6am Madrid time every day:
-#                            daily_reset_hour: 6
-#                            daily_reset_timezone: Europe/Madrid
-#                          The weekdays of daily_reset_schedule are the ones in that time zone.
-#                          After changing it, one daily period can be longer or shorter than
-#                          24 hours (the counters switch to the new hour once); nothing is lost.
-#                          An unknown name falls back to UTC with a warning in the bot log.
 #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
 #                      The map is read from DCSServerBot (never configured here) and the
 #                      last known one is kept while the bot runs; if none is known yet it
@@ -358,7 +351,6 @@ DCS_Server:                             # instance name from nodes.yaml
 #  points_detail_R: SRD
 #  update_interval: 300
 #  daily_reset_hour: 0
-#  daily_reset_timezone: UTC            # UTC | local | Europe/Madrid ...
 #  daily_reset_schedule:
 #    sat: 6
 #    sun: 6
@@ -405,7 +397,6 @@ DCS_Server:                             # instance name from nodes.yaml
 #  points_detail_R: SRD
 #  update_interval: 300
 #  daily_reset_hour: 0
-#  daily_reset_timezone: UTC            # UTC | local | Europe/Madrid ...
 #  daily_reset_schedule:
 #    sat: 6
 #    sun: 6

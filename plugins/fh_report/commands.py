@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.33"
+FH_REPORT_RELEASE = "14.1.34"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -609,7 +609,7 @@ def _session_migrate(old: dict) -> dict:
     return {"file": old.get("file", ""), "start": start, "kind": kind, "seen": start} if start else {}
 
 
-def _session_start_for(st: dict, cfg: dict) -> datetime | None:
+def _session_start_for(st: dict, cfg: dict, tz: tzinfo = timezone.utc) -> datetime | None:
     """Session start to count from. A campaign already running when Fh_Report
     first looked ("first_seen") started at some unknown earlier time, so it
     counts at least from the daily reset before that first look: the session
@@ -617,7 +617,7 @@ def _session_start_for(st: dict, cfg: dict) -> datetime | None:
     from the reset."""
     start = _parse_utc((st or {}).get("start"))
     if start and st.get("kind") == "first_seen":
-        start = min(start, _day_start(cfg, start.replace(tzinfo=timezone.utc)).replace(tzinfo=None))
+        start = min(start, _day_start(cfg, start.replace(tzinfo=timezone.utc), tz).replace(tzinfo=None))
     return start
 
 
@@ -2476,31 +2476,28 @@ def _updates_enabled(cfg: dict) -> bool:
 _tz_warned: set[str] = set()
 
 
-def _reset_tz(cfg: dict) -> tzinfo:
-    """Time zone the daily reset hour is written in (daily_reset_timezone):
-    UTC (default), "local" (the machine running the bot), or an IANA name such
-    as Europe/Madrid, which follows summer/winter time by itself. An unknown
-    name falls back to UTC with one warning."""
-    name = str(cfg.get("daily_reset_timezone") or "UTC").strip()
-    if name.lower() in ("utc", "gmt", "z"):
+def _tz_from_name(name) -> tzinfo:
+    """Time zone for the daily reset: an IANA name (Europe/Madrid, which
+    follows summer/winter time by itself), else UTC. An unknown name falls
+    back to UTC with one warning."""
+    name = str(name or "").strip()
+    if not name or name.lower() in ("utc", "gmt", "z"):
         return timezone.utc
-    if name.lower() == "local":
-        return datetime.now().astimezone().tzinfo
     try:
         return ZoneInfo(name)
     except Exception:
         if name not in _tz_warned:
             _tz_warned.add(name)
-            log.warning(f"Fh_Report: daily_reset_timezone {name!r} is not a known time zone "
-                        f"(use UTC, local or a name like Europe/Madrid) — using UTC.")
+            log.warning(f"Fh_Report: time zone {name!r} (from the Scheduler plugin) is not a known "
+                        f"time zone name (like Europe/Madrid) — using UTC.")
         return timezone.utc
 
 
-def _reset_hour_today(cfg: dict) -> int:
+def _reset_hour_today(cfg: dict, tz: tzinfo = timezone.utc) -> int:
     """daily_reset_hour, overridden by today's entry in daily_reset_schedule
-    (the weekday is the one in daily_reset_timezone)."""
+    (the weekday is the one in the reset time zone `tz`)."""
     schedule = cfg.get("daily_reset_schedule") or {}
-    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).astimezone(_reset_tz(cfg)).weekday()]
+    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).astimezone(tz).weekday()]
     if today in schedule:
         return int(schedule[today])
     return int(cfg.get("daily_reset_hour") or 0)
@@ -2547,11 +2544,10 @@ WITH ff AS (
 """
 
 
-def _day_start(cfg: dict, now: datetime | None = None) -> datetime:
+def _day_start(cfg: dict, now: datetime | None = None, tz: tzinfo = timezone.utc) -> datetime:
     """Most recent daily reset instant (as an aware UTC datetime): today's
     reset hour if it has passed, else yesterday's (each day with its own
-    daily_reset_schedule hour), the hours being in daily_reset_timezone."""
-    tz = _reset_tz(cfg)
+    daily_reset_schedule hour), the hours being in the reset time zone `tz`."""
     now = (now or datetime.now(timezone.utc)).astimezone(tz)
     schedule = cfg.get("daily_reset_schedule") or {}
     default  = int(cfg.get("daily_reset_hour") or 0)
@@ -2830,8 +2826,8 @@ class Fh_Report(Plugin):
                               snap_unpacked: dict | None = None,
                               tz: tzinfo = timezone.utc) -> tuple[dict, dict, bool]:
         """Today's points and stat deltas per player ID, against the baseline
-        snapshot taken at reset_hour in time zone `tz` (daily_reset_timezone,
-        UTC by default). Returns (daily_pts, daily_stats,
+        snapshot taken at reset_hour in time zone `tz` (the server's Scheduler
+        timezone, UTC without one). Returns (daily_pts, daily_stats,
         campaign_restarted).
 
         Inputs are already grouped by player ID (see _group_by_player_id), so
@@ -3044,6 +3040,16 @@ class Fh_Report(Plugin):
 
         return daily, daily_stats, campaign_restarted
 
+    def _reset_tz(self, server) -> tzinfo:
+        """Time zone of this server's daily reset: the `timezone` the Scheduler
+        plugin has for it (DCSServerBot's own setting), UTC when it has none or
+        the Scheduler plugin is not there."""
+        try:
+            name = (self.get_config(server, plugin_name="scheduler") or {}).get("timezone")
+        except Exception:
+            name = None
+        return _tz_from_name(name)
+
     async def _reset_moment(self, server, seen: datetime | None, now: datetime) -> datetime:
         """When a campaign reset noticed at `now` most likely happened: Foothold
         restarts the mission seconds after a reset, so the first mission start
@@ -3112,7 +3118,7 @@ class Fh_Report(Plugin):
             await _ensure_fhc_dir(source_node, saves_dir)
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)
-        return _session_start_for(st, cfg or {})
+        return _session_start_for(st, cfg or {}, self._reset_tz(server))
 
     async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
@@ -3121,7 +3127,7 @@ class Fh_Report(Plugin):
         daily reset / session start. Empty when the plugin's table isn't there."""
         if not ucids:
             return {}
-        day_from = _day_start(cfg).replace(tzinfo=None)
+        day_from = _day_start(cfg, tz=self._reset_tz(server)).replace(tzinfo=None)
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
@@ -3146,7 +3152,7 @@ class Fh_Report(Plugin):
         what Punishment still holds against the player after decay, by event.
         Each is None when there is nothing or the plugin's table is missing.
         `session` is the campaign session start (naive UTC), or None when unknown."""
-        day_from = _day_start(cfg).replace(tzinfo=None)
+        day_from = _day_start(cfg, tz=self._reset_tz(server)).replace(tzinfo=None)
         bnb = penalties = None
         try:
             async with self.apool.connection() as conn:
@@ -3316,12 +3322,13 @@ class Fh_Report(Plugin):
             snap_unpacked, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
-            reset_hour = _reset_hour_today(cfg)
+            tz = self._reset_tz(server)
+            reset_hour = _reset_hour_today(cfg, tz)
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
                 name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked,
-                tz=_reset_tz(cfg))
+                tz=tz)
 
         # Campaign session start (always kept up to date: /fh_report player reads it too)
         session = await self._update_session(
@@ -3784,12 +3791,13 @@ class Fh_Report(Plugin):
         s_stats = _lookup(srs_disp, None) or {}
 
         # Daily points — reuse the same snapshot-based computation as the embed
-        reset_hour = _reset_hour_today(cfg)
+        tz = self._reset_tz(srv)
+        reset_hour = _reset_hour_today(cfg, tz)
         daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
             name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap,
-            persist=False, snap_unpacked=snap_unpacked, tz=_reset_tz(cfg))
+            persist=False, snap_unpacked=snap_unpacked, tz=tz)
         d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
@@ -3818,7 +3826,7 @@ class Fh_Report(Plugin):
 
         sess = await _read_fhr_json(node, saves_dir, "session.json")
         bnb, penalties = (await self._fetch_bnb_detail(
-            srv, cfg, _session_start_for(sess, cfg), ucid,
+            srv, cfg, _session_start_for(sess, cfg, tz), ucid,
             with_penalties=_bool_cfg(cfg.get("show_punishment")))
             if ucid else (None, None))
         embed = _build_player_report_embed(
