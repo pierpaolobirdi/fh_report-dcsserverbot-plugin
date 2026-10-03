@@ -258,9 +258,9 @@ Stats shown:
 - In-flight refuels received
 - Pilot deaths
 
-### Blue-on-blue (`B&B`)
+### Blue-on-blue (`BoB`)
 
-`B&B: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It counts friendly units or players the pilot destroyed (`kill`, `collision_kill`) **plus** those hit or damaged (`friendly_fire`, `collision_hit`), as recorded by the DCSServerBot **Punishment** plugin (`pu_events`). Without that plugin there is no data and `B&B` is simply left out.
+`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It counts friendly units or players the pilot destroyed (`kill`, `collision_kill`) **plus** those hit or damaged (`friendly_fire`, `collision_hit`), as recorded by the DCSServerBot **Punishment** plugin (`pu_events`). Without that plugin there is no data and `BoB` is simply left out.
 
 | Card | Counts |
 |---|---|
@@ -275,7 +275,7 @@ Things to keep in mind, all coming from how the Punishment plugin records events
 - Only events that earn penalty points are stored, so an event configured with 0 points, or a player on the exemption list, leaves no record.
 - Old events are removed by the plugin's `decay` settings (60 days in the sample configuration), which also limits the rank card total.
 
-`/fh_report player` adds a **Blue-on-Blue (B&B)** section (before Career Stats) with the total (destroyed / damaged), today and session counts, and the latest events with date and victim (`AI unit` when it was not a player).
+`/fh_report player` adds a **Blue-on-Blue (BoB)** section (before Career Stats) with the total (destroyed / damaged), today and session counts, and the latest events with date and victim (`AI unit` when it was not a player).
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 

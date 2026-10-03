@@ -74,7 +74,7 @@ def _invoke(saves_dir, player_name, admin):
 
 def test_self_lookup_uses_one_connection(saves_dir):
     pool, sent = _invoke(saves_dir, None, admin=False)
-    # one connection for the account lookup, one for the optional B&B detail
+    # one connection for the account lookup, one for the optional BoB detail
     assert pool.connections == 2 and len(pool.queries) == 4
     assert sum("discord_id" in q for q in pool.queries) == 1
     embed = sent[0]

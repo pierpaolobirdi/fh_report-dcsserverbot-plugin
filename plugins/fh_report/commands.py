@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.22"
+FH_REPORT_RELEASE = "14.1.23"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1333,7 +1333,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸", bnb: int = 0) -> str | N
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
-    if bnb > 0:        parts.append(f"B&B: {bnb}")   # penultimate, never dropped
+    if bnb > 0:        parts.append(f"BoB: {bnb}")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1368,7 +1368,7 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> st
     order: Msn (every mission objective, see _is_mission_stat), Ach, Air
     (Air+Helo), SAM, Ground (Ground Units+Structure+Infantry), Ship, Resc,
     Refuels, Deaths. Capped at 7 entries, dropping the lowest priority first
-    but always keeping B&B (blue-on-blue, from DCSSB) and Deaths. 'Flight time' is left out on purpose: Foothold
+    but always keeping BoB (blue-on-blue, from DCSSB) and Deaths. 'Flight time' is left out on purpose: Foothold
     only records it for a few transport/helo types, so it would read 0 for
     most pilots. None if everything is zero.
     """
@@ -1400,13 +1400,13 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> st
         (5, f"{ship} Ship") if ship > 0 else None,
         (6, f"{rescues} Resc") if rescues > 0 else None,
         (7, f"{refuels} Refuels") if refuels > 0 else None,
-        (8, f"B&B: {bnb}") if bnb > 0 else None,
+        (8, f"BoB: {bnb}") if bnb > 0 else None,
         (9, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
 
     # Cap at 7 fields — drop lowest-priority fields first, but always keep
-    # B&B and deaths (ranks 8 and 9)
+    # BoB and deaths (ranks 8 and 9)
     if len(candidates) > 7:
         kept   = [c for c in candidates if c[0] >= 8]
         others = sorted((c for c in candidates if c[0] < 8), key=lambda c: c[0])[:7 - len(kept)]
@@ -1582,7 +1582,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                 " → AI unit" if not target_id else " → unknown player")
             lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
         embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
-        embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
+        embed.add_field(name="⚠️ __Blue-on-Blue (BoB)__", value="\n".join(lines)[:1024], inline=False)
 
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
     # Rank Points and rank name shown in the section title itself.
@@ -2387,7 +2387,7 @@ def _reset_hour_today(cfg: dict) -> int:
     return int(cfg.get("daily_reset_hour") or 0)
 
 
-# DCSSB Punishment events that are blue-on-blue (B&B): friendly units destroyed
+# DCSSB Punishment events that are blue-on-blue (BoB): friendly units destroyed
 # (kill, collision_kill) or hit/damaged (friendly_fire, collision_hit).
 BNB_EVENTS = ("kill", "collision_kill", "friendly_fire", "collision_hit")
 BNB_LABELS = {
@@ -2934,7 +2934,7 @@ class Fh_Report(Plugin):
                     return {r[0]: {"total": int(r[1]), "day": int(r[2]), "session": int(r[3])}
                             for r in await cur.fetchall()}
         except Exception as e:
-            self.log.debug(f"Fh_Report: B&B data not available: {e}")
+            self.log.debug(f"Fh_Report: BoB data not available: {e}")
             return {}
 
     async def _fetch_bnb_detail(self, server, cfg: dict, saves_dir: str, ucid: str) -> dict | None:
@@ -2965,7 +2965,7 @@ class Fh_Report(Plugin):
                     """, (ucid, list(BNB_EVENTS)))
                     recent = [(r[0], r[1], r[2], r[3]) for r in await cur.fetchall()]
         except Exception as e:
-            self.log.debug(f"Fh_Report: B&B detail not available: {e}")
+            self.log.debug(f"Fh_Report: BoB detail not available: {e}")
             return None
         destroyed = ("kill", "collision_kill")
         return {
