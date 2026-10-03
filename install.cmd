@@ -4,9 +4,25 @@ setlocal EnableDelayedExpansion
 :: Get the directory where this script is located (works from anywhere)
 set "SCRIPT_DIR=%~dp0"
 
+:: ── Version being installed (read from commands.py, never duplicated here) ───
+:: Line format there:  FH_REPORT_RELEASE = "x.y.z"   (%%~V strips the quotes)
+set "NEW_VER=unknown"
+for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "%SCRIPT_DIR%plugins\fh_report\commands.py" 2^>nul') do set "NEW_VER=%%~V"
+
+:: ── Colors (Windows 10/11 only; empty on older systems so no stray characters)
+set "NEWC="
+set "OLDC="
+set "OFF="
+ver | findstr /C:" 10." > nul && (
+    for /f %%E in ('echo prompt $E ^| cmd') do set "ESC=%%E"
+    set "NEWC=!ESC![1;92m"
+    set "OLDC=!ESC![31m"
+    set "OFF=!ESC![0m"
+)
+
 echo.
 echo ================================================
-echo  Fh_Report Plugin Installer for DCSServerBot
+echo  Fh_Report Plugin - Installer / Updater --^> !NEWC!Ver. !NEW_VER!!OFF!
 echo ================================================
 echo.
 
@@ -44,8 +60,21 @@ if not exist "!DCSSB_PATH!\config\main.yaml" (
     exit /b 1
 )
 
+:: ── Version already installed (if any) ───────────────────────────────────────
+set "OLD_VER="
+set "OLD_FILE=!DCSSB_PATH!\plugins\fh_report\commands.py"
+if exist "!OLD_FILE!" set "OLD_VER=unknown (no version in the installed file)"
+if exist "!OLD_FILE!" for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "!OLD_FILE!" 2^>nul') do set "OLD_VER=%%~V"
+
 echo.
-echo Installing Fh_Report to: !DCSSB_PATH!
+echo Installing Fh_Report !NEWC!Ver. !NEW_VER!!OFF! to: !DCSSB_PATH!
+if "!OLD_VER!"=="" (
+    echo Installed now: none ^(new install^)
+) else if "!OLD_VER!"=="!NEW_VER!" (
+    echo Installed now: !NEWC!Ver. !OLD_VER!!OFF! ^(same version - files will be refreshed^)
+) else (
+    echo Installed now: !OLDC!Ver. !OLD_VER!!OFF! --^> updating to !NEWC!Ver. !NEW_VER!!OFF!
+)
 echo.
 
 :: ── Copy plugin files ─────────────────────────────────────────────────────────
@@ -112,7 +141,7 @@ if !ERRORLEVEL! == 0 (
 :: ── Done ─────────────────────────────────────────────────────────────────────
 echo.
 echo ================================================
-echo  Installation complete!
+echo  !NEWC!Installation complete^^!!OFF! Fh_Report !NEWC!Ver. !NEW_VER!!OFF!
 echo ================================================
 echo.
 echo Next steps:
