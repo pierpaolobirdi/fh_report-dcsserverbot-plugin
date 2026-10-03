@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.13"
+FH_REPORT_RELEASE = "14.1.14"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -535,7 +535,7 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
 async def hot_write_waypoints(server) -> None:
     """Inject Lua that dumps the mission's in-memory WaypointList (zone ->
     waypoint suffix, never saved by Foothold) to saves_dir/.fhc/fhc_waypoints.lua.
-    Same file and technique as FH_Control, so either plugin can refresh it.
+    Same file and technique as Fh_Control, so either plugin can refresh it.
     No-op if the mission doesn't define WaypointList.
     """
     lua = (
@@ -544,7 +544,7 @@ async def hot_write_waypoints(server) -> None:
         "  local _p = lfs.writedir() .. [[Missions/Saves/.fhc/fhc_waypoints.lua]] "
         "  local _f = io.open(_p, 'w') "
         "  if _f then "
-        "    _f:write([[-- Fh_Report/FH_Control waypoint cache\n]]) "
+        "    _f:write([[-- Fh_Report/Fh_Control waypoint cache\n]]) "
         "    _f:write([[WaypointList = {\n]]) "
         "    for _k,_v in pairs(WaypointList) do "
         "      _f:write([[  [\"]] .. _k .. [[\"] = \"]] .. _v .. [[\",\n]]) "
@@ -559,7 +559,7 @@ async def hot_write_waypoints(server) -> None:
 
 async def load_waypoint_list(saves_dir: str, node) -> dict:
     """{zone_name: waypoint number} from fhc_waypoints.lua (written by us or
-    FH_Control). Zones without a numeric suffix are omitted; a missing or
+    Fh_Control). Zones without a numeric suffix are omitted; a missing or
     unreadable file returns {}.
     """
     path = os.path.join(saves_dir, ".fhc", "fhc_waypoints.lua")
@@ -748,7 +748,7 @@ async def _read_json(node, path: str) -> dict:
 
 MAP_PROBE_TIMEOUT = 15   # seconds to wait for DCSSB to read the map from the mission file
 
-FHR_PREFIX = "fhr_"    # files this plugin keeps in saves_dir/.fhc (FH_Control uses fhc_)
+FHR_PREFIX = "fhr_"    # files this plugin keeps in saves_dir/.fhc (Fh_Control uses fhc_)
 
 
 def _fhr_path(saves_dir: str, name: str) -> str:
@@ -1531,7 +1531,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                mission_status: str,
                                daily_stats: dict | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
-    No buttons, no editing — mirrors FH_Control's player embed sections
+    No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
     """
     credits = float(data.get("credits", 0))

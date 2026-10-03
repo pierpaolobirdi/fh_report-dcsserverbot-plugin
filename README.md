@@ -313,7 +313,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json` and `fhr_daily_history.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json` and `fhr_daily_history.json`); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
@@ -468,7 +468,7 @@ By default, zones in each column are sorted by level and slot damage. Turning th
 sort_zones_by_waypoint: true
 ```
 
-This needs a one-time cache shared with FH_Control (if installed) and only refreshes automatically when needed (missing cache, or a detected campaign restart) — never on every update, and only while the mission is actually running. Until that cache is available, zones fall back to the normal level-based sort automatically.
+This needs a one-time cache shared with Fh_Control (if installed) and only refreshes automatically when needed (missing cache, or a detected campaign restart) — never on every update, and only while the mission is actually running. Until that cache is available, zones fall back to the normal level-based sort automatically.
 
 ---
 

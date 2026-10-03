@@ -160,7 +160,7 @@
 #                      flavorText) — never written to any save file on its
 #                      own, so this requires a one-time hot-injection dump
 #                      to a shared cache file (saves_dir/.fhc/fhc_waypoints.lua,
-#                      also used by FH_Control if installed). The dump is
+#                      also used by Fh_Control if installed). The dump is
 #                      only triggered when that cache is missing, or when a
 #                      campaign restart was just detected — never on every
 #                      ordinary cycle, since the mapping is static for the
