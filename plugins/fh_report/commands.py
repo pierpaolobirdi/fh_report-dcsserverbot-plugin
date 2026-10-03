@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.18"
+FH_REPORT_RELEASE = "14.1.19"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1600,9 +1600,11 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     if bnb and bnb.get("total"):
         lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
                  f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
-        for when, event, points, victim in bnb.get("recent") or []:
+        for when, event, target_id, victim in bnb.get("recent") or []:
             ts = int(calendar.timegm(when.timetuple()))
-            who = f" → {_safe_code_span(victim)}" if victim else ""
+            # No target UCID recorded = the victim was an AI unit.
+            who = f" → {_safe_code_span(victim)}" if victim else (
+                " → AI unit" if not target_id else " → unknown player")
             lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
         embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
         embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
@@ -2956,12 +2958,12 @@ class Fh_Report(Plugin):
                     if not by_event:
                         return None
                     await cur.execute("""
-                        SELECT e.time, e.event, e.points, t.name
+                        SELECT e.time, e.event, e.target_id, t.name
                         FROM pu_events e LEFT JOIN players t ON t.ucid = e.target_id
                         WHERE e.init_id = %s AND e.event = ANY(%s)
                         ORDER BY e.time DESC LIMIT 5
                     """, (ucid, list(BNB_EVENTS)))
-                    recent = [(r[0], r[1], float(r[2]), r[3]) for r in await cur.fetchall()]
+                    recent = [(r[0], r[1], r[2], r[3]) for r in await cur.fetchall()]
         except Exception as e:
             self.log.debug(f"Fh_Report: B&B detail not available: {e}")
             return None

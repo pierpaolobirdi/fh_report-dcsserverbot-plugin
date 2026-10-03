@@ -30,7 +30,7 @@ class _Cursor:
         if "GROUP BY event" in q:
             return [("kill", 2, 1, 1), ("friendly_fire", 3, 2, 0)]
         if "ORDER BY e.time DESC" in q:
-            return [(SEEN, "kill", 30.0, "Viper"), (SEEN, "friendly_fire", 12.0, None)]
+            return [(SEEN, "kill", "b" * 32, "Viper"), (SEEN, "friendly_fire", None, None)]
         return []
 
 
@@ -88,7 +88,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
     assert "**Today:** 3 · **Session:** 1" in bnb
-    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire") and "pts" not in bnb
+    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire → AI unit") and "pts" not in bnb
 
 
 def test_non_admin_cannot_query_others(saves_dir):
