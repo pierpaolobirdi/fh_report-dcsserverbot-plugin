@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.19"
+FH_REPORT_RELEASE = "14.1.20"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1571,6 +1571,19 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(name=combined_title,
                         value="_No stats yet — will appear after first flight._", inline=False)
 
+    # ── Blue-on-blue (from DCSServerBot's Punishment plugin) ────────────
+    if bnb and bnb.get("total"):
+        lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
+                 f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
+        for when, event, target_id, victim in bnb.get("recent") or []:
+            ts = int(calendar.timegm(when.timetuple()))
+            # No target UCID recorded = the victim was an AI unit.
+            who = f" → {_safe_code_span(victim)}" if victim else (
+                " → AI unit" if not target_id else " → unknown player")
+            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+        embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
+
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
     # Rank Points and rank name shown in the section title itself.
     career = data.get("career") or {}
@@ -1595,19 +1608,6 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(
             name=f"🏆 __Career Stats__ (R: {_fmt_num(credits)} — {get_rank(credits)})",
             value="\n".join(career_lines), inline=False)
-
-    # ── Blue-on-blue (from DCSServerBot's Punishment plugin) ────────────
-    if bnb and bnb.get("total"):
-        lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
-                 f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
-        for when, event, target_id, victim in bnb.get("recent") or []:
-            ts = int(calendar.timegm(when.timetuple()))
-            # No target UCID recorded = the victim was an AI unit.
-            who = f" → {_safe_code_span(victim)}" if victim else (
-                " → AI unit" if not target_id else " → unknown player")
-            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
-        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
-        embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
 
     # ── Mission ─────────────────────────────────────────────────────────
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)

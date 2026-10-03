@@ -275,7 +275,7 @@ Things to keep in mind, all coming from how the Punishment plugin records events
 - Only events that earn penalty points are stored, so an event configured with 0 points, or a player on the exemption list, leaves no record.
 - Old events are removed by the plugin's `decay` settings (60 days in the sample configuration), which also limits the rank card total.
 
-`/fh_report player` adds a **Blue-on-Blue (B&B)** section with the total (destroyed / damaged), today and session counts, and the latest events with date and victim (`AI unit` when it was not a player).
+`/fh_report player` adds a **Blue-on-Blue (B&B)** section (before Career Stats) with the total (destroyed / damaged), today and session counts, and the latest events with date and victim (`AI unit` when it was not a player).
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 
