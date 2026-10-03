@@ -35,6 +35,7 @@ echo.
 
 :: ── Detect DCSServerBot installation ─────────────────────────────────────────
 set "DCSSB_PATH="
+set "VERSIONS_SHOWN="
 
 for %%P in (
     "C:\DCSServerBot"
@@ -51,8 +52,9 @@ for %%P in (
 
 if not "!DCSSB_PATH!"=="" (
     echo Detected DCSServerBot at: !DCSSB_PATH!
+    call :show_versions
     set /p CONFIRM="Is this correct? (Y/N): "
-    if /i "!CONFIRM!"=="N" set "DCSSB_PATH="
+    if /i "!CONFIRM!"=="N" (set "DCSSB_PATH=") else set "VERSIONS_SHOWN=1"
 )
 
 if "!DCSSB_PATH!"=="" (
@@ -67,22 +69,12 @@ if not exist "!DCSSB_PATH!\config\main.yaml" (
     exit /b 1
 )
 
-:: ── Version already installed (if any) ───────────────────────────────────────
-set "OLD_VER="
-set "OLD_FILE=!DCSSB_PATH!\plugins\fh_report\commands.py"
-if exist "!OLD_FILE!" set "OLD_VER=unknown (no version in the installed file)"
-if exist "!OLD_FILE!" for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "!OLD_FILE!" 2^>nul') do set "OLD_VER=%%~V"
-
-echo.
-echo Installing Fh_Report !NEWC!Ver. !NEW_VER!!OFF! to: !DCSSB_PATH!
-if "!OLD_VER!"=="" (
-    echo Installed now: none ^(new install^)
-) else if "!OLD_VER!"=="!NEW_VER!" (
-    echo Installed now: !NEWC!Ver. !OLD_VER!!OFF! ^(same version - files will be refreshed^)
-) else (
-    echo Installed now: !OLDC!Ver. !OLD_VER!!OFF! --^> updating to !NEWC!Ver. !NEW_VER!!OFF!
+:: A path typed by hand: show installed/new versions now (a detected path that
+:: was confirmed already showed them before the question).
+if not defined VERSIONS_SHOWN (
+    echo.
+    call :show_versions
 )
-echo.
 
 :: ── Copy plugin files ─────────────────────────────────────────────────────────
 echo [1/3] Copying plugin files...
@@ -161,3 +153,22 @@ echo   2. Edit config\plugins\fh_report.yaml to configure your servers and chann
 echo   3. Restart DCSServerBot
 echo.
 pause
+exit /b 0
+
+:: ── Show the version installed in !DCSSB_PATH! and the one about to be installed
+:show_versions
+set "OLD_VER="
+set "OLD_FILE=!DCSSB_PATH!\plugins\fh_report\commands.py"
+if exist "!OLD_FILE!" set "OLD_VER=unknown (no version in the installed file)"
+if exist "!OLD_FILE!" for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "!OLD_FILE!" 2^>nul') do set "OLD_VER=%%~V"
+
+echo Installing Fh_Report !NEWC!Ver. !NEW_VER!!OFF! to: !DCSSB_PATH!
+if "!OLD_VER!"=="" (
+    echo Installed now: none ^(new install^)
+) else if "!OLD_VER!"=="!NEW_VER!" (
+    echo Installed now: !NEWC!Ver. !OLD_VER!!OFF! ^(same version - files will be refreshed^)
+) else (
+    echo Installed now: !OLDC!Ver. !OLD_VER!!OFF! --^> updating to !NEWC!Ver. !NEW_VER!!OFF!
+)
+echo.
+exit /b 0
