@@ -3024,8 +3024,6 @@ class Fh_Report(Plugin):
         basename = os.path.basename(persistence_file)
         raw = await _read_fhr_json(node, saves_dir, "session.json")
         old = _session_migrate(raw)
-        # 14.1.28 left this behind (file creation probe, since removed)
-        await _remove_legacy_file(source_node, _fhr_path(saves_dir, "save_created.json"))
         absent = saves_dir in self._campaign_absent
         self._campaign_absent.discard(saves_dir)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
