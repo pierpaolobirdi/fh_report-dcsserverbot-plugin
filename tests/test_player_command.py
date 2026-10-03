@@ -20,6 +20,7 @@ class _Cursor:
 
     async def execute(self, query, args):
         self.pool.queries.append(" ".join(query.split()))
+        self.pool.full_queries.append((query, args))
 
     async def fetchone(self):
         q = self.pool.queries[-1]
@@ -43,7 +44,7 @@ class _Connection(_Cursor):
 
 class _Pool:
     def __init__(self):
-        self.connections, self.queries = 0, []
+        self.connections, self.queries, self.full_queries = 0, [], []
 
     def connection(self):
         self.connections += 1
@@ -96,7 +97,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
     assert "**Session:** 1 ·" in bnb and "since" not in bnb and "**Today:** 3" in bnb
     assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
-    assert "_Showing the latest 2 of 5 incidents._" in bnb
+    assert "Showing" not in bnb                  # 2 incidents in the session, all of them listed
     assert "Team kill → `Viper`" in bnb and "Friendly fire → AI unit (T-72B)" in bnb and "pts" not in bnb
     assert not any("Penalties" in f.name for f in sent[0].fields)   # show_punishment is off
 
@@ -174,8 +175,9 @@ def test_bnb_list_is_trimmed_to_the_field_limit_and_says_so():
     value = next(f.value for f in e.fields if "Blue-on-Blue" in f.name)
     assert len(value) <= 1024
     shown = value.count("Friendly fire")
-    assert 0 < shown < 10 and f"_Showing the latest {shown} of 25 incidents._" in value
+    assert 0 < shown < 10 and f"_Showing only the latest {shown}._" in value
     bnb["recent"], bnb["total"] = recent[:3], 3
+    bnb["more"] = False
     value = next(f.value for f in commands._build_player_report_embed(
         "P", {}, None, None, 0, 0, {}, "ok", bnb=bnb).fields if "Blue-on-Blue" in f.name)
     assert "Showing" not in value and value.count("Friendly fire") == 3
@@ -221,3 +223,25 @@ def test_bob_row_is_left_out_when_zero_or_unknown():
 def test_bob_is_not_mistaken_for_a_mission_objective():
     assert not commands._is_mission_stat("BoB")
     assert commands._build_session_card({"Air": 1, "BoB": 3}).count("Msn") == 0
+
+
+def test_the_incident_list_is_this_server_and_this_session_only(saves_dir):
+    pool, sent = _invoke(saves_dir, A, admin=True)
+    sql, args = next((q, a) for q, a in pool.full_queries if "ORDER BY i.time DESC" in q)
+    assert "i.server_name = %(server)s AND i.time >= %(since)s" in sql
+    assert args["server"] == "Public" and args["since"].isoformat() == "2026-10-03T10:00:00"   # the session start
+    assert args["limit"] == commands.BNB_RECENT + 1                                           # one extra, to know there is more
+
+
+def test_more_than_ten_in_the_session_says_only_the_latest_are_shown():
+    from datetime import datetime
+    when = datetime(2026, 10, 3, 12, 0)
+    bnb = {"total": 40, "day": 12, "session": 12, "destroyed": 2, "damaged": 38, "more": True,
+           "recent": [(when, "hit", None, None, "T-72B")] * 10}
+    value = next(f.value for f in commands._build_player_report_embed(
+        "P", {}, None, None, 0, 0, {}, "ok", bnb=bnb).fields if "Blue-on-Blue" in f.name)
+    assert value.endswith("_Showing only the latest 10._") and value.count("Friendly fire") == 10
+    bnb["more"] = False
+    value = next(f.value for f in commands._build_player_report_embed(
+        "P", {}, None, None, 0, 0, {}, "ok", bnb=bnb).fields if "Blue-on-Blue" in f.name)
+    assert "Showing" not in value

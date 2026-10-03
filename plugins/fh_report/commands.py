@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.35"
+FH_REPORT_RELEASE = "14.1.36"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1661,7 +1661,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         # Fit Discord's 1024-character field value: drop the oldest lines first,
         # keeping room for the note that says the list is partial.
         def _render(n: int) -> str:
-            note = [f"_Showing the latest {n} of {bnb['total']} incidents._"] if n < bnb["total"] else []
+            partial = n < len(events) or bnb.get("more")
+            note = [f"_Showing only the latest {n}._"] if partial else []
             return "\n".join(head + events[:n] + note)
         shown = len(events)
         while shown > 0 and len(_render(shown)) > 1024:
@@ -3196,7 +3197,7 @@ class Fh_Report(Plugin):
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
                     params = {"ucids": [ucid], "server": server.name, "day": day_from,
-                              "session": session or datetime.max, "limit": BNB_RECENT}
+                              "session": session or datetime.max}
                     try:
                         await cur.execute(_BNB_INCIDENTS_SQL + """
                             SELECT kind, COUNT(*),
@@ -3209,15 +3210,18 @@ class Fh_Report(Plugin):
                             await cur.execute(_BNB_INCIDENTS_SQL + """
                                 SELECT i.time, i.kind, i.target_id, t.name, i.target_type
                                 FROM incidents i LEFT JOIN players t ON t.ucid = i.target_id
+                                WHERE i.server_name = %(server)s AND i.time >= %(since)s
                                 ORDER BY i.time DESC LIMIT %(limit)s
-                            """, params)
+                            """, {**params, "since": session or datetime.min, "limit": BNB_RECENT + 1})
+                            rows = [tuple(r) for r in await cur.fetchall()]   # this server, this session
                             bnb = {
                                 "total":     sum(v[0] for v in by_kind.values()),
                                 "day":       sum(v[1] for v in by_kind.values()),
                                 "session":   sum(v[2] for v in by_kind.values()),
                                 "destroyed": by_kind.get("kill", (0, 0, 0))[0],
                                 "damaged":   by_kind.get("hit", (0, 0, 0))[0],
-                                "recent":    [tuple(r) for r in await cur.fetchall()],
+                                "recent":    rows[:BNB_RECENT],
+                                "more":      len(rows) > BNB_RECENT,
                                 "session_known": session is not None,
                             }
                     except Exception as e:
