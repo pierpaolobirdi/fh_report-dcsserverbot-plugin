@@ -88,7 +88,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
     assert "**Today:** 3 · **Session:** 1" in bnb
-    assert "Team kill (30 pts) — `Viper`" in bnb and "Friendly fire (12 pts)" in bnb
+    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire") and "pts" not in bnb
 
 
 def test_non_admin_cannot_query_others(saves_dir):

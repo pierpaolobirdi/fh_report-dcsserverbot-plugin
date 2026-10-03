@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.17"
+FH_REPORT_RELEASE = "14.1.18"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1602,8 +1602,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                  f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
         for when, event, points, victim in bnb.get("recent") or []:
             ts = int(calendar.timegm(when.timetuple()))
-            who = f" — {_safe_code_span(victim)}" if victim else ""
-            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)} ({points:g} pts){who}")
+            who = f" → {_safe_code_span(victim)}" if victim else ""
+            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
         embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
         embed.add_field(name="⚠️ __Blue-on-Blue (B&B)__", value="\n".join(lines)[:1024], inline=False)
 
