@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.11"
+FH_REPORT_RELEASE = "14.1.12"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1597,7 +1597,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
-    embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only player report")
+    embed.set_footer(text=f"{_version_text()} · Read-only player report")
     return embed
 
 
@@ -1999,13 +1999,18 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    footer_lines = [f"FH_Report {FH_REPORT_RELEASE}"]
+    footer_lines = [_version_text()]
     if player_cmd_hint:
         footer_lines.append(player_cmd_hint)
     footer_lines.append(f"{campaign_name} • Updated automatically")
     embed.set_footer(text="\n".join(footer_lines))
     embed.timestamp = datetime.now(timezone.utc)
     return _trim_embed(embed)
+
+
+def _version_text() -> str:
+    """How the version is written everywhere it shows (embed footers, log)."""
+    return f"FH_Report Ver. {FH_REPORT_RELEASE}"
 
 
 def _show_map(cfg: dict) -> bool:
@@ -3512,10 +3517,10 @@ class FH_Report(Plugin):
             color=0xF1C40F, timestamp=datetime.now(timezone.utc)
         )
         _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only historical report")
+        embed.set_footer(text=f"{_version_text()} · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
 async def setup(bot: DCSServerBot):
     await bot.add_cog(FH_Report(bot))
-    log.info(f"  => FH_Report v{FH_REPORT_RELEASE} loaded.")
+    log.info(f"  => {_version_text()} loaded.")

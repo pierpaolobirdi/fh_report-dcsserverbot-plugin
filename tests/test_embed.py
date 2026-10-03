@@ -116,3 +116,13 @@ def test_embed_respects_discord_limits():
     assert len(embed.fields) <= 25
     assert all(len(f.value) <= 1024 for f in embed.fields)
     assert commands._embed_size(embed) <= commands.DISCORD_EMBED_LIMIT
+
+
+def test_version_is_written_as_fh_report_ver_everywhere():
+    assert commands._version_text() == f"FH_Report Ver. {commands.FH_REPORT_RELEASE}"
+    main = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
+    assert main.footer.text.splitlines()[0] == commands._version_text()
+    notstarted = commands.build_not_started_embed({}, {"campaign_name": "C"}, "R", {})
+    assert notstarted.footer.text.splitlines()[0] == commands._version_text()
+    player = commands._build_player_report_embed("P", {"credits": 1}, None, None, 0, 0, {}, "ok")
+    assert player.footer.text.startswith(commands._version_text() + " · ")
