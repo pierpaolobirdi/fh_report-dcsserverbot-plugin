@@ -10,12 +10,14 @@ set "NEW_VER=unknown"
 for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "%SCRIPT_DIR%plugins\fh_report\commands.py" 2^>nul') do set "NEW_VER=%%~V"
 
 :: ── Colors (Windows 10/11 only; empty on older systems so no stray characters)
-:: NEWC new version, OLDC previous version, OKC/ERRC/ACTC status words (bright, readable on black)
+:: NEWC new version, OLDC previous version, OKC/ERRC/ACTC status words, RSTC restart notice
+:: (all bright, readable on black)
 set "NEWC="
 set "OLDC="
 set "OKC="
 set "ERRC="
 set "ACTC="
+set "RSTC="
 set "OFF="
 ver | findstr /C:" 10." > nul && (
     for /f %%E in ('echo prompt $E ^| cmd') do set "ESC=%%E"
@@ -24,6 +26,7 @@ ver | findstr /C:" 10." > nul && (
     set "OKC=!ESC![1;94m"
     set "ERRC=!ESC![1;91m"
     set "ACTC=!ESC![1;96m"
+    set "RSTC=!ESC![1;93m"
     set "OFF=!ESC![0m"
 )
 
@@ -146,6 +149,8 @@ setlocal DisableDelayedExpansion
 echo  %NEWC%Installation complete!%OFF% Fh_Report %NEWC%Ver. %NEW_VER%%OFF%
 endlocal
 echo ============================================================
+echo.
+echo !RSTC!RESTART REQUIRED!OFF! - Restart DCSServerBot to load !NEWC!Ver. !NEW_VER!!OFF! ^(the running bot keeps the old code until then^)
 echo.
 echo Next steps:
 echo   1. Make sure 'fh_report' is listed under opt_plugins in config\main.yaml
