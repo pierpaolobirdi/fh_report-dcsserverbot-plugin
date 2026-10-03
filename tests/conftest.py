@@ -1,4 +1,4 @@
-"""Test setup: FH_Report runs against small stubs of discord.py and
+"""Test setup: Fh_Report runs against small stubs of discord.py and
 DCSServerBot (tests/stubs), so no bot, Discord or database is needed.
 
     python -m pytest tests
@@ -83,7 +83,7 @@ class FileNode:
 
 
 def make_plugin(**attrs):
-    p = commands.FH_Report.__new__(commands.FH_Report)
+    p = commands.Fh_Report.__new__(commands.Fh_Report)
     p.log = logging.getLogger("fh_report.tests")
     p._message_ids, p._layout_cycle_index, p._cycle_punishment = {}, {}, None
     p._last_maps, p._map_probed = {}, set()

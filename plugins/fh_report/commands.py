@@ -1,5 +1,5 @@
 """
-FH_Report Plugin for DCSServerBot
+Fh_Report Plugin for DCSServerBot
 Reads Foothold campaign save files and posts/updates a Discord embed
 with front-line status and pilot leaderboard. No database required.
 """
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.12"
+FH_REPORT_RELEASE = "14.1.13"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -220,12 +220,12 @@ def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str 
         interval = int(configured)
     except (TypeError, ValueError):
         return default, (
-            f"FH_Report: DEFAULT.update_interval ({configured!r}) is not a valid "
+            f"Fh_Report: DEFAULT.update_interval ({configured!r}) is not a valid "
             f"integer — falling back to the default of {default}s."
         )
     if interval <= 0:
         return default, (
-            f"FH_Report: DEFAULT.update_interval ({interval}) must be greater than "
+            f"Fh_Report: DEFAULT.update_interval ({interval}) must be greater than "
             f"zero — falling back to the default of {default}s."
         )
     return interval, None
@@ -318,7 +318,7 @@ async def _ensure_fhc_dir(node, saves_dir: str) -> None:
         elif os.path.isdir(saves_dir):          # older DCSSB: local nodes only
             os.makedirs(fhc, exist_ok=True)
     except Exception as e:
-        log.debug(f"FH_Report: could not create {fhc}: {e}")
+        log.debug(f"Fh_Report: could not create {fhc}: {e}")
 
 
 async def _remove_file(node, path: str) -> None:
@@ -331,7 +331,7 @@ async def _remove_file(node, path: str) -> None:
         elif os.path.isfile(path):
             os.remove(path)
     except Exception as e:
-        log.debug(f"FH_Report: could not remove {path}: {e}")
+        log.debug(f"Fh_Report: could not remove {path}: {e}")
 
 
 async def find_persistence_file(saves_dir: str, node) -> str | None:
@@ -485,9 +485,9 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
             if filepath not in _unsupported_version_warned:
                 _unsupported_version_warned.add(filepath)
                 log.warning(
-                    f"FH_Report: {filepath} reports playerStatsIdentityVersion={version}, "
-                    f"which this version of FH_Report doesn't understand yet — "
-                    f"please update FH_Report. Skipping this file for now."
+                    f"Fh_Report: {filepath} reports playerStatsIdentityVersion={version}, "
+                    f"which this version of Fh_Report doesn't understand yet — "
+                    f"please update Fh_Report. Skipping this file for now."
                 )
             return {}, {}, {}
 
@@ -544,7 +544,7 @@ async def hot_write_waypoints(server) -> None:
         "  local _p = lfs.writedir() .. [[Missions/Saves/.fhc/fhc_waypoints.lua]] "
         "  local _f = io.open(_p, 'w') "
         "  if _f then "
-        "    _f:write([[-- FH_Report/FH_Control waypoint cache\n]]) "
+        "    _f:write([[-- Fh_Report/FH_Control waypoint cache\n]]) "
         "    _f:write([[WaypointList = {\n]]) "
         "    for _k,_v in pairs(WaypointList) do "
         "      _f:write([[  [\"]] .. _k .. [[\"] = \"]] .. _v .. [[\",\n]]) "
@@ -603,9 +603,9 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
         if filepath not in _unsupported_version_warned:
             _unsupported_version_warned.add(filepath)
             log.warning(
-                f"FH_Report: {filepath} reports playerIdentityVersion={version}, "
-                f"which this version of FH_Report doesn't understand yet — "
-                f"please update FH_Report. Skipping this file for now."
+                f"Fh_Report: {filepath} reports playerIdentityVersion={version}, "
+                f"which this version of Fh_Report doesn't understand yet — "
+                f"please update Fh_Report. Skipping this file for now."
             )
         return {}
 
@@ -685,7 +685,7 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _dedup_write_warned.discard(target_path)
             return True
         elif log:
-            log.debug(f"FH_Report: node.write_file (new API) returned {status!r} for {target_path}")
+            log.debug(f"Fh_Report: node.write_file (new API) returned {status!r} for {target_path}")
     except TypeError:
         # Old signature (filename, url, overwrite): pre-3.0.4.28 DCSServerBot.
         global _old_dcssb_api_warned
@@ -693,16 +693,16 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _old_dcssb_api_warned = True
             if log:
                 log.info(
-                    "FH_Report: detected an older DCSServerBot version (older "
+                    "Fh_Report: detected an older DCSServerBot version (older "
                     "than 3.0.4.28) — falling back to local file writes, which "
                     "work fine for local/master-node instances. Update "
                     "DCSServerBot to 3.0.4.28 or later to enable full "
-                    "remote-agent-node compatibility for FH_Report's file-write "
+                    "remote-agent-node compatibility for Fh_Report's file-write "
                     "features. This message won't repeat."
                 )
     except Exception as e:
         if log:
-            log.debug(f"FH_Report: node.write_file (new API) failed for {target_path}: {e}")
+            log.debug(f"Fh_Report: node.write_file (new API) failed for {target_path}: {e}")
     finally:
         if tmp_local_path:
             try:
@@ -723,17 +723,17 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _dedup_write_warned.add(target_path)
             if log:
                 log.error(
-                    f"FH_Report: could not write {target_path} via either the new "
+                    f"Fh_Report: could not write {target_path} via either the new "
                     f"node.write_file() API or a local write ({e}). If this "
                     f"instance runs on a remote agent node, please update "
                     f"DCSServerBot to 3.0.4.28 or later (currently on the 'dev' "
                     f"branch as of writing) — it adds the remote file-write "
-                    f"support FH_Report needs for this. This message won't repeat "
+                    f"support Fh_Report needs for this. This message won't repeat "
                     f"until the write succeeds, or fails again after that."
                 )
         else:
             if log:
-                log.debug(f"FH_Report: write to {target_path} failed again: {e}")
+                log.debug(f"Fh_Report: write to {target_path} failed again: {e}")
         return False
 
 
@@ -766,7 +766,7 @@ async def _remove_legacy_file(node, path: str) -> None:
         return
     _legacy_cleaned.add(path)
     await _remove_file(node, path)
-    log.debug(f"FH_Report: legacy file {path} cleaned up (replaced by its {FHR_PREFIX} copy)")
+    log.debug(f"Fh_Report: legacy file {path} cleaned up (replaced by its {FHR_PREFIX} copy)")
 
 
 async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> dict:
@@ -798,7 +798,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         # None = couldn't tell (timeout, permissions...): not assumed missing.
         if log:
             log.debug(
-                f"FH_Report: write self-test skipped for {saves_dir} — the save "
+                f"Fh_Report: write self-test skipped for {saves_dir} — the save "
                 f"folder doesn't exist yet (mission/server probably hasn't run "
                 f"yet). Will retry on a later cycle once it exists."
             )
@@ -807,10 +807,10 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     _write_self_tested.add(saves_dir)
 
     test_path = os.path.join(saves_dir, "fhrep_write_test.tmp")
-    test_content = b"FH_Report write self-test - safe to delete"
+    test_content = b"Fh_Report write self-test - safe to delete"
 
     if log:
-        log.debug(f"FH_Report: running one-time write self-test for {saves_dir}")
+        log.debug(f"Fh_Report: running one-time write self-test for {saves_dir}")
 
     ok = await write_bytes_to_node(node, test_path, test_content, log=log)
     if not ok:
@@ -823,15 +823,15 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         if readback != test_content:
             if log:
                 log.warning(
-                    f"FH_Report: write self-test for {saves_dir} wrote successfully "
+                    f"Fh_Report: write self-test for {saves_dir} wrote successfully "
                     f"but read back different content than expected — file writes "
                     f"may not be fully reliable for this instance."
                 )
         elif log:
-            log.debug(f"FH_Report: write self-test for {saves_dir} passed (write + read-back verified)")
+            log.debug(f"Fh_Report: write self-test for {saves_dir} passed (write + read-back verified)")
     except Exception as e:
         if log:
-            log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
+            log.debug(f"Fh_Report: write self-test for {saves_dir}: could not read back test file: {e}")
 
     await _remove_file(node, test_path)
 
@@ -891,7 +891,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
         if len(names_with_ucid) != 1:
             if len(names_with_ucid) > 1:
                 log.debug(
-                    f"FH_Report: deduplicate_ranks: '{base_name}' has "
+                    f"Fh_Report: deduplicate_ranks: '{base_name}' has "
                     f"{len(names_with_ucid)} raw names each with their own "
                     f"live UCID ({names_with_ucid}) — treating as distinct "
                     f"players who share a stripped base name. Skipping merge."
@@ -908,7 +908,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
         for raw in raw_names:
             m = _find_entry(ranks_data, raw)
             if not m:
-                log.warning(f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
+                log.warning(f"Fh_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
                 continue
             _, end_pos = _lua_block(ranks_data, m.end() - 1)
             line_start = ranks_data.rfind("\n", 0, m.start())
@@ -938,7 +938,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
 
         modified = True
         log.info(
-            f"FH_Report: merged duplicate entries {raw_names} -> '{canonical}' "
+            f"Fh_Report: merged duplicate entries {raw_names} -> '{canonical}' "
             f"(credits: {total_credits}, lastSeen: {max_last_seen})"
         )
 
@@ -951,7 +951,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     recheck = (await node.read_file(ranks_file)).decode("utf-8")
     if recheck != original:
         log.warning(
-            f"FH_Report: {ranks_file} changed since read (likely written by "
+            f"Fh_Report: {ranks_file} changed since read (likely written by "
             f"Foothold) — skipping deduplication this cycle, will retry next."
         )
         return False
@@ -2010,7 +2010,7 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
 
 def _version_text() -> str:
     """How the version is written everywhere it shows (embed footers, log)."""
-    return f"FH_Report Ver. {FH_REPORT_RELEASE}"
+    return f"Fh_Report Ver. {FH_REPORT_RELEASE}"
 
 
 def _show_map(cfg: dict) -> bool:
@@ -2279,7 +2279,7 @@ def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
 class _FHServerTransformer(utils.ServerTransformer):
     """DCSServerBot's ServerTransformer (public server names, hides
     unregistered servers, honours managed_by, pre-selects the channel's
-    server), filtered to servers that have an FH_Report block.
+    server), filtered to servers that have an Fh_Report block.
     """
 
     async def autocomplete(self, interaction: discord.Interaction,
@@ -2299,7 +2299,7 @@ class _FHServerTransformer(utils.ServerTransformer):
             return filtered
 
         # super() short-circuits empty input to the channel's server; if that one
-        # has no FH_Report block, list every eligible server instead.
+        # has no Fh_Report block, list every eligible server instead.
         is_admin = self.is_admin(interaction)
         out: list[app_commands.Choice[str]] = []
         for name, srv in interaction.client.servers.items():
@@ -2327,7 +2327,7 @@ def _load_hook():
         spec.loader.exec_module(mod)
         return mod, True
     except Exception as e:
-        log.warning(f"FH_Report: fh_hook load error: {e}")
+        log.warning(f"Fh_Report: fh_hook load error: {e}")
         return None, False
 
 _fh_hook, _HAS_HOOK = _load_hook()
@@ -2361,7 +2361,7 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
-class FH_Report(Plugin):
+class Fh_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
     Supports multiple server instances defined in fh_report.yaml.
     Uses server.node.read_file() so it works transparently in multi-node
@@ -2418,7 +2418,7 @@ class FH_Report(Plugin):
             with open(self._message_ids_file, "w", encoding="utf-8") as f:
                 json.dump(self._message_ids, f, indent=2)
         except OSError as e:
-            self.log.error(f"FH_Report: could not save message IDs: {e}")
+            self.log.error(f"Fh_Report: could not save message IDs: {e}")
 
     # ── Map of the mission (from DCSServerBot, kept in memory) ─────────────
 
@@ -2440,7 +2440,7 @@ class FH_Report(Plugin):
             try:
                 theatre = await asyncio.wait_for(server.get_current_mission_theatre(), MAP_PROBE_TIMEOUT)
             except Exception as e:
-                self.log.debug(f"FH_Report [{instance_name}]: could not read the map from the mission file: {e!r}")
+                self.log.debug(f"Fh_Report [{instance_name}]: could not read the map from the mission file: {e!r}")
                 theatre = None
             if isinstance(theatre, str) and theatre.strip():
                 self._last_maps[instance_name] = theatre.strip()
@@ -2488,7 +2488,7 @@ class FH_Report(Plugin):
             if cfg_key not in _unmatched_instance_warned:
                 _unmatched_instance_warned.add(cfg_key)
                 self.log.warning(
-                    f"FH_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
+                    f"Fh_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
                     f"any configured DCSServerBot instance name — check the instance name "
                     f"in nodes.yaml. This server block will be skipped until fixed."
                 )
@@ -2508,7 +2508,7 @@ class FH_Report(Plugin):
                 await self._update_server(server, cfg)
             except Exception as e:
                 self.log.error(
-                    f"FH_Report [{server.instance.name}]: unexpected error: {e}", exc_info=True
+                    f"Fh_Report [{server.instance.name}]: unexpected error: {e}", exc_info=True
                 )
 
     @updater.before_loop
@@ -2693,7 +2693,7 @@ class FH_Report(Plugin):
 
         elif date_reset_due:
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
-            self.log.debug(f"FH_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
+            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
 
             # Close the day for the Podium from the current snapshot/carry_over (which
             # already include earlier mid-day swaps); last_daily_saved covers a swap
@@ -2738,7 +2738,7 @@ class FH_Report(Plugin):
             # NEW file, so today's earnings come from last_daily_saved. Fold them into
             # carry_over and rebase the snapshot onto the new file.
             self.log.debug(
-                f"FH_Report: mid-day mission/map reset detected for {saves_dir} "
+                f"Fh_Report: mid-day mission/map reset detected for {saves_dir} "
                 f"(filename_changed={filename_changed}, data_vanished={data_vanished}, "
                 f"campaign_restarted={campaign_restarted}) — carrying today's totals "
                 f"forward, no Podium entry."
@@ -2836,7 +2836,7 @@ class FH_Report(Plugin):
                     rows = await cur.fetchall()
                     return {row[0]: float(row[1]) for row in rows}
         except Exception as e:
-            self.log.debug(f"FH_Report: punishment points not available: {e}")
+            self.log.debug(f"Fh_Report: punishment points not available: {e}")
             return {}
 
     async def _update_server(self, server, cfg: dict):
@@ -2853,12 +2853,12 @@ class FH_Report(Plugin):
 
         channel_id    = _single_channel_id(cfg.get("channel_id"))
         if not channel_id:
-            self.log.warning(f"FH_Report [{instance_name}]: channel_id not configured.")
+            self.log.warning(f"Fh_Report [{instance_name}]: channel_id not configured.")
             return
 
         channel = self.bot.get_channel(int(channel_id))
         if not channel:
-            self.log.warning(f"FH_Report [{instance_name}]: channel {channel_id} not found.")
+            self.log.warning(f"Fh_Report [{instance_name}]: channel {channel_id} not found.")
             return
 
         saves_dir = await _resolve_saves_dir(server, cfg)
@@ -2877,7 +2877,7 @@ class FH_Report(Plugin):
             return
         if instance_name in _missing_save_warned:
             _missing_save_warned.discard(instance_name)
-            self.log.debug(f"FH_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
+            self.log.debug(f"Fh_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
 
         ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
         ranks_missing = False
@@ -2886,7 +2886,7 @@ class FH_Report(Plugin):
             ranks_source = await node.read_file(ranks_file)
         except FileNotFoundError:
             self.log.debug(
-                f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found — "
+                f"Fh_Report [{instance_name}]: Foothold_Ranks.lua not found — "
                 f"showing zone status without leaderboard."
             )
             ranks_missing = True
@@ -2897,7 +2897,7 @@ class FH_Report(Plugin):
                 if await deduplicate_ranks(ranks_file, persistence_file, source_node, ranks_source):
                     node.invalidate(ranks_file)
             except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
+                self.log.error(f"Fh_Report [{instance_name}]: deduplication error: {e}")
 
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
@@ -2905,7 +2905,7 @@ class FH_Report(Plugin):
             players        = {} if ranks_missing else await parse_ranks(ranks_file, excluded_ucids, node)
             campaign_stats, session_stats_raw, name_to_ucid_native = await parse_player_stats(persistence_file, node)
         except Exception as e:
-            self.log.error(f"FH_Report [{instance_name}]: error parsing data: {e}")
+            self.log.error(f"Fh_Report [{instance_name}]: error parsing data: {e}")
             return
 
         # Optional private hook — post-processes players dict
@@ -2913,7 +2913,7 @@ class FH_Report(Plugin):
             try:
                 players = _fh_hook.post_process(players, cfg, instance_name, campaign_stats)
             except Exception as e:
-                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+                self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
 
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
@@ -2975,11 +2975,11 @@ class FH_Report(Plugin):
                     await asyncio.sleep(1.5)
                     node.invalidate(wp_cache_file)
                 except Exception as e:
-                    self.log.warning(f"FH_Report [{instance_name}]: waypoint hot-write failed: {e}")
+                    self.log.warning(f"Fh_Report [{instance_name}]: waypoint hot-write failed: {e}")
             try:
                 waypoint_map = await load_waypoint_list(saves_dir, node)
             except Exception as e:
-                self.log.warning(f"FH_Report [{instance_name}]: could not load waypoint cache: {e}")
+                self.log.warning(f"Fh_Report [{instance_name}]: could not load waypoint cache: {e}")
                 waypoint_map = {}
 
         u2rn = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
@@ -3012,7 +3012,7 @@ class FH_Report(Plugin):
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
             self.log.debug(
-                f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
+                f"Fh_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
                 f"'campaign not started' until the Foothold mission creates its save files."
             )
         try:
@@ -3024,7 +3024,7 @@ class FH_Report(Plugin):
             try:
                 players = _fh_hook.post_process(players, cfg, instance_name, {})
             except Exception as e:
-                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+                self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
         punishment_points = {}
         if players and _bool_cfg(cfg.get("show_punishment")):
             if self._cycle_punishment is None:
@@ -3046,11 +3046,11 @@ class FH_Report(Plugin):
                     await channel.get_partial_message(msg_id).edit(embed=embed)
                     return
                 except discord.NotFound:
-                    self.log.warning(f"FH_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
+                    self.log.warning(f"Fh_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
                     self._message_ids.pop(instance_name, None)
 
             if msg is None:
-                # Unknown message id: adopt an existing FH_Report message in the channel
+                # Unknown message id: adopt an existing Fh_Report message in the channel
                 # before posting, so duplicate posts can't happen.
                 campaign_name  = cfg.get("campaign_name", "Foothold Campaign")
                 expected_title = f"📡  {campaign_name}"
@@ -3061,7 +3061,7 @@ class FH_Report(Plugin):
                         self._message_ids[instance_name] = msg.id
                         self._save_message_ids()
                         self.log.info(
-                            f"FH_Report [{instance_name}]: adopted existing message "
+                            f"Fh_Report [{instance_name}]: adopted existing message "
                             f"{msg.id} in channel {channel_id} (message_ids.json was out of sync)."
                         )
                         break
@@ -3075,7 +3075,7 @@ class FH_Report(Plugin):
             self._save_message_ids()
 
         except discord.HTTPException as e:
-            self.log.error(f"FH_Report [{instance_name}]: Discord error: {e}")
+            self.log.error(f"Fh_Report [{instance_name}]: Discord error: {e}")
 
     # ── /fh_report player ────────────────────────────────────────────────
 
@@ -3136,7 +3136,7 @@ class FH_Report(Plugin):
         """
         configured = self._configured_instances()
         if not configured:
-            return None, "❌ FH_Report has no servers configured."
+            return None, "❌ Fh_Report has no servers configured."
 
         if len(configured) == 1:
             server_name = configured[0]
@@ -3156,7 +3156,7 @@ class FH_Report(Plugin):
             else:
                 srv = server_param
             if srv.instance.name not in configured:
-                return None, f"❌ FH_Report isn't configured for **{srv.name}**."
+                return None, f"❌ Fh_Report isn't configured for **{srv.name}**."
             server_name = srv.instance.name
 
         cfg = self._merged_cfg(server_name)
@@ -3522,5 +3522,5 @@ class FH_Report(Plugin):
 
 
 async def setup(bot: DCSServerBot):
-    await bot.add_cog(FH_Report(bot))
+    await bot.add_cog(Fh_Report(bot))
     log.info(f"  => {_version_text()} loaded.")

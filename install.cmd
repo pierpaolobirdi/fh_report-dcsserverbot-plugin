@@ -6,7 +6,7 @@ set "SCRIPT_DIR=%~dp0"
 
 echo.
 echo ================================================
-echo  FH_Report Plugin Installer for DCSServerBot
+echo  Fh_Report Plugin Installer for DCSServerBot
 echo ================================================
 echo.
 
@@ -45,7 +45,7 @@ if not exist "!DCSSB_PATH!\config\main.yaml" (
 )
 
 echo.
-echo Installing FH_Report to: !DCSSB_PATH!
+echo Installing Fh_Report to: !DCSSB_PATH!
 echo.
 
 :: ── Copy plugin files ─────────────────────────────────────────────────────────

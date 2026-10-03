@@ -119,7 +119,7 @@ def test_embed_respects_discord_limits():
 
 
 def test_version_is_written_as_fh_report_ver_everywhere():
-    assert commands._version_text() == f"FH_Report Ver. {commands.FH_REPORT_RELEASE}"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
     main = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
     assert main.footer.text.splitlines()[0] == commands._version_text()
     notstarted = commands.build_not_started_embed({}, {"campaign_name": "C"}, "R", {})

@@ -1,5 +1,5 @@
 """
-FH_Report config migration script.
+Fh_Report config migration script.
 Called by install.bat when fh_report.yaml already exists.
 Reads the existing config, adds any missing variables with their default values,
 and warns about any obsolete variables found in server blocks.
@@ -10,7 +10,7 @@ import re
 
 
 # ── Canonical header comment for fh_report.yaml ───────────────────────────────
-HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
+HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 # Place this file in: config/plugins/fh_report.yaml
 #
 # SERVER IDENTIFICATION:
@@ -493,10 +493,10 @@ def rename_legacy_keys(content: str, renames: dict) -> tuple[str, list[str]]:
     return content, changes
 
 
-# Keys whose feature was removed from FH_Report entirely — deleted from
+# Keys whose feature was removed from Fh_Report entirely — deleted from
 # DEFAULT and every server block (live or commented-out), not just flagged.
 RETIRED_KEYS = {
-    "inactivity_penalty": "inactivity penalty moved out of FH_Report",
+    "inactivity_penalty": "inactivity penalty moved out of Fh_Report",
 }
 
 
@@ -677,7 +677,7 @@ def main():
         for item in podium_rename_changes:
             print(f"    {item}")
 
-    # ── 1d. Remove keys of features retired from FH_Report ──────────────────
+    # ── 1d. Remove keys of features retired from Fh_Report ──────────────────
     content, retired_changes = remove_retired_keys(content)
     if retired_changes:
         print("  Removed retired variables:")
@@ -892,7 +892,7 @@ def main():
     if obsolete:
         print()
         print("WARNING: The following variables were found in your server blocks")
-        print("         but are no longer used in this version of FH_Report.")
+        print("         but are no longer used in this version of Fh_Report.")
         print("         They have no effect and can be safely removed or commented out:")
         for var in obsolete:
             print(f"  - {var}")

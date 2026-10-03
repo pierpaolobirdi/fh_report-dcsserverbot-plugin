@@ -1,3 +1,3 @@
-from .commands import FH_Report
+from .commands import Fh_Report
 
 __version__ = "1.0"

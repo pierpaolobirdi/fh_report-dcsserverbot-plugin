@@ -1,4 +1,4 @@
-# FH_Report — DCSServerBot Plugin
+# Fh_Report — DCSServerBot Plugin
 
 Automatically posts and keeps updated a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files. No database required.
 
@@ -313,7 +313,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json` and `fhr_daily_history.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json` and `fhr_daily_history.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
@@ -373,7 +373,7 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, running one config next to the master and another on an agent box that hosts that instance — both installations will try to manage the same Discord message.
 
-Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing FH_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
+Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing Fh_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
 
 What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `report_layout`, `bar_style_emoji`, etc.) every time either one refreshes.
 
@@ -392,7 +392,7 @@ When `disable_updates: true`, that instance skips the server entirely on every c
 
 ## Daily Podium
 
-A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), FH_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
+A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), Fh_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
 
 ### Seeing it in the main embed (`P` combined with other letters)
 

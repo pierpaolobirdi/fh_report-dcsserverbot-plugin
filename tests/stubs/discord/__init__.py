@@ -1,4 +1,4 @@
-"""Minimal stand-in for discord.py — just enough for FH_Report's tests."""
+"""Minimal stand-in for discord.py — just enough for Fh_Report's tests."""
 
 
 class _Field:
