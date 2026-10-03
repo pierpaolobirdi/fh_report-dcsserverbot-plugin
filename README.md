@@ -309,11 +309,11 @@ When DCSServerBot knows which map the mission runs on, it's shown as a second li
 🗺️  Afghanistan
 ```
 
-The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is remembered per server in `Saves\.fhc\fhr_last_map.json` and replaced when DCSServerBot reports another one; until a map is known, nothing is shown. Hide it with `show_map: false` (it is still tracked, so it appears right away when re-enabled).
+The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is kept per server while the bot runs and replaced when DCSServerBot reports another one. If none is known yet (for example, the bot restarted while the server is stopped), it is read once from the current mission file. Until a map is known, nothing is shown. Hide it with `show_map: false`.
 
 ### Files in `.fhc`
 
-Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, `fhr_last_map.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. On a remote agent node the old file can't be deleted from here; it is simply left unused.
+Everything FH_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json` and `fhr_daily_history.json`); files starting with `fhc_` belong to FH_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. On a remote agent node the old file can't be deleted from here; it is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 

@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.8"
+FH_REPORT_RELEASE = "14.1.9"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -640,6 +640,8 @@ async def _read_json(node, path: str) -> dict:
     except Exception:
         return {}
 
+
+MAP_PROBE_TIMEOUT = 15   # seconds to wait for DCSSB to read the map from the mission file
 
 FHR_PREFIX = "fhr_"    # files this plugin keeps in saves_dir/.fhc (FH_Control uses fhc_)
 
@@ -2283,7 +2285,7 @@ class FH_Report(Plugin):
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
         self._last_maps: dict[str, str] = {}          # last known map per instance
-        self._last_maps_saved: dict[str, str] = {}    # what's on disk (key present = file checked)
+        self._map_probed: set[str] = set()            # instances whose mission file was already tried
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2324,48 +2326,31 @@ class FH_Report(Plugin):
         except OSError as e:
             self.log.error(f"FH_Report: could not save message IDs: {e}")
 
-    # ── Last known map per instance (saves_dir/.fhc/fhr_last_map.json) ────────
+    # ── Map of the mission (from DCSServerBot, kept in memory) ─────────────
 
-    def _get_map_file(self, saves_dir: str) -> str:
-        return _fhr_path(saves_dir, "last_map.json")
-
-    async def _known_map(self, server, saves_dir: str, node) -> str | None:
-        """The map of this instance's loaded mission, as DCSServerBot reports
-        it. Remembered in saves_dir/.fhc/fhr_last_map.json so it's still shown
-        while no mission is loaded (and after a restart); replaced as soon as
-        DCSSB reports a different one. None if it has never been known."""
+    async def _known_map(self, server, show: bool = True) -> str | None:
+        """The map DCSServerBot reports for this instance's mission, kept in
+        memory so it's still shown while no mission is loaded; replaced as soon
+        as DCSSB reports another. If nothing is known (e.g. the bot restarted
+        while the server is stopped), it is read ONCE from the mission file —
+        that opens the whole .miz, so never on every cycle. None if unknown."""
         instance_name = server.instance.name
-        if instance_name not in self._last_maps_saved:       # first look: read the file once
-            data = await _read_json(node, self._get_map_file(saves_dir))
-            saved = data.get("map") if isinstance(data, dict) else None
-            saved = saved.strip() if isinstance(saved, str) else ""
-            self._last_maps_saved[instance_name] = saved
-            if saved:
-                self._last_maps[instance_name] = saved
         try:
             current = getattr(getattr(server, "current_mission", None), "map", None)
         except Exception:
             current = None
         if isinstance(current, str) and current.strip():
             self._last_maps[instance_name] = current.strip()
-        known = self._last_maps.get(instance_name)
-        if known and known != self._last_maps_saved.get(instance_name):
-            await self._save_map(instance_name, known, saves_dir, node)
-        return known
-
-    async def _save_map(self, instance_name: str, map_name: str, saves_dir: str, node) -> None:
-        """Persist the map when it changed. Skipped (and retried next cycle)
-        while saves_dir doesn't exist yet — a normal state for a new server."""
-        try:
-            await node.list_directory(saves_dir)
-        except FileNotFoundError:
-            return
-        except Exception:
-            pass
-        _ensure_local_fhc_dir(saves_dir)
-        if await write_bytes_to_node(node, self._get_map_file(saves_dir),
-                                     json.dumps({"map": map_name}).encode("utf-8"), log=self.log):
-            self._last_maps_saved[instance_name] = map_name
+        elif show and instance_name not in self._last_maps and instance_name not in self._map_probed:
+            self._map_probed.add(instance_name)
+            try:
+                theatre = await asyncio.wait_for(server.get_current_mission_theatre(), MAP_PROBE_TIMEOUT)
+            except Exception as e:
+                self.log.debug(f"FH_Report [{instance_name}]: could not read the map from the mission file: {e!r}")
+                theatre = None
+            if isinstance(theatre, str) and theatre.strip():
+                self._last_maps[instance_name] = theatre.strip()
+        return self._last_maps.get(instance_name)
 
     # ── Core update task ──────────────────────────────────────────────────
 
@@ -2786,7 +2771,7 @@ class FH_Report(Plugin):
 
         source_node = server.node
         node = _UpdateReadCache(source_node)
-        map_name = await self._known_map(server, saves_dir, source_node)
+        map_name = await self._known_map(server, _show_map(cfg))
 
         # One-time-per-instance write self-test — see run_write_self_test()
         # for why this doesn't wait for a real correction to be needed.

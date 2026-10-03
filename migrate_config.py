@@ -137,8 +137,8 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                              sat: 6
 #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
 #                      The map is read from DCSServerBot (never configured here) and the
-#                      last known one is remembered in saves_dir/.fhc/fhr_last_map.json;
-#                      nothing is shown until it is known.
+#                      last known one is kept while the bot runs; if none is known yet it
+#                      is read once from the mission file. Nothing is shown until it is known.
 #                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)

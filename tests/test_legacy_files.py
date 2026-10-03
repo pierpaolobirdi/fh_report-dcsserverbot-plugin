@@ -28,7 +28,6 @@ def test_fhr_prefix_names():
     plugin = make_plugin()
     assert plugin._get_daily_file("/s").endswith("fhr_daily_snapshot.json")
     assert plugin._get_history_file("/s").endswith("fhr_daily_history.json")
-    assert plugin._get_map_file("/s").endswith("fhr_last_map.json")
 
 
 def test_shared_waypoint_file_keeps_its_fhc_name(tmp_path):
