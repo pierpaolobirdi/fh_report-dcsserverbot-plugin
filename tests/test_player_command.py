@@ -94,7 +94,7 @@ def test_admin_lookup_by_ucid(saves_dir):
     pool, sent = _invoke(saves_dir, A, admin=True)
     assert pool.connections == 2 and sent[0].title == "👤 Player — Zarpa"
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
-    assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
+    assert "Total" not in bnb and "destroyed" not in bnb                # only session and day
     assert "**Session:** 1 ·" in bnb and "since" not in bnb and "**Today:** 3" in bnb
     assert bnb.index("**Session:**") < bnb.index("**Today:**")          # session first, then the day
     assert "Showing" not in bnb                  # 2 incidents in the session, all of them listed
@@ -245,3 +245,13 @@ def test_more_than_ten_in_the_session_says_only_the_latest_are_shown():
     value = next(f.value for f in commands._build_player_report_embed(
         "P", {}, None, None, 0, 0, {}, "ok", bnb=bnb).fields if "Blue-on-Blue" in f.name)
     assert "Showing" not in value
+
+
+def test_bob_section_shows_only_session_and_today_and_hides_when_both_are_empty():
+    base = {"total": 19, "destroyed": 5, "damaged": 14, "recent": []}
+    fields = lambda b: [f for f in commands._build_player_report_embed(
+        "P", {}, None, None, 0, 0, {}, "ok", bnb=b).fields if "Blue-on-Blue" in f.name]
+    value = fields({**base, "day": 8, "session": 8})[0].value
+    assert value.splitlines()[0] == "- **Session:** 8 · **Today:** 8" and "Total" not in value
+    assert fields({**base, "day": 0, "session": 0}) == []        # history only: nothing to say here
+    assert fields({**base, "day": 2, "session": 0})              # today alone is enough

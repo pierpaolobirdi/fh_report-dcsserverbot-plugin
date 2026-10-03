@@ -280,7 +280,7 @@ The start is dated at the mission start DCSServerBot recorded since the campaign
 
 `/fh_report player` adds, before Career Stats:
 - the **Session Stats / Daily** table gets a `BoB` row (session and daily counts side by side, second-to-last, before Deaths; left out when both are zero);
-- **Blue-on-Blue (BoB)**: total (destroyed / damaged), today and session counts, and the incidents of the **current session on this server** (up to the latest 10, with a note when there are more), with date and victim (the player's name, or `AI unit (type)`).
+- **Blue-on-Blue (BoB)**: this session's and today's counts (no all-time total, so it matches the stats; the section is left out when both are zero), and the incidents of the **current session on this server** (up to the latest 10, with a note when there are more), with date and victim (the player's name, or `AI unit (type)`).
 - **Penalties in force** (only with `show_punishment: true`, from the **Punishment** plugin): the level, name and hammers the player currently holds, as in the main embed, plus what sustains it by event (`Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)`). These are the points left **after Punishment's decay**: they drop level by level and the section disappears once they reach zero, while the BoB history stays. Punishment counts everything it sanctions (not only BoB) and cannot be tied to one specific BoB incident.
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
