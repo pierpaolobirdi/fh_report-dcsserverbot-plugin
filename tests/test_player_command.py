@@ -27,10 +27,12 @@ class _Cursor:
 
     async def fetchall(self):
         q = self.pool.queries[-1]
-        if "GROUP BY event" in q:
-            return [("kill", 2, 1, 1), ("friendly_fire", 3, 2, 0)]
-        if "ORDER BY e.time DESC" in q:
-            return [(SEEN, "kill", "b" * 32, "Viper"), (SEEN, "friendly_fire", None, None)]
+        if "GROUP BY kind" in q:
+            return [("kill", 2, 1, 1), ("hit", 3, 2, 0)]
+        if "ORDER BY i.time DESC" in q:
+            return [(SEEN, "kill", "b" * 32, "Viper", "F-16C"), (SEEN, "hit", None, None, "T-72B")]
+        if "FROM pu_events" in q:
+            return [("kill", 1, 10.8), ("friendly_fire", 2, 4.8)]
         return []
 
 
@@ -56,7 +58,7 @@ class _Followup:
         self.sent.append(embed or content)
 
 
-def _invoke(saves_dir, player_name, admin):
+def _invoke(saves_dir, player_name, admin, cfg_extra=None):
     d = saves_dir()
     pool, followup = _Pool(), _Followup()
     srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public"})()
@@ -64,7 +66,7 @@ def _invoke(saves_dir, player_name, admin):
     plugin._is_admin = lambda interaction, server: admin
 
     async def ctx(interaction, server_param):
-        return "inst", srv, {"saves_dir": d}, d, commands._UpdateReadCache(srv.node), True
+        return "inst", srv, {"saves_dir": d, **(cfg_extra or {})}, d, commands._UpdateReadCache(srv.node), True
     plugin._command_context = ctx
     plugin._public_server_name = lambda name: "Public"
     interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
@@ -75,7 +77,7 @@ def _invoke(saves_dir, player_name, admin):
 def test_self_lookup_uses_one_connection(saves_dir):
     pool, sent = _invoke(saves_dir, None, admin=False)
     # one connection for the account lookup, one for the optional BoB detail
-    assert pool.connections == 2 and len(pool.queries) == 4
+    assert pool.connections == 2 and len(pool.queries) == 4   # lookup, mission start, BoB x2
     assert sum("discord_id" in q for q in pool.queries) == 1
     embed = sent[0]
     assert embed.title == "👤 Player — Zarpa"
@@ -88,7 +90,8 @@ def test_admin_lookup_by_ucid(saves_dir):
     bnb = next(f for f in sent[0].fields if "Blue-on-Blue" in f.name).value
     assert "**Total:** 5 (2 destroyed · 3 damaged)" in bnb
     assert "**Today:** 3 · **Session:** 1" in bnb
-    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire → AI unit") and "pts" not in bnb
+    assert "Team kill → `Viper`" in bnb and bnb.endswith("Friendly fire → AI unit (T-72B)") and "pts" not in bnb
+    assert not any("Penalties" in f.name for f in sent[0].fields)   # show_punishment is off
 
 
 def test_non_admin_cannot_query_others(saves_dir):
@@ -114,12 +117,12 @@ def test_missing_ranks_file_gives_friendly_message(saves_dir):
     assert followup.sent == ["❌ No campaign rankings yet for **Public** — fly a mission first, then try again."]
 
 
-def test_fetch_bnb_counts_and_degrades_without_punishment_plugin():
+def test_fetch_bnb_counts_and_degrades_without_missionstats_plugin():
     class Cur(_Cursor):
         async def execute(self, query, args):
             await super().execute(query, args)
-            if "pu_events" in query and self.pool.broken:
-                raise RuntimeError('relation "pu_events" does not exist')
+            if "missionstats" in query and self.pool.broken:
+                raise RuntimeError('relation "missionstats" does not exist')
 
         async def fetchone(self):
             return (SEEN.replace(tzinfo=None),)
@@ -141,6 +144,17 @@ def test_fetch_bnb_counts_and_degrades_without_punishment_plugin():
     srv = type("S", (), {"name": "Public"})()
     pool = Pool()
     plugin = make_plugin(apool=pool)
-    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s")) == {A: {"total": 5, "day": 3, "session": 1}}
+    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s", [A])) == {A: {"total": 5, "day": 3, "session": 1}}
     pool.broken = True
-    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s")) == {}
+    assert asyncio.run(plugin._fetch_bnb(srv, {}, "/s", [A])) == {}
+
+
+def test_penalties_in_force_follow_show_punishment(saves_dir):
+    pool, sent = _invoke(saves_dir, A, admin=True, cfg_extra={"show_punishment": True})
+    names = [f.name for f in sent[0].fields]
+    assert names.index("⚠️ __Blue-on-Blue (BoB)__") < names.index("⚖️ __Penalties in force__")
+    assert any("FROM pu_events" in q for q in pool.queries)
+    pen = next(f for f in sent[0].fields if "Penalties" in f.name).value
+    assert "JAG's investigation (15 p.p.) 🔨🔨" in pen          # 10.8 + 4.8 = 15.6 p.p.
+    assert "Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)" in pen
+    assert "decay" in pen

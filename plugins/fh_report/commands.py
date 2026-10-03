@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.24"
+FH_REPORT_RELEASE = "14.1.25"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1532,7 +1532,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                daily_points: float, session_stats: dict,
                                mission_status: str,
                                daily_stats: dict | None = None,
-                               bnb: dict | None = None) -> discord.Embed:
+                               bnb: dict | None = None,
+                               penalties: dict | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
     No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
@@ -1571,18 +1572,33 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         embed.add_field(name=combined_title,
                         value="_No stats yet — will appear after first flight._", inline=False)
 
-    # ── Blue-on-blue (from DCSServerBot's Punishment plugin) ────────────
+    # ── Blue-on-blue (from DCSServerBot's Mission Statistics) ───────────
     if bnb and bnb.get("total"):
         lines = [f"- **Total:** {bnb['total']} ({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)",
                  f"- **Today:** {bnb['day']} · **Session:** {bnb['session']}"]
-        for when, event, target_id, victim in bnb.get("recent") or []:
+        for when, kind, target_id, victim, target_type in bnb.get("recent") or []:
             ts = int(calendar.timegm(when.timetuple()))
-            # No target UCID recorded = the victim was an AI unit.
-            who = f" → {_safe_code_span(victim)}" if victim else (
-                " → AI unit" if not target_id else " → unknown player")
-            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(event, event)}{who}")
+            if victim:
+                who = f" → {_safe_code_span(victim)}"
+            elif target_id:
+                who = " → unknown player"
+            else:   # no player UCID on the victim: an AI unit
+                who = f" → AI unit ({target_type})" if target_type else " → AI unit"
+            lines.append(f"· <t:{ts}:d> {BNB_LABELS.get(kind, kind)}{who}")
         embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
         embed.add_field(name="⚠️ __Blue-on-Blue (BoB)__", value="\n".join(lines)[:1024], inline=False)
+
+    # ── Penalties in force (Punishment plugin, after decay) ─────────────
+    if penalties and penalties.get("total", 0) >= 1:
+        badge = get_punishment_badge(penalties["total"])
+        parts = [f"{PU_LABELS.get(ev, ev.replace('_', ' ').title())} ×{n} ({pts:.1f} p.p.)"
+                 for ev, n, pts in penalties.get("rows") or []]
+        lines = [badge] if badge else []
+        if parts:
+            lines.append("·　" + " · ".join(parts))
+        lines.append("_Points fade over time (decay)._")
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+        embed.add_field(name="⚖️ __Penalties in force__", value="\n".join(lines)[:1024], inline=False)
 
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
     # Rank Points and rank name shown in the section title itself.
@@ -2387,15 +2403,44 @@ def _reset_hour_today(cfg: dict) -> int:
     return int(cfg.get("daily_reset_hour") or 0)
 
 
-# DCSSB Punishment events that are blue-on-blue (BoB): friendly units destroyed
-# (kill, collision_kill) or hit/damaged (friendly_fire, collision_hit).
-BNB_EVENTS = ("kill", "collision_kill", "friendly_fire", "collision_hit")
-BNB_LABELS = {
+# Blue-on-blue (BoB) = friendly fire as DCS reported it (DCSSB Mission
+# Statistics, `missionstats`): a player's hit or kill on a unit of their own
+# coalition. Every hit is its own event, so hits are grouped into one incident
+# per attacker + victim + minute (the same grouping Punishment uses), and a
+# group is dropped when a kill of that victim type landed in that minute,
+# so a kill is never counted twice. BoB = destroyed (kills) + damaged (hits).
+BNB_LABELS = {"kill": "Team kill", "hit": "Friendly fire"}
+PU_LABELS = {
     "kill":           "Team kill",
     "collision_kill": "Collision kill",
     "friendly_fire":  "Friendly fire",
     "collision_hit":  "Collision hit",
+    "reslot":         "Reslot when shot at",
 }
+
+_BNB_INCIDENTS_SQL = """
+WITH ff AS (
+    SELECT m.init_id, m.event, m.target_id, m.target_type, m.time, s.server_name
+    FROM missionstats m JOIN missions s ON s.id = m.mission_id
+    WHERE m.event IN ('S_EVENT_KILL', 'S_EVENT_HIT')
+      AND m.init_id = ANY(%(ucids)s)
+      AND m.init_side = m.target_side AND m.init_side <> '0'
+      AND m.target_id IS DISTINCT FROM m.init_id
+), incidents AS (
+    SELECT init_id, server_name, time, 'kill' AS kind, target_id, target_type
+    FROM ff WHERE event = 'S_EVENT_KILL'
+    UNION ALL
+    SELECT h.init_id, h.server_name, MIN(h.time), 'hit', MAX(h.target_id), MAX(h.target_type)
+    FROM ff h
+    WHERE h.event = 'S_EVENT_HIT'
+      AND NOT EXISTS (SELECT 1 FROM ff k
+                      WHERE k.event = 'S_EVENT_KILL' AND k.init_id = h.init_id
+                        AND k.target_type IS NOT DISTINCT FROM h.target_type
+                        AND date_trunc('minute', k.time) = date_trunc('minute', h.time))
+    GROUP BY h.init_id, h.server_name, COALESCE(h.target_id, h.target_type, ''),
+             date_trunc('minute', h.time)
+)
+"""
 
 
 def _day_start(cfg: dict, now: datetime | None = None) -> datetime:
@@ -2914,68 +2959,83 @@ class Fh_Report(Plugin):
         restart = _parse_utc(self._session_starts.get(saves_dir))
         return max((t for t in (mission_start, restart) if t), default=None)
 
-    async def _fetch_bnb(self, server, cfg: dict, saves_dir: str) -> dict:
-        """Blue-on-blue counts per UCID from DCSSB's pu_events:
-        {ucid: {"total", "day", "session"}}. Total is all servers and all the
-        history DCSSB keeps; day and session only count this server since the
-        last daily reset / session start. Empty when the Punishment plugin
-        (its pu_events table) isn't there."""
-        now_day = _day_start(cfg).replace(tzinfo=None)
+    async def _fetch_bnb(self, server, cfg: dict, saves_dir: str, ucids: list) -> dict:
+        """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
+        {ucid: {"total", "day", "session"}}. Total is every server and all the
+        history kept; day and session only count this server since the last
+        daily reset / session start. Empty when the plugin's table isn't there."""
+        if not ucids:
+            return {}
+        day_from = _day_start(cfg).replace(tzinfo=None)
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
                     session = await self._session_start(cur, server.name, saves_dir)
-                    await cur.execute("""
+                    await cur.execute(_BNB_INCIDENTS_SQL + """
                         SELECT init_id, COUNT(*),
-                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s),
-                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s)
-                        FROM pu_events WHERE event = ANY(%s) GROUP BY init_id
-                    """, (server.name, now_day, server.name, session or datetime.max, list(BNB_EVENTS)))
+                               COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
+                               COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(session)s)
+                        FROM incidents GROUP BY init_id
+                    """, {"ucids": list(ucids), "server": server.name, "day": day_from,
+                          "session": session or datetime.max})
                     return {r[0]: {"total": int(r[1]), "day": int(r[2]), "session": int(r[3])}
                             for r in await cur.fetchall()}
         except Exception as e:
             self.log.debug(f"Fh_Report: BoB data not available: {e}")
             return {}
 
-    async def _fetch_bnb_detail(self, server, cfg: dict, saves_dir: str, ucid: str) -> dict | None:
-        """One player's blue-on-blue detail for /fh_report player, or None when
-        there is nothing (or no Punishment plugin): totals split into destroyed
-        (kill, collision_kill) and damaged (friendly_fire, collision_hit), today
-        and this session on this server, plus the latest events."""
+    async def _fetch_bnb_detail(self, server, cfg: dict, saves_dir: str, ucid: str,
+                                with_penalties: bool = False) -> tuple[dict | None, dict | None]:
+        """One player's detail for /fh_report player: (bnb, penalties).
+        bnb: totals split into destroyed / damaged, today and this session on
+        this server, plus the latest incidents. penalties (only when asked):
+        what Punishment still holds against the player after decay, by event.
+        Each is None when there is nothing or the plugin's table is missing."""
         day_from = _day_start(cfg).replace(tzinfo=None)
+        bnb = penalties = None
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
                     session = await self._session_start(cur, server.name, saves_dir)
-                    await cur.execute("""
-                        SELECT event, COUNT(*),
-                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s),
-                               COUNT(*) FILTER (WHERE server_name = %s AND time >= %s)
-                        FROM pu_events WHERE init_id = %s AND event = ANY(%s) GROUP BY event
-                    """, (server.name, day_from, server.name, session or datetime.max,
-                          ucid, list(BNB_EVENTS)))
-                    by_event = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
-                    if not by_event:
-                        return None
-                    await cur.execute("""
-                        SELECT e.time, e.event, e.target_id, t.name
-                        FROM pu_events e LEFT JOIN players t ON t.ucid = e.target_id
-                        WHERE e.init_id = %s AND e.event = ANY(%s)
-                        ORDER BY e.time DESC LIMIT 5
-                    """, (ucid, list(BNB_EVENTS)))
-                    recent = [(r[0], r[1], r[2], r[3]) for r in await cur.fetchall()]
+                    params = {"ucids": [ucid], "server": server.name, "day": day_from,
+                              "session": session or datetime.max}
+                    try:
+                        await cur.execute(_BNB_INCIDENTS_SQL + """
+                            SELECT kind, COUNT(*),
+                                   COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
+                                   COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(session)s)
+                            FROM incidents GROUP BY kind
+                        """, params)
+                        by_kind = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
+                        if by_kind:
+                            await cur.execute(_BNB_INCIDENTS_SQL + """
+                                SELECT i.time, i.kind, i.target_id, t.name, i.target_type
+                                FROM incidents i LEFT JOIN players t ON t.ucid = i.target_id
+                                ORDER BY i.time DESC LIMIT 5
+                            """, params)
+                            bnb = {
+                                "total":     sum(v[0] for v in by_kind.values()),
+                                "day":       sum(v[1] for v in by_kind.values()),
+                                "session":   sum(v[2] for v in by_kind.values()),
+                                "destroyed": by_kind.get("kill", (0, 0, 0))[0],
+                                "damaged":   by_kind.get("hit", (0, 0, 0))[0],
+                                "recent":    [tuple(r) for r in await cur.fetchall()],
+                            }
+                    except Exception as e:
+                        self.log.debug(f"Fh_Report: BoB detail not available: {e}")
+                    if with_penalties:
+                        try:
+                            await cur.execute(
+                                "SELECT event, COUNT(*), SUM(points) FROM pu_events "
+                                "WHERE init_id = %s GROUP BY event ORDER BY SUM(points) DESC", (ucid,))
+                            rows = [(r[0], int(r[1]), float(r[2])) for r in await cur.fetchall()]
+                            if rows:
+                                penalties = {"total": sum(r[2] for r in rows), "rows": rows}
+                        except Exception as e:
+                            self.log.debug(f"Fh_Report: penalties not available: {e}")
         except Exception as e:
-            self.log.debug(f"Fh_Report: BoB detail not available: {e}")
-            return None
-        destroyed = ("kill", "collision_kill")
-        return {
-            "total":     sum(v[0] for v in by_event.values()),
-            "day":       sum(v[1] for v in by_event.values()),
-            "session":   sum(v[2] for v in by_event.values()),
-            "destroyed": sum(v[0] for k, v in by_event.items() if k in destroyed),
-            "damaged":   sum(v[0] for k, v in by_event.items() if k not in destroyed),
-            "recent":    recent,
-        }
+            self.log.debug(f"Fh_Report: BoB/penalties connection failed: {e}")
+        return bnb, penalties
 
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table."""
@@ -3109,7 +3169,8 @@ class Fh_Report(Plugin):
 
         bnb = {}
         if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
-            bnb = await self._fetch_bnb(server, cfg, saves_dir)
+            bnb = await self._fetch_bnb(
+                server, cfg, saves_dir, [d["ucid"] for d in players.values() if d.get("ucid")])
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
         daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
@@ -3592,11 +3653,14 @@ class Fh_Report(Plugin):
         else:
             mission_status = f"⏹️ **{self._public_server_name(server)}** Mission not running."
 
+        bnb, penalties = (await self._fetch_bnb_detail(
+            srv, cfg, saves_dir, ucid, with_penalties=_bool_cfg(cfg.get("show_punishment")))
+            if ucid else (None, None))
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
             mission_status=mission_status, daily_stats=d_stats,
-            bnb=await self._fetch_bnb_detail(srv, cfg, saves_dir, ucid) if ucid else None,
+            bnb=bnb, penalties=penalties,
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 

@@ -260,22 +260,23 @@ Stats shown:
 
 ### Blue-on-blue (`BoB`)
 
-`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It counts friendly units or players the pilot destroyed (`kill`, `collision_kill`) **plus** those hit or damaged (`friendly_fire`, `collision_hit`), as recorded by the DCSServerBot **Punishment** plugin (`pu_events`). Without that plugin there is no data and `BoB` is simply left out.
+`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
+
+- *Destroyed*: every kill of a friendly unit.
+- *Damaged*: DCS reports every single hit as an event, so hits are grouped into one incident per attacker, victim and minute. A group is not counted when a kill of that victim type happened in that same minute, so a kill never counts twice.
+- Hits on yourself and on neutral units are ignored.
 
 | Card | Counts |
 |---|---|
-| Rank (`show_pilot_card`) | everything DCSServerBot has kept, on all servers |
+| Rank (`show_pilot_card`) | everything Mission Statistics has kept, on all servers |
 | Session (`show_session_card`) | this server since the current session started |
 | Daily (`show_daily_card`) | this server since the last daily reset |
 
 The session starts when a mission is loaded (DCSServerBot's mission start) or when Fh_Report notices an in-place campaign restart (the Session Leaderboard starting again from zero, detected on the next update cycle and stored as `session_start` in `fhr_daily_snapshot.json`).
 
-Things to keep in mind, all coming from how the Punishment plugin records events:
-- Repeated hits on the same target in the same minute are stored as one event, so *damaged* is a minimum.
-- Only events that earn penalty points are stored, so an event configured with 0 points, or a player on the exemption list, leaves no record.
-- Old events are removed by the plugin's `decay` settings (60 days in the sample configuration), which also limits the rank card total.
-
-`/fh_report player` adds a **Blue-on-Blue (BoB)** section (before Career Stats) with the total (destroyed / damaged), today and session counts, and the latest events with date and victim (`AI unit` when it was not a player).
+`/fh_report player` adds, before Career Stats:
+- **Blue-on-Blue (BoB)**: total (destroyed / damaged), today and session counts, and the latest incidents with date and victim (the player's name, or `AI unit (type)`).
+- **Penalties in force** (only with `show_punishment: true`, from the **Punishment** plugin): the level, name and hammers the player currently holds, as in the main embed, plus what sustains it by event (`Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)`). These are the points left **after Punishment's decay**: they drop level by level and the section disappears once they reach zero, while the BoB history stays. Punishment counts everything it sanctions (not only BoB) and cannot be tied to one specific BoB incident.
 
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 
