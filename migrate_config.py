@@ -1066,11 +1066,10 @@ def main():
             extra_lines[schedule_start:schedule_start] = schedule_block
 
     # ── 5d. The pilot limits belong together, in order, right before show_all_pilots
-    # (the option they work with), all four as live lines so nothing is left
-    # unlimited by accident. A line the user has keeps its value (and a "before:"
-    # comment written by the conversion above); a missing one is added with the
-    # value of max_pilots (20 when there is none), because a per-table line would
-    # otherwise override a smaller max_pilots.
+    # (the option they work with). max_pilots is always a live line: a config that
+    # had none listed everyone, which is kept as `0` (no limit) — the shipped 20 is
+    # for new installs only. The per-table lines are optional overrides: the ones
+    # the user has stay as they are, the missing ones are shown as commented examples.
     limit_re = re.compile(r"^[ \t]*(#[ \t]*)?(max_pilots(?:_[RSD])?)[ \t]*:")
     found: dict = {}
     for l in list(extra_lines):
@@ -1081,10 +1080,6 @@ def main():
             if m.group(2) not in found or (live_line and not found[m.group(2)][0]):   # a live line wins
                 found[m.group(2)] = (live_line, l.strip())
     added_limits: dict = {}
-    base = 20
-    if "max_pilots" in found and found["max_pilots"][0]:
-        m = re.match(r"max_pilots[ \t]*:[ \t]*([^\s#]+)", found["max_pilots"][1])
-        base = m.group(1) if m else 20
     limit_lines = []
     for key in LIMIT_KEYS:
         if key in found and found[key][0]:
@@ -1092,9 +1087,11 @@ def main():
             if "#" not in line:
                 line += "  " + LIMIT_COMMENTS[key]
             limit_lines.append("  " + line + "\n")
+        elif key == "max_pilots":
+            limit_lines.append("  max_pilots: 0  # before: not set (no limit)\n")
+            added_limits[key] = 0
         else:
-            limit_lines.append(f"  {key}: {base}  # before: not set\n")
-            added_limits[key] = base
+            limit_lines.append(f"#  {key}: 20  {LIMIT_COMMENTS[key]}\n")
     insert_at = next((i for i, l in enumerate(new_default_lines) if l.strip().startswith("show_all_pilots:")),
                      len(new_default_lines))
     new_default_lines[insert_at:insert_at] = limit_lines

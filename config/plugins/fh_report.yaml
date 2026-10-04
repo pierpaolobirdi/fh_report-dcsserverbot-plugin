@@ -343,9 +343,9 @@ DEFAULT:
   sort_zones_by_waypoint: false  # false = sort by level/damage  |  true = sort by mission waypoint number
   strip_callsign: false  
   max_pilots: 20  # Max pilots listed in every table without a limit of its own (0 = no limit)
-  max_pilots_R: 20  # Max pilots in the Rank table
-  max_pilots_S: 20  # Max pilots in the Session table
-  max_pilots_D: 20  # Max pilots in the Daily table
+#  max_pilots_R: 20  # Max pilots in the Rank table
+#  max_pilots_S: 20  # Max pilots in the Session table
+#  max_pilots_D: 20  # Max pilots in the Daily table
   show_all_pilots: false  # false = cut at limit  |  true = split into multiple fields
   show_pilot_card: false  # false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)
   pilot_card_icon: 🔸  # Emoji at the start of the pilot career card line (default: 🔸)

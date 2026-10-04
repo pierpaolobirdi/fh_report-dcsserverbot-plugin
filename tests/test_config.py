@@ -188,16 +188,11 @@ def _live(text, section="DEFAULT"):
     return {m.group(1): m.group(2) for m in re.finditer(r"^[ \t]+(max_pilots\w*):[ \t]*(\d+)", block, re.M)}
 
 
-def _all_four(default, **own):
-    """The four live lines after a migration: tables without a value of their own repeat max_pilots."""
-    return {"max_pilots": default, **{f"max_pilots_{t}": own.get(t, default) for t in "RSD"}}
-
-
 @pytest.mark.parametrize("layout, expected", [
-    ("R", _all_four("20")),                               # one table: the old max_pilots, unchanged
-    ("DS", _all_four("15")),                              # two tables: what max_pilots_2t gave
-    ("DSR", _all_four("6")),                              # three tables: what max_pilots_3t gave
-    ("DP, SR", _all_four("15", D="20")),                  # rotation: D alone had 20, S and R shared 15
+    ("R", {"max_pilots": "20"}),                          # one table: the old max_pilots, unchanged
+    ("DS", {"max_pilots": "15"}),                         # two tables: what max_pilots_2t gave
+    ("DSR", {"max_pilots": "6"}),                         # three tables: what max_pilots_3t gave
+    ("DP, SR", {"max_pilots": "15", "max_pilots_D": "20"}),   # rotation: D alone had 20, S and R shared 15
 ])
 def test_old_limits_become_per_table_limits_that_show_the_same_pilots(tmp_path, layout, expected):
     migrated, out = _migrate(tmp_path, _limits_file(layout))
@@ -218,20 +213,20 @@ def test_a_server_with_another_layout_gets_explicit_limits_only_when_it_needs_th
 def test_the_three_limits_end_up_together_in_order_before_show_all_pilots(tmp_path):
     migrated, _ = _migrate(tmp_path, _limits_file("DP, SR"))
     lines = [l.strip() for l in migrated.split("DEFAULT:")[1].split("\n\n")[0].splitlines()]
-    at = [i for i, l in enumerate(lines) if re.match(r"max_pilots", l)]
-    assert [lines[i].split(":")[0] for i in at] == ["max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D"]
+    at = [i for i, l in enumerate(lines) if re.match(r"#?\s*max_pilots", l)]
+    assert [lines[i].lstrip("# ").split(":")[0] for i in at] == ["max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D"]
     assert at == list(range(at[0], at[0] + 4)) and lines[at[-1] + 1].startswith("show_all_pilots")
-    assert not any(re.match(r"#\s*max_pilots", l) for l in lines)                    # none left as a comment
+    assert sum(l.startswith("max_pilots") for l in lines) >= 1                        # max_pilots is live
+    assert any(re.match(r"#\s*max_pilots_R:", l) for l in lines)                      # the others are optional examples
 
 
-def test_converted_lines_remember_what_there_was_before_and_added_ones_say_so(tmp_path):
+def test_converted_lines_remember_what_there_was_before(tmp_path):
     migrated, _ = _migrate(tmp_path, _limits_file("DP, SR"))
     block = migrated.split("DEFAULT:")[1].split("\n\n")[0]
     line = lambda key: next(l for l in block.splitlines() if l.strip().startswith(key + ":"))
     assert "# before: max_pilots 20, max_pilots_2t 15, max_pilots_3t 6" in line("max_pilots")
     assert "# before: max_pilots 20, max_pilots_2t 15, max_pilots_3t 6" in line("max_pilots_D")
-    assert "# before: not set" in line("max_pilots_R") and "# before: not set" in line("max_pilots_S")
-    assert line("max_pilots_R").split("#")[0].split(":")[1].strip() == "15"          # filled with max_pilots, not 20
+    assert re.search(r"^#  max_pilots_R: 20  # ", block, re.M) and re.search(r"^#  max_pilots_S: 20  # ", block, re.M)
 
 
 def test_a_server_block_line_written_by_the_conversion_also_carries_the_before_comment(tmp_path):
@@ -241,14 +236,16 @@ def test_a_server_block_line_written_by_the_conversion_also_carries_the_before_c
 
 
 def test_the_shipped_config_lists_20_pilots_per_table_not_everyone():
-    live = _live(open(YAML, encoding="utf-8").read())
-    assert live == _all_four("20")
+    text = open(YAML, encoding="utf-8").read()
+    assert _live(text) == {"max_pilots": "20"}                       # one live line: every table at 20
+    for t in "RSD":                                                   # the others are optional examples
+        assert re.search(rf"^#  max_pilots_{t}: 20  # ", text.split("DEFAULT:")[1], re.M)
 
 
 def test_a_config_without_the_old_two_and_three_table_keys_is_left_as_it_was(tmp_path):
     text = _limits_file("DSR", with_old=False).replace("  show_all_pilots: false  #", "  max_pilots: 12\n  show_all_pilots: false  #", 1)
     migrated, out = _migrate(tmp_path, text)
-    assert _live(migrated) == _all_four("12") and "Pilot limits are now per table" not in out    # per-table lines repeat 12
+    assert _live(migrated) == {"max_pilots": "12"} and "Pilot limits are now per table" not in out
 
 
 def test_the_pilot_limit_migration_is_repeatable(tmp_path):
@@ -260,3 +257,21 @@ def test_the_pilot_limit_migration_is_repeatable(tmp_path):
 def test_the_new_limit_keys_are_known_and_the_old_ones_are_not():
     assert {"max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D"} <= mc.KNOWN_VARS
     assert not {"max_pilots_2t", "max_pilots_3t"} & mc.KNOWN_VARS
+
+
+def test_a_config_that_had_no_limit_gets_zero_not_the_new_installs_twenty(tmp_path):
+    none = _limits_file("R", with_old=False)                          # no max_pilots at all: it listed everyone
+    migrated, out = _migrate(tmp_path, none)
+    assert re.search(r"^  max_pilots: 0  # before: not set \(no limit\)$", migrated, re.M)
+    assert _live(migrated) == {"max_pilots": "0"} and "+ max_pilots: 0" in out
+    # an old commented-out example does not count as a limit either
+    commented = none.replace("  show_all_pilots: false  #", "#  max_pilots: 20\n  show_all_pilots: false  #", 1)
+    assert _live(_migrate(tmp_path, commented)[0]) == {"max_pilots": "0"}
+
+
+def test_per_table_lines_the_user_has_are_kept_and_max_pilots_zero_is_added_beside_them(tmp_path):
+    text = _limits_file("R", with_old=False).replace("  show_all_pilots: false  #", "  max_pilots_R: 10\n  show_all_pilots: false  #", 1)
+    migrated, _ = _migrate(tmp_path, text)
+    assert _live(migrated) == {"max_pilots": "0", "max_pilots_R": "10"}          # S and D stay unlimited as before
+    again, _ = _migrate(tmp_path, migrated)
+    assert again == migrated
