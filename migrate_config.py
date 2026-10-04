@@ -18,6 +18,20 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #   The plugin resolves the Foothold saves directory automatically, including in multi-node
 #   cluster setups where DCS instances run on remote agent nodes.
 #   If Foothold saves are in a non-standard location, override with saves_dir.
+#   On a cluster, instance names repeat from node to node (every node starts with
+#   DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
+#   plugin configs do:
+#     MyNode1:
+#       DCS.dcs_serverrelease:
+#         channel_id: 1234567890123456789
+#         campaign_name: "Server A"
+#     MyNode2:
+#       DCS.dcs_serverrelease:
+#         channel_id: 1234567890123456780
+#         campaign_name: "Server B"
+#   Both forms can share one file (a `<node>:` entry wins over the flat one). A flat block
+#   whose name is shared by instances of several nodes cannot say which one it is for:
+#   none of them gets a report (a warning in the bot log says so).
 #
 # REQUIRED per server:
 #   channel_id     - Discord channel ID where the embed will be posted. A
@@ -511,6 +525,53 @@ def _find_top_level_blocks(content: str) -> list[tuple[int, int]]:
             for i, s in enumerate(starts)]
 
 
+_HEAD_RE = re.compile(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$')
+
+
+def _child_headers(block_text: str):
+    """If every key directly under this top-level block is itself a mapping
+    (`name:` with nothing after it) the block is a NODE block — `<node>: <instance>: ...`
+    — and the instance headers are returned as (offset in block_text, name); else None
+    (a server block: its children are options such as channel_id)."""
+    lines = block_text.splitlines(keepends=True)[1:]
+    indent = next((len(l) - len(l.lstrip(" ")) for l in lines if l.strip() and not l.lstrip().startswith("#")), None)
+    if not indent:
+        return None
+    heads, offset = [], len(block_text.splitlines(keepends=True)[0])
+    for l in lines:
+        stripped = l.strip()
+        if stripped and not stripped.startswith("#") and len(l) - len(l.lstrip(" ")) == indent:
+            m = re.match(r"^\s*([^\s#:][^:#]*?)[ \t]*:[ \t]*(?:#.*)?$", l.rstrip("\n"))
+            if not m or m.group(1).strip('"') in KNOWN_VARS:
+                return None
+            heads.append((offset, m.group(1).strip('"')))
+        offset += len(l)
+    return heads or None
+
+
+def _config_blocks(content: str) -> list[tuple[int, int, str, bool]]:
+    """(start, end, label, is_default) of DEFAULT and of every server block,
+    flat (`name:`) or nested under a node (`node:` / `instance:`, labelled
+    `node/instance`). Comment lines at column 0 belong to the block they sit in."""
+    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE) if _HEAD_RE.match(m.group(0))]
+    out = []
+    for i, h in enumerate(heads):
+        start = h.start()
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(content)
+        name = h.group(0).split(":", 1)[0].strip().strip('"')
+        if name == "DEFAULT":
+            out.append((start, end, "DEFAULT", True))
+            continue
+        kids = _child_headers(content[start:end])
+        if kids:
+            for j, (offset, inst) in enumerate(kids):
+                stop = kids[j + 1][0] if j + 1 < len(kids) else end - start
+                out.append((start + offset, start + stop, f"{name}/{inst}", False))
+        else:
+            out.append((start, end, name, False))
+    return out
+
+
 def _find_kv_line(block_text: str, key: str):
     """Search block_text for an uncommented `key: value` line. Returns the
     match object (groups: indent, value, trailing comment) or None."""
@@ -715,13 +776,9 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
         content, n = _OLD_PILOT_TEMPLATES.subn("", content)
         return content, changes
 
-    # A block starts at a live top-level line and runs to the next one: comment lines
-    # at column 0 (the template's commented examples) belong to the block they sit in.
-    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE)
-             if re.match(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$', m.group(0))]
-    blocks = [(h.start(), heads[i + 1].start() if i + 1 < len(heads) else len(content))
-              for i, h in enumerate(heads)]
+    blocks = [(a, b) for a, b, _label, _default in _config_blocks(content)]
     texts = {a: content[a:b] for a, b in blocks}
+    labels = {a: label for a, _b, label, _default in _config_blocks(content)}
 
     def live(text: str, key: str):
         m = _find_kv_line(text, key)
@@ -770,14 +827,16 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
             merged = [o if o is not None else d for o, d in zip(own, d_old)]
             needed = _old_pilot_caps(layout, *merged)
             differing = {t: c for t, c in needed.items() if c != eff_default(t)}
-            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines else "  ")
+            body = [l for l in text.splitlines()[1:] if l.strip() and not l.lstrip().startswith("#")]
+            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines
+                      else re.match(r"[ \t]*", body[0]).group(0) if body else "  ")
             lines = []
             if differing:
                 if not d_new and len({needed[t] for t in needed}) == 1:
                     lines = render(indent, next(iter(needed.values())) or 0, {}, before(text))
                 else:
                     lines = render(indent, None, differing, before(text))
-            label = text.split(":", 1)[0].strip().strip('"')
+            label = labels[start]
             if not old_lines and not lines:
                 continue
         if not old_lines and not lines:
@@ -1106,18 +1165,19 @@ def main():
     content = content[:default_match.start()] + new_default_block + content[default_match.end():]
 
     # ── 6. Check server blocks for obsolete variables ──────────────────────────
-    # Find all non-DEFAULT top-level blocks
-    server_blocks = re.finditer(
-        r'^"[^"]+"\s*:\s*\n((?:[ \t]+[^\n]*\n)*)',
-        content, re.MULTILINE
-    )
-    for block_match in server_blocks:
-        block_content = block_match.group(1)
-        # Find all active (non-commented) variable keys in this block
-        for var_match in re.finditer(r"^\s+([a-zA-Z_]+)\s*:", block_content, re.MULTILINE):
-            var_name = var_match.group(1)
-            if var_name not in KNOWN_VARS and var_name not in obsolete:
-                obsolete.append(var_name)
+    # Every server block, flat or nested under a node: look only at the keys that sit
+    # directly in the block (not at the days of a daily_reset_schedule inside it).
+    for start, end, _label, is_default in _config_blocks(content):
+        if is_default:
+            continue
+        lines = content[start:end].splitlines()[1:]
+        indent = next((len(l) - len(l.lstrip(" ")) for l in lines if l.strip() and not l.lstrip().startswith("#")), None)
+        if not indent:
+            continue
+        for l in lines:
+            m = re.match(rf"^ {{{indent}}}([A-Za-z_]\w*)\s*:", l)
+            if m and m.group(1) not in KNOWN_VARS and m.group(1) not in obsolete:
+                obsolete.append(m.group(1))
 
     # ── 3. Update header comments ─────────────────────────────────────────────
     default_idx = content.find("\nDEFAULT:")

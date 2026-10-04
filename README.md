@@ -34,7 +34,7 @@ Multiple server instances are supported — each can have its own channel, campa
 1. Download the zip and extract it
 2. Run `install.cmd` — it auto-detects your DCSServerBot installation
 3. Edit `config/plugins/fh_report.yaml`:
-   - Set each server block key to the **instance name** defined in your `nodes.yaml`
+   - Set each server block key to the **instance name** defined in your `nodes.yaml` (on a cluster, under its **node name**: see [Multi-node](#multi-node-master--agents))
    - Set `channel_id` and `campaign_name` for each server
 4. Restart DCSServerBot
 
@@ -402,7 +402,24 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 Nothing extra is needed on a cluster, but a few things are worth knowing:
 
 - **Everything runs on the Master.** It reads and writes each instance's Foothold files (the `Saves` folder, including `.fhc`) through DCSServerBot's node API, wherever the instance runs. No shared drive and nothing to install on the agent nodes. If you set `saves_dir` by hand, it is a path **on the node that hosts the instance**; left empty it is found automatically.
-- **Servers are identified by the instance name** from `nodes.yaml`, which is the key of each block in `fh_report.yaml`. Instance names are unique per node, not per cluster, and DCSServerBot's default is the same on every node (`DCS.dcs_serverrelease`). Fh_Report does not use the node name, so **give the instances of different nodes different names** if more than one of them should have a report; two instances with the same name would share one block and one Discord message.
+- **Servers are identified by node and instance.** Instance names are unique per node, not per cluster, and DCSServerBot's default is the same on every node (`DCS.dcs_serverrelease`). On a cluster write each block under its node, the layout DCSServerBot itself uses for plugin configs:
+
+  ```yaml
+  DEFAULT:
+    report_layout: R
+
+  MyNode1:
+    DCS.dcs_serverrelease:
+      channel_id: 1234567890123456789
+      campaign_name: "Server A"
+
+  MyNode2:
+    DCS.dcs_serverrelease:
+      channel_id: 1234567890123456780
+      campaign_name: "Server B"
+  ```
+
+  The flat form (`DCS.dcs_serverrelease:` at the top level) still works and both can share one file; a `<node>:` entry wins over a flat one. A flat block whose name belongs to instances of **several nodes** cannot say which one it is for, so **none of them gets a report** and a warning in the bot log tells you to use the node form. Each server keeps its own Discord message.
 - **Choose which instances get a report** with the blocks of `fh_report.yaml` and `enable_updates` (see [below](#enabling-or-disabling-per-instance-enable_updates)). An instance without a block is ignored; `enable_updates: false` keeps its block but silences it. With many groups on one cluster, `enable_updates: false` in `DEFAULT` and `true` only in the blocks you want is a clean way to opt servers in.
 - **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
 - **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.

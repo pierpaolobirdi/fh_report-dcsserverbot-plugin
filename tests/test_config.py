@@ -291,3 +291,62 @@ def test_migration_gives_a_comment_to_a_value_that_had_none(tmp_path):
     assert re.search(r"^  strip_callsign: true  # false = show names as-is", migrated, re.M)
     again, _ = _migrate(tmp_path, migrated)
     assert again == migrated
+
+
+# ── blocks nested under a node (`<node>: <instance>:`) ────────────────────────
+
+_NODE_FORM = """DEFAULT:
+  admin: Admin  # x
+  report_layout: DS  # x
+  max_pilots: 20
+  max_pilots_2t: 15
+  max_pilots_3t: 6
+  show_all_pilots: false  # x
+
+MyNode1:
+  Public:
+    channel_id: 1
+    campaign_name: "A"
+    report_layout: DSR
+  Other:
+    channel_id: 2
+    campaign_name: "B"
+    bogus_option: 3
+    daily_reset_schedule:
+      sat: 7
+MyNode2:
+  Public:
+    channel_id: 3
+    campaign_name: "C"
+"""
+
+
+def test_blocks_under_a_node_are_not_mistaken_for_options(tmp_path):
+    migrated, out = _migrate(tmp_path, _NODE_FORM)
+    warning = out.split("no longer used in this version of Fh_Report.")[1]
+    assert "- bogus_option" in warning                                   # a real unknown option, found inside the node block
+    assert not re.search(r"- (Public|Other|MyNode1|MyNode2|sat)\b", warning)   # instance names and schedule days are not options
+    assert "      sat: 7:00" in migrated                                 # the reset times inside are still converted
+
+
+def test_pilot_limits_are_converted_inside_node_blocks_with_their_own_layout(tmp_path):
+    migrated, out = _migrate(tmp_path, _NODE_FORM)
+    public1 = migrated.split("MyNode1:")[1].split("  Other:")[0]
+    assert re.search(r"^    max_pilots: 6  # before: inherited from DEFAULT$", public1, re.M)      # three tables used 6, not the DEFAULT's 15
+    assert "MyNode1/Public:" in out
+    assert "max_pilots" not in migrated.split("MyNode2:")[1]             # the other node's Public inherits and needs nothing
+    assert "max_pilots" not in migrated.split("  Other:")[1].split("MyNode2:")[0]
+    assert not re.search(r"^\s+max_pilots_(2t|3t):", migrated, re.M)
+
+
+def test_a_node_form_file_migrates_to_itself_the_second_time(tmp_path):
+    migrated, _ = _migrate(tmp_path, _NODE_FORM)
+    again, out = _migrate(tmp_path, migrated)
+    assert again == migrated and "Pilot limits are now per table" not in out
+
+
+def test_unquoted_flat_blocks_are_checked_for_unknown_options_too(tmp_path):
+    text = _NODE_FORM.split("MyNode1:")[0] + "Flat_Server:\n  channel_id: 5\n  nope_option: 1\n  daily_reset_schedule:\n    sat: 7\n"
+    _, out = _migrate(tmp_path, text)
+    warning = out.split("no longer used in this version of Fh_Report.")[1]
+    assert "- nope_option" in warning and "- sat" not in warning

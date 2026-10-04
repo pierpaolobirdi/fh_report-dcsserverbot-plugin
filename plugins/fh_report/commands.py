@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.2.0"
+FH_REPORT_RELEASE = "14.2.1"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -639,7 +639,26 @@ def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
 
 
 _unsupported_version_warned: set[str] = set()
+def _node_name(server) -> str:
+    """Name of the node hosting `server` ("" when it has none, as some test stand-ins)."""
+    return getattr(getattr(server, "node", None), "name", "") or ""
+
+
+def _server_key(server) -> str:
+    """Identifies a server across the cluster: `node/instance`. Instance names
+    are only unique per node, so the instance name alone is not enough."""
+    node = _node_name(server)
+    return f"{node}/{server.instance.name}" if node else server.instance.name
+
+
+def _saves_key(node, saves_dir: str) -> str:
+    """A Saves folder on a given node (the same path can exist on several)."""
+    name = getattr(node, "name", "") or ""
+    return f"{name}:{saves_dir}" if name else saves_dir
+
+
 _unmatched_instance_warned: set[str] = set()
+_ambiguous_warned: set[str] = set()
 _missing_save_warned: set[str] = set()       # instances already warned about a missing Foothold save
 _unmatched_instance_since: dict[str, float] = {}
 _UNMATCHED_INSTANCE_GRACE_SECONDS = 120  # tolerate remote-node startup races
@@ -824,9 +843,10 @@ async def _remove_legacy_file(node, path: str) -> None:
     """Delete an old, un-prefixed file once its fhr_ replacement is confirmed.
     Once per file and run (a remote delete is an RPC); a file that is already
     gone is simply a no-op."""
-    if path in _legacy_cleaned:
+    tag = _saves_key(node, path)
+    if tag in _legacy_cleaned:
         return
-    _legacy_cleaned.add(path)
+    _legacy_cleaned.add(tag)
     await _remove_file(node, path)
     log.debug(f"Fh_Report: legacy file {path} cleaned up (replaced by its {FHR_PREFIX} copy)")
 
@@ -853,7 +873,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     exist yet (mission never run) it's logged at DEBUG and retried later;
     any other check failure is inconclusive and the test runs anyway.
     """
-    if saves_dir in _write_self_tested:
+    if _saves_key(node, saves_dir) in _write_self_tested:
         return
 
     if await _dir_exists(node, saves_dir) is False:
@@ -866,7 +886,7 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
             )
         return
 
-    _write_self_tested.add(saves_dir)
+    _write_self_tested.add(_saves_key(node, saves_dir))
 
     test_path = os.path.join(saves_dir, "fhrep_write_test.tmp")
     test_content = b"Fh_Report write self-test - safe to delete"
@@ -2425,13 +2445,12 @@ class _FHServerTransformer(utils.ServerTransformer):
                            current: str) -> list[app_commands.Choice[str]]:
         choices = await super().autocomplete(interaction, current)
         plugin = getattr(interaction.command, "binding", None)
-        if plugin is None or not hasattr(plugin, "_configured_instances"):
+        if plugin is None or not hasattr(plugin, "_has_block"):
             return choices
-        configured = set(plugin._configured_instances())
 
         def _is_fh(name: str) -> bool:
             srv = interaction.client.servers.get(name)
-            return bool(srv) and srv.instance.name in configured
+            return bool(srv) and plugin._has_block(srv)
 
         filtered = [c for c in choices if _is_fh(c.value)]
         if filtered or current:
@@ -2444,7 +2463,7 @@ class _FHServerTransformer(utils.ServerTransformer):
         for name, srv in interaction.client.servers.items():
             if srv.status == Status.UNREGISTERED:
                 continue
-            if srv.instance.name not in configured:
+            if not plugin._has_block(srv):
                 continue
             if (is_admin and srv.locals.get('managed_by') and
                     not utils.check_roles(srv.locals.get('managed_by'), interaction.user)):
@@ -2700,7 +2719,7 @@ class Fh_Report(Plugin):
         as DCSSB reports another. If nothing is known (e.g. the bot restarted
         while the server is stopped), it is read ONCE from the mission file —
         that opens the whole .miz, so never on every cycle. None if unknown."""
-        instance_name = server.instance.name
+        instance_name = _server_key(server)
         try:
             current = getattr(getattr(server, "current_mission", None), "map", None)
         except Exception:
@@ -2737,50 +2756,22 @@ class Fh_Report(Plugin):
 
         raw          = self.locals or {}
         self._cycle_punishment = None
+        self._migrate_message_ids()
+        self._warn_config_mismatches(raw)
 
-        # Warn about fh_report.yaml keys matching no DCSServerBot instance name
-        # (a common, otherwise silent mistake). A grace period avoids false alarms
-        # while remote nodes are still registering; the warning re-arms once the
-        # key matches again.
-        live_instance_names = {server.instance.name for server in self.bot.servers.values()}
-        now_ts = datetime.now(timezone.utc).timestamp()
-        configured_server_count = 0
-        for cfg_key in raw.keys():
-            if cfg_key == "DEFAULT":
-                continue
-            if cfg_key in live_instance_names:
-                _unmatched_instance_since.pop(cfg_key, None)
-                _unmatched_instance_warned.discard(cfg_key)
-                if raw.get(cfg_key):
-                    configured_server_count += 1
-                continue
-            first_seen = _unmatched_instance_since.setdefault(cfg_key, now_ts)
-            if (now_ts - first_seen) < _UNMATCHED_INSTANCE_GRACE_SECONDS:
-                continue
-            if cfg_key not in _unmatched_instance_warned:
-                _unmatched_instance_warned.add(cfg_key)
-                self.log.warning(
-                    f"Fh_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
-                    f"any configured DCSServerBot instance name — check the instance name "
-                    f"in nodes.yaml. This server block will be skipped until fixed."
-                )
-
-        # Config is keyed by instance name (nodes.yaml), not the DCS display name.
-        stagger_seconds = _server_stagger_seconds(interval, configured_server_count)
+        servers = self._configured_servers()
+        stagger_seconds = _server_stagger_seconds(interval, len(servers))
         processed_server_count = 0
-        for server in self.bot.servers.values():
+        for server in servers:
             try:
-                instance_name = server.instance.name
-                if not raw.get(instance_name):
-                    continue
-                cfg = self._merged_cfg(instance_name)
+                cfg = self._merged_cfg(server)
                 if processed_server_count > 0:
                     await asyncio.sleep(stagger_seconds)
                 processed_server_count += 1
                 await self._update_server(server, cfg)
             except Exception as e:
                 self.log.error(
-                    f"Fh_Report [{server.instance.name}]: unexpected error: {e}", exc_info=True
+                    f"Fh_Report [{_server_key(server)}]: unexpected error: {e}", exc_info=True
                 )
 
     @updater.before_loop
@@ -3137,10 +3128,11 @@ class Fh_Report(Plugin):
         old = _session_migrate(raw)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         cur = {"points": dict(points), "kills": dict(kills)}
-        absent = saves_dir in self._campaign_absent
-        self._campaign_absent.discard(saves_dir)
+        saves_key = _saves_key(source_node, saves_dir)
+        absent = saves_key in self._campaign_absent
+        self._campaign_absent.discard(saves_key)
 
-        watch = self._campaign_watch.get(saves_dir)
+        watch = self._campaign_watch.get(saves_key)
         if watch is None and old and old.get("file") == basename and old.get("base"):   # after a bot restart
             watch = {**old["base"], "seen": _parse_utc(old.get("seen")), "pending": False}
         seen = (watch or {}).get("seen") or _parse_utc((old or {}).get("seen"))
@@ -3166,7 +3158,7 @@ class Fh_Report(Plugin):
                           f"(noticed {now.strftime(_SESSION_ISO)} UTC)")
         elif old:
             st = {k: old[k] for k in ("file", "start", "kind")}
-        self._campaign_watch[saves_dir] = watch
+        self._campaign_watch[saves_key] = watch
 
         stale = not raw or now - (_parse_utc(raw.get("seen")) or now) >= _SESSION_SEEN_EVERY
         if reset or not old or raw.get("start") != st["start"] or raw.get("file") != st["file"] or (stale and not watch["pending"]):
@@ -3284,7 +3276,8 @@ class Fh_Report(Plugin):
         agent nodes work) and post or edit its Discord embed.
         """
 
-        instance_name = server.instance.name
+        instance_name = _server_key(server)     # node/instance: unique across the cluster
+        hook_name = server.instance.name         # what the optional private hook has always received
 
         if not _updates_enabled(cfg):
             # Switched-off instance (or a duplicate install elsewhere in the
@@ -3351,7 +3344,7 @@ class Fh_Report(Plugin):
         # Optional private hook — post-processes players dict
         if _HAS_HOOK:
             try:
-                players = _fh_hook.post_process(players, cfg, instance_name, campaign_stats)
+                players = _fh_hook.post_process(players, cfg, hook_name, campaign_stats)
             except Exception as e:
                 self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
 
@@ -3461,9 +3454,10 @@ class Fh_Report(Plugin):
         """No Foothold save yet (new server / campaign not started): post a
         "not started" embed, with the rank table if Foothold_Ranks.lua exists.
         Logged once (DEBUG) per instance, not every cycle."""
-        instance_name = server.instance.name
-        self._campaign_absent.add(saves_dir)   # the save reappearing marks a new campaign session
-        self._campaign_watch.pop(saves_dir, None)
+        instance_name = _server_key(server)
+        saves_key = _saves_key(server.node, saves_dir)
+        self._campaign_absent.add(saves_key)   # the save reappearing marks a new campaign session
+        self._campaign_watch.pop(saves_key, None)
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
             self.log.debug(
@@ -3477,7 +3471,7 @@ class Fh_Report(Plugin):
             players = {}
         if players and _HAS_HOOK:
             try:
-                players = _fh_hook.post_process(players, cfg, instance_name, {})
+                players = _fh_hook.post_process(players, cfg, server.instance.name, {})
             except Exception as e:
                 self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
         punishment_points = {}
@@ -3534,27 +3528,135 @@ class Fh_Report(Plugin):
 
     # ── /fh_report player ────────────────────────────────────────────────
 
-    def _configured_instances(self) -> list[str]:
-        """Return instance-name keys configured in fh_report.yaml (excludes DEFAULT)."""
-        raw = self.locals or {}
-        return [k for k in raw.keys() if k != "DEFAULT"]
+    # ── Which servers have a block in fh_report.yaml ───────────────────────
+    # A block is written either as `<node>: <instance>: {...}` (the layout
+    # DCSServerBot recommends on a cluster, where instance names repeat) or as
+    # the flat `<instance>: {...}`; both can live in the same file.
 
-    def _eligible_instances(self, interaction: discord.Interaction) -> list[str]:
-        """Configured instances the user can actually pick: the ones DCSServerBot
+    def _block_for(self, server) -> tuple[dict | None, str | None]:
+        """(block, "node" | "flat") of this server, or (None, None). The
+        `<node>: <instance>` entry wins over the flat one."""
+        raw = self.locals or {}
+        instance = server.instance.name
+        node = _node_name(server)
+        node_block = raw.get(node) if node else None
+        if isinstance(node_block, dict) and isinstance(node_block.get(instance), dict) and node_block[instance]:
+            return node_block[instance], "node"
+        flat = raw.get(instance)
+        if isinstance(flat, dict) and flat and instance != "DEFAULT" and instance not in self._node_names():
+            return flat, "flat"
+        return None, None
+
+    def _node_names(self) -> set[str]:
+        return {_node_name(s) for s in self.bot.servers.values() if _node_name(s)}
+
+    def _ambiguous_flat(self) -> set[str]:
+        """Instance names that several running servers share while only a flat
+        block names them: the block cannot say which one it is for."""
+        groups: dict[str, int] = {}
+        for srv in self.bot.servers.values():
+            if srv.status == Status.UNREGISTERED:
+                continue
+            if self._block_for(srv)[1] == "flat":
+                groups[srv.instance.name] = groups.get(srv.instance.name, 0) + 1
+        return {name for name, n in groups.items() if n > 1}
+
+    def _has_block(self, server) -> bool:
+        block, kind = self._block_for(server)
+        if not block:
+            return False
+        return not (kind == "flat" and server.instance.name in self._ambiguous_flat())
+
+    def _configured_servers(self) -> list:
+        """The servers Fh_Report works with: those with a (non-ambiguous) block."""
+        ambiguous = self._ambiguous_flat()
+        out = []
+        for srv in self.bot.servers.values():
+            block, kind = self._block_for(srv)
+            if block and not (kind == "flat" and srv.instance.name in ambiguous):
+                out.append(srv)
+        return out
+
+    def _eligible_servers(self, interaction: discord.Interaction) -> list:
+        """Configured servers the user can actually pick: the ones DCSServerBot
         has registered (and shows to this user), which is what the `server`
         option lists. A leftover or offline block in fh_report.yaml must not count
         as a second server the user can't see."""
         is_admin = _FHServerTransformer.is_admin(interaction)
         out = []
-        for name in self._configured_instances():
-            srv = self._get_server_by_instance(name)
-            if srv is None or srv.status == Status.UNREGISTERED:
+        for srv in self._configured_servers():
+            if srv.status == Status.UNREGISTERED:
                 continue
             if (is_admin and srv.locals.get("managed_by") and
                     not utils.check_roles(srv.locals.get("managed_by"), interaction.user)):
                 continue
-            out.append(name)
+            out.append(srv)
         return out
+
+    def _warn_config_mismatches(self, raw: dict) -> None:
+        """Log (once) what in fh_report.yaml cannot work: servers that share an
+        instance name without the config saying which node, and blocks that
+        match no server. A grace period avoids false alarms while remote nodes
+        are still registering; a warning re-arms once the block matches again."""
+        for name in sorted(self._ambiguous_flat()):
+            if name not in _ambiguous_warned:
+                _ambiguous_warned.add(name)
+                nodes = ", ".join(sorted(_node_name(s) or "?" for s in self.bot.servers.values()
+                                         if s.instance.name == name and s.status != Status.UNREGISTERED))
+                self.log.warning(
+                    f"Fh_Report: instance '{name}' exists on several nodes ({nodes}) and fh_report.yaml names it "
+                    f"without a node, so none of them gets a report. Write the block as '<node>: {name}: ...' "
+                    f"(one per node), or give the instances different names.")
+        _ambiguous_warned.intersection_update(self._ambiguous_flat())
+
+        nodes = self._node_names()
+        servers = list(self.bot.servers.values())
+        now_ts = datetime.now(timezone.utc).timestamp()
+        entries = []                       # (label, matched, hint)
+        for key, value in raw.items():
+            if key == "DEFAULT":
+                continue
+            if key in nodes and isinstance(value, dict):
+                for instance in value:
+                    entries.append((f"{key}/{instance}",
+                                    any(_node_name(s) == key and s.instance.name == instance for s in servers),
+                                    f"node '{key}' has no instance named '{instance}'"))
+            else:
+                hint = "check the instance name in nodes.yaml"
+                if isinstance(value, dict) and value and all(isinstance(v, dict) for v in value.values()):
+                    hint = "it looks like a node block, but no node has this name"
+                entries.append((key, any(s.instance.name == key for s in servers), hint))
+        for label, matched, hint in entries:
+            if matched:
+                _unmatched_instance_since.pop(label, None)
+                _unmatched_instance_warned.discard(label)
+                continue
+            first_seen = _unmatched_instance_since.setdefault(label, now_ts)
+            if (now_ts - first_seen) < _UNMATCHED_INSTANCE_GRACE_SECONDS:
+                continue
+            if label not in _unmatched_instance_warned:
+                _unmatched_instance_warned.add(label)
+                self.log.warning(
+                    f"Fh_Report: block '{label}' in fh_report.yaml doesn't match any DCSServerBot "
+                    f"server — {hint}. This block will be skipped until fixed.")
+
+    def _migrate_message_ids(self) -> None:
+        """Message ids used to be keyed by instance name only; they are now keyed
+        node/instance. A plain key moves to the one server that has that instance
+        name; if several do it is dropped (the plugin finds its message again by
+        searching the channel, so nothing is posted twice)."""
+        legacy = [k for k in self._message_ids if "/" not in k]
+        changed = False
+        for key in legacy:
+            owners = [s for s in self.bot.servers.values() if s.instance.name == key]
+            if not owners:
+                continue                          # not registered yet: try again next cycle
+            value = self._message_ids.pop(key)
+            if len(owners) == 1 and _node_name(owners[0]):
+                self._message_ids.setdefault(_server_key(owners[0]), value)
+            changed = True
+        if changed:
+            self._save_message_ids()
 
     def _channel_server(self, interaction: discord.Interaction):
         """The server DCSServerBot assigns to the channel of the command, or None."""
@@ -3563,17 +3665,25 @@ class Fh_Report(Plugin):
         except Exception:
             return None
 
-    def _get_server_by_instance(self, instance_name: str):
-        """Find the DCSSB Server object matching a configured instance name."""
-        for server in self.bot.servers.values():
-            if server.instance.name == instance_name:
+    def _server_by_key(self, key: str):
+        """The Server for a `node/instance` key (a bare instance name also
+        works when only one server has it)."""
+        servers = list(self.bot.servers.values())
+        for server in servers:
+            if _server_key(server) == key:
                 return server
-        return None
+        owners = [s for s in servers if s.instance.name == key]
+        return owners[0] if len(owners) == 1 else None
 
-    def _merged_cfg(self, instance_name: str) -> dict:
+    def _merged_cfg(self, who) -> dict:
+        """DEFAULT plus the block of a server (a Server, or its key)."""
+        server = who if not isinstance(who, str) else self._server_by_key(who)
         raw = self.locals or {}
         cfg = dict(raw.get("DEFAULT") or {})
-        cfg.update(raw.get(instance_name) or {})
+        if server is not None:
+            cfg.update(self._block_for(server)[0] or {})
+        elif isinstance(who, str) and isinstance(raw.get(who), dict):
+            cfg.update(raw[who])
         return cfg
 
     def _allowed_command_channels(self, instance_name: str) -> set[str]:
@@ -3599,7 +3709,7 @@ class Fh_Report(Plugin):
         """Public (DCS) server name for a configured instance — what users
         actually know it as. Never falls back to the internal nodes.yaml
         instance name, which users have no reason to recognise."""
-        srv = self._get_server_by_instance(instance_name)
+        srv = self._server_by_key(instance_name)
         return srv.name if srv else "this server"
 
     def _resolve_server(self, interaction: discord.Interaction,
@@ -3616,29 +3726,30 @@ class Fh_Report(Plugin):
         - Channel: unrestricted unless commands_channel_id is set; then only the
           instance's channel_id or one listed in commands_channel_id.
         """
-        configured = self._configured_instances()
+        configured = self._configured_servers()
         if not configured:
+            if any(k != "DEFAULT" for k in (self.locals or {})):
+                return None, ("❌ That server isn't currently available in DCSServerBot — it may still be "
+                              "registering, try again shortly.")
             return None, "❌ Fh_Report has no servers configured."
 
         # Nothing registered yet (still starting up): fall back to the whole config.
-        available = self._eligible_instances(interaction) or configured
+        available = self._eligible_servers(interaction) or configured
         if len(available) == 1:
-            server_name = available[0]
+            srv = available[0]
         else:
             if not server_param:
                 # The `server` list pre-selects the server of the channel the command is
                 # run in (DCSServerBot's own rule) and lists only that one; leaving the
                 # option empty must mean exactly that server, not an error.
                 srv = self._channel_server(interaction)
-                if srv is not None and srv.instance.name in available:
-                    server_param = srv
-                else:
-                    names = ", ".join(f"**{getattr(self._get_server_by_instance(n), 'name', n)}**" for n in available)
+                if srv is None or srv not in available:
+                    names = ", ".join(f"**{s.name}**" for s in available)
                     return None, (
                         f"❌ More than one server is available ({names}) — please choose one "
                         f"from the `server` option list."
                     )
-            if isinstance(server_param, str):
+            elif isinstance(server_param, str):
                 srv = self.bot.servers.get(server_param)
                 if srv is None:
                     return None, (
@@ -3647,9 +3758,9 @@ class Fh_Report(Plugin):
                     )
             else:
                 srv = server_param
-            if srv.instance.name not in configured:
+            if srv not in configured:
                 return None, f"❌ Fh_Report isn't configured for **{srv.name}**."
-            server_name = srv.instance.name
+        server_name = _server_key(srv)
 
         cfg = self._merged_cfg(server_name)
         if cfg.get("commands_channel_id") and str(interaction.channel_id) not in self._allowed_command_channels(server_name):
@@ -3691,7 +3802,7 @@ class Fh_Report(Plugin):
         if err:
             await interaction.followup.send(err, ephemeral=True)
             return None
-        srv = self._get_server_by_instance(instance_name)
+        srv = self._server_by_key(instance_name)
         if srv is None:
             await interaction.followup.send(
                 "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
@@ -3735,7 +3846,7 @@ class Fh_Report(Plugin):
             # case where the `players` table/columns aren't what's expected.
             pass
 
-        srv = self._get_server_by_instance(server_name)
+        srv = self._server_by_key(server_name)
         if srv is None:
             return []
         cfg       = self._merged_cfg(server_name)
