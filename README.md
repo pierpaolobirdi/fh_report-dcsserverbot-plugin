@@ -399,60 +399,71 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 ## Multi-node (Master + Agents)
 
-Nothing extra is needed on a cluster, but a few things are worth knowing:
+### What runs where
 
-- **Everything runs on the Master.** It reads and writes each instance's Foothold files (the `Saves` folder, including `.fhc`) through DCSServerBot's node API, wherever the instance runs. No shared drive and nothing to install on the agent nodes. If you set `saves_dir` by hand, it is a path **on the node that hosts the instance**; left empty it is found automatically.
-- **Servers are identified by node and instance.** Instance names are unique per node, not per cluster, and DCSServerBot's default is the same on every node (`DCS.dcs_serverrelease`). On a cluster write each block under its node, the layout DCSServerBot itself uses for plugin configs:
+Fh_Report runs **only on the Master**. It reads and writes each instance's Foothold files (the `Saves` folder, including `.fhc`) through DCSServerBot's node API, wherever the instance runs. Nothing is installed on the agent nodes and no shared drive is needed. If you set `saves_dir` by hand, it is a path **on the node that hosts the instance**; left empty it is found automatically.
 
-  ```yaml
-  DEFAULT:
-    report_layout: R
+### How a server is identified
 
-  MyNode1:
-    DCS.dcs_serverrelease:
-      channel_id: 1234567890123456789
-      campaign_name: "Server A"
+A server is identified by its **node name** plus its **instance name**, not by the instance name alone. The node name is the one from `nodes.yaml`, the same you use in DCSServerBot's other plugin configs. Instance names only have to be unique inside one node, and DCSServerBot's default (`DCS.dcs_serverrelease`) appears on every node of a cluster, so the instance name alone cannot say which server you mean.
 
-  MyNode2:
-    DCS.dcs_serverrelease:
-      channel_id: 1234567890123456780
-      campaign_name: "Server B"
+### Writing the config
 
-  # the flat form still works, mixed in the same file (instance name unique in the cluster)
-  DCS.otra:
-    channel_id: 1234567890123456781
-  ```
+Two forms are accepted, and **they can be mixed in the same file**.
 
-  The flat form (`DCS.otra:` at the top level) still works and both can share one file; a `<node>:` entry wins over a flat one. A flat block whose name belongs to instances of **several nodes** cannot say which one it is for, so **none of them gets a report** and a warning in the bot log tells you to use the node form. Each server keeps its own Discord message.
-- **Choose which instances get a report** with the blocks of `fh_report.yaml` and `enable_updates` (see [below](#enabling-or-disabling-per-instance-enable_updates)). An instance without a block is ignored; `enable_updates: false` keeps its block but silences it. With many groups on one cluster, `enable_updates: false` in `DEFAULT` and `true` only in the blocks you want is a clean way to opt servers in.
+**By node (recommended on a cluster):** each block goes under its node.
+
+```yaml
+DEFAULT:
+  report_layout: R
+
+MyNode1:
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456789
+    campaign_name: "Server A"
+
+MyNode2:
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456780
+    campaign_name: "Server B"
+
+# the flat form still works, mixed in the same file (instance name unique in the cluster)
+DCS.otra:
+  channel_id: 1234567890123456781
+```
+
+**Flat (the classic form):** the block is named after the instance (`DCS.otra:` above). It is fine whenever that name is unique in your cluster. With a single node nothing changes: your existing config keeps working untouched.
+
+For each server the plugin looks, in this order, for: (1) a block under its **node** (`<node>:` then `<instance>:`), (2) a **flat** block named after the instance, (3) otherwise the server has no block and is ignored. So a `<node>:` entry wins over a flat block with the same instance name. `DEFAULT` applies to every server, whichever form it uses, and each block overrides it as usual.
+
+### When a flat block is ambiguous
+
+If a flat block's name matches instances on **several nodes**, the plugin cannot know which one you meant. **None of those servers gets a report** (it never guesses or posts to the wrong channel) and a **warning is written once to the bot log** listing the nodes involved. Fix it by moving the block under the node it belongs to; if the same settings are meant for several nodes, repeat the block under each one.
+
+The bot log also tells you about entries that match nothing: a `<node>:` name no node has, a node without that instance, or a flat block whose instance does not exist.
+
+### Discord messages and commands
+
+- Each server keeps its **own** report message in its own channel. Message ids saved by older versions are moved automatically to the right server when the instance name is unique; if it is ambiguous the old id is dropped and the plugin finds its message again by looking in the channel, so nothing is duplicated.
+- The `server` option of `/fh_report player` and the other commands lists the servers of every node that DCSServerBot has registered and that have a block. With only one available it is used automatically; with several and `server` left empty, the server **of the channel where you run the command** is used; if that channel belongs to no server, the available ones are listed.
+
+### Choosing which servers get a report
+
+A server without a block is ignored, so to have reports on only some servers, write only their blocks. `enable_updates: false` (see [below](#enabling-or-disabling-per-instance-enable_updates)) pauses a server's report while keeping its block; the `/fh_report player` command keeps working for it.
+
 - **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
 - **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.
-- **Slash commands** list the servers of every node that DCSServerBot has registered and that have a block.
 
 ---
 
 ## Enabling or disabling per instance (`enable_updates`)
 
-Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (the key is the instance name from `nodes.yaml`). `enable_updates` lets you switch any of them on or off without deleting its settings.
+Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (see [Multi-node](#multi-node-master--agents) for how a block is matched to a server). `enable_updates` lets you pause any of them without deleting its settings.
 
 - `enable_updates: true` (default) — normal operation.
-- `enable_updates: false` — that instance never reads files, posts or edits anything, as if it weren't in the config at all. Its settings stay in the file, so you can turn it back on later.
+- `enable_updates: false` — that instance's report is paused: nothing is read, posted or edited for it. Its settings stay in the file, so you can turn it back on later. The `/fh_report player` and `podium` commands keep working for it (removing the block would remove them too).
 
-Because `DEFAULT` is merged into every block, you can also work the other way round: switch everything off by default and enable only the instances you want.
-
-```yaml
-DEFAULT:
-  enable_updates: false      # off unless an instance says otherwise
-
-DCS.foothold1:
-  enable_updates: true       # Fh_Report active here
-  channel_id: 1458145804685541508
-  campaign_name: "Operation A"
-
-DCS.foothold2:               # inherits false: stays silent
-  channel_id: 1458145804685541509
-  campaign_name: "Operation B"
-```
+It applies to a server already matched to a block; it does not fix an ambiguous flat block (see [Multi-node](#multi-node-master--agents)).
 
 Changes are picked up when the plugin is reloaded (or the bot restarts).
 
