@@ -397,6 +397,19 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 ---
 
+## Multi-node (Master + Agents)
+
+Nothing extra is needed on a cluster, but a few things are worth knowing:
+
+- **Everything runs on the Master.** It reads and writes each instance's Foothold files (the `Saves` folder, including `.fhc`) through DCSServerBot's node API, wherever the instance runs. No shared drive and nothing to install on the agent nodes. If you set `saves_dir` by hand, it is a path **on the node that hosts the instance**; left empty it is found automatically.
+- **Servers are identified by the instance name** from `nodes.yaml`, which is the key of each block in `fh_report.yaml`. Instance names are unique per node, not per cluster, and DCSServerBot's default is the same on every node (`DCS.dcs_serverrelease`). Fh_Report does not use the node name, so **give the instances of different nodes different names** if more than one of them should have a report; two instances with the same name would share one block and one Discord message.
+- **Choose which instances get a report** with the blocks of `fh_report.yaml` and `enable_updates` (see [below](#enabling-or-disabling-per-instance-enable_updates)). An instance without a block is ignored; `enable_updates: false` keeps its block but silences it. With many groups on one cluster, `enable_updates: false` in `DEFAULT` and `true` only in the blocks you want is a clean way to opt servers in.
+- **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
+- **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.
+- **Slash commands** list the servers of every node that DCSServerBot has registered and that have a block.
+
+---
+
 ## Enabling or disabling per instance (`enable_updates`)
 
 Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (the key is the instance name from `nodes.yaml`). `enable_updates` lets you switch any of them on or off without deleting its settings.
