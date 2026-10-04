@@ -467,7 +467,7 @@ It applies to a server already matched to a block; it does not fix an ambiguous 
 
 Changes are picked up when the plugin is reloaded (or the bot restarts).
 
-The older `disable_updates: true` still works exactly like `enable_updates: false`; if both are set, `enable_updates` wins.
+`disable_updates` (older versions) no longer exists: the installer's migration turns it into `enable_updates` with the opposite value. If you update by copying files without running it, rename it yourself, or that server will report again.
 
 ### Duplicate installs
 

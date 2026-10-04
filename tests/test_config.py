@@ -90,10 +90,7 @@ def test_server_block_override_is_not_flagged_obsolete(tmp_path):
     ({"enable_updates": True}, True),
     ({"enable_updates": False}, False),
     ({"enable_updates": "false"}, False),
-    ({"disable_updates": True}, False),
-    ({"disable_updates": False}, True),
-    ({"enable_updates": True, "disable_updates": True}, True),
-    ({"enable_updates": False, "disable_updates": False}, False),
+    ({"disable_updates": True}, True),      # no longer read
 ])
 def test_updates_enabled(cfg, expected):
     assert commands._updates_enabled(cfg) is expected
@@ -350,3 +347,27 @@ def test_unquoted_flat_blocks_are_checked_for_unknown_options_too(tmp_path):
     _, out = _migrate(tmp_path, text)
     warning = out.split("no longer used in this version of Fh_Report.")[1]
     assert "- nope_option" in warning and "- sat" not in warning
+
+
+def _mig_upd(text):
+    import migrate_config
+    return migrate_config.migrate_disable_updates(text)
+
+
+def test_disable_updates_migrated():
+    src = "DEFAULT:\n  disable_updates: false\nA:\n  disable_updates: true  # x\n  channel_id: 1\n"
+    out, ch = _mig_upd(src)
+    assert "  enable_updates: true  # before: disable_updates: false" in out
+    assert "  enable_updates: false  # before: disable_updates: true" in out
+    assert "disable_updates: true  # x" not in out
+    assert len(ch) == 2
+    assert _mig_upd(out)[0] == out            # idempotent
+
+
+def test_disable_updates_in_node_block_and_enable_wins():
+    src = ("N1:\n  I:\n    disable_updates: true\n    channel_id: 1\n"
+           "B:\n  enable_updates: true\n  disable_updates: true\n")
+    out, _ = _mig_upd(src)
+    assert "    enable_updates: false  # before: disable_updates: true" in out
+    assert "disable_updates" not in out.split("B:")[1]
+    assert "  enable_updates: true" in out.split("B:")[1]

@@ -325,8 +325,6 @@
 #                              actually post.
 #                              Can be set in DEFAULT (e.g. false) and turned on
 #                              only for the instances that should have it.
-#                      The old disable_updates: true still works the same as
-#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled

@@ -337,8 +337,6 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                              actually post.
 #                              Can be set in DEFAULT (e.g. false) and turned on
 #                              only for the instances that should have it.
-#                      The old disable_updates: true still works the same as
-#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -395,7 +393,6 @@ KNOWN_VARS = {
     "show_bob",
     "excluded_ucids",
     "enable_updates",
-    "disable_updates",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
     "saves_dir",
@@ -883,6 +880,49 @@ def migrate_reset_times(content: str) -> tuple[str, list[str]]:
     return content, changes
 
 
+def migrate_disable_updates(content: str) -> tuple[str, list[str]]:
+    """disable_updates (true = off) became enable_updates (false = off). A live
+    line is rewritten with the opposite value and the old one kept in a comment.
+    If the same block already sets enable_updates, that one rules (as before)
+    and the old line is simply dropped. Running it again does nothing."""
+    truthy, falsy = ("true", "1", "yes"), ("false", "0", "no")
+    lines = content.split("\n")
+    line_re = re.compile(r'^([ \t]+)disable_updates[ \t]*:[ \t]*["\']?([^\s"\'#]*)["\']?[ \t]*(#.*)?$')
+    out: list[str] = []
+    changes: list[str] = []
+
+    def region_has_enable(i: int, indent: int) -> bool:
+        def same_block(j):
+            t = lines[j]
+            if not t.strip() or t.lstrip().startswith("#"):
+                return True
+            return len(t) - len(t.lstrip()) >= indent
+        for rng in (range(i - 1, -1, -1), range(i + 1, len(lines))):
+            for j in rng:
+                if not same_block(j):
+                    break
+                m = re.match(r'^([ \t]+)enable_updates[ \t]*:', lines[j])
+                if m and len(m.group(1)) == indent:
+                    return True
+        return False
+
+    for i, line in enumerate(lines):
+        m = line_re.match(line)
+        val = m.group(2).lower() if m else None
+        if not m or val not in truthy + falsy:
+            out.append(line)
+            continue
+        indent = m.group(1)
+        old = f"disable_updates: {m.group(2)}"
+        if region_has_enable(i, len(indent)):
+            changes.append(f"{old} removed (enable_updates is already set in that block)")
+            continue
+        new = "false" if val in truthy else "true"
+        out.append(f"{indent}enable_updates: {new}  # before: {old}")
+        changes.append(f"{old} -> enable_updates: {new}")
+    return "\n".join(out), changes
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: migrate_config.py <path_to_fh_report.yaml>")
@@ -954,6 +994,13 @@ def main():
     if time_changes:
         print("  Daily reset times are now HH:MM:")
         for item in time_changes:
+            print(f"    {item}")
+
+    # ── 1g. disable_updates -> enable_updates (opposite value).
+    content, upd_changes = migrate_disable_updates(content)
+    if upd_changes:
+        print("  disable_updates is now enable_updates:")
+        for item in upd_changes:
             print(f"    {item}")
 
     # ── 1d. Remove keys of features retired from Fh_Report ──────────────────
