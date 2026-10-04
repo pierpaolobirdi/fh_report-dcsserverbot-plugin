@@ -96,3 +96,40 @@ def test_resuming_updates_at_once_even_with_a_long_interval():
     assert plugin._due_servers([srv])                  # the update on entering the pause
     srv.status = S.RUNNING
     assert plugin._due_servers([srv])                  # back to running: updated at once
+
+
+def test_a_stopped_server_gets_one_update_when_its_daily_reset_passes():
+    from datetime import datetime, timezone, timedelta
+    S = commands.Status
+    srv = _srv(S.STOPPED)
+    plugin = _setup({"DCS.a": {"channel_id": 1}}, [srv])
+    reset = [datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)]
+    plugin._latest_reset = lambda s: reset[0]
+    assert plugin._due_servers([srv])                    # first beat
+    assert not plugin._due_servers([srv])                # same reset: nothing to do
+    reset[0] += timedelta(days=1)                        # the reset time passes
+    assert plugin._due_servers([srv])                    # one refresh to close the day
+    assert not plugin._due_servers([srv]) and not plugin._due_servers([srv])
+
+
+def test_a_running_server_needs_no_extra_refresh_for_the_reset():
+    from datetime import datetime, timezone, timedelta
+    S = commands.Status
+    srv = _srv(S.RUNNING)
+    plugin = _setup({"DCS.a": {"channel_id": 1}}, [srv])
+    reset = [datetime(2026, 5, 1, tzinfo=timezone.utc)]
+    plugin._latest_reset = lambda s: reset[0]
+    plugin._due_servers([srv])
+    srv.status = S.PAUSED
+    assert plugin._due_servers([srv])                    # the status change refresh
+    reset[0] += timedelta(days=1)
+    assert plugin._due_servers([srv])                    # ...and the reset one
+    assert not plugin._due_servers([srv])
+
+
+def test_the_latest_reset_follows_the_config():
+    from datetime import datetime, timezone
+    srv = _srv(commands.Status.STOPPED)
+    plugin = _setup({"DCS.a": {"channel_id": 1, "daily_reset_hour": "4:00"}}, [srv])
+    got = plugin._latest_reset(srv)
+    assert got is not None and (got.hour, got.minute) == (4, 0) and got <= datetime.now(timezone.utc)

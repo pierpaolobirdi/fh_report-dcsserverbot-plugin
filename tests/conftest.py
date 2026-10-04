@@ -89,6 +89,7 @@ def make_plugin(**attrs):
     p._last_maps, p._map_probed = {}, set()
     p._campaign_absent, p._campaign_watch = set(), {}
     p._base_interval, p._beat, p._beats_left, p._last_status = 300, 300, {}, {}
+    p._reset_handled = {}
     for k, v in attrs.items():
         setattr(p, k, v)
     return p
