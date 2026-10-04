@@ -275,3 +275,19 @@ def test_per_table_lines_the_user_has_are_kept_and_max_pilots_zero_is_added_besi
     assert _live(migrated) == {"max_pilots": "0", "max_pilots_R": "10"}          # S and D stay unlimited as before
     again, _ = _migrate(tmp_path, migrated)
     assert again == migrated
+
+
+def test_every_live_line_of_the_default_block_explains_itself():
+    assert all(v.strip() for v in mc.COMMENTS.values())
+    block = open(YAML, encoding="utf-8").read().split("DEFAULT:")[1].split("\n\n")[0]
+    bare = [l for l in block.splitlines() if re.match(r"^  \w+:", l) and "#" not in l]
+    assert bare == []
+
+
+def test_migration_gives_a_comment_to_a_value_that_had_none(tmp_path):
+    text = open(YAML, encoding="utf-8").read().replace("  strip_callsign: false  # false = show names as-is  |  true = remove the flight callsign prefix (squadron tags like [MA] are kept)\n", "  strip_callsign: true  \n")
+    assert "  strip_callsign: true  \n" in text                          # the old, bare line
+    migrated, _ = _migrate(tmp_path, text)
+    assert re.search(r"^  strip_callsign: true  # false = show names as-is", migrated, re.M)
+    again, _ = _migrate(tmp_path, migrated)
+    assert again == migrated

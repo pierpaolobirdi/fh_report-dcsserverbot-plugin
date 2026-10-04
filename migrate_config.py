@@ -432,7 +432,7 @@ COMMENTS = {
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
     "sort_zones_by_waypoint": "# false = sort by level/damage  |  true = sort by mission waypoint number",
-    "strip_callsign":   "",
+    "strip_callsign":   "# false = show names as-is  |  true = remove the flight callsign prefix (squadron tags like [MA] are kept)",
     "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
     "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "pilot_card_icon":  "# Emoji at the start of the pilot career card line (default: 🔸)",

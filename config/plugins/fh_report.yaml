@@ -341,7 +341,7 @@ DEFAULT:
   zone_name_length: 16  # Max chars for zone names (8-24, default 16)
   slot_status: false  # false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△
   sort_zones_by_waypoint: false  # false = sort by level/damage  |  true = sort by mission waypoint number
-  strip_callsign: false  
+  strip_callsign: false  # false = show names as-is  |  true = remove the flight callsign prefix (squadron tags like [MA] are kept)
   max_pilots: 20  # Max pilots listed in every table without a limit of its own (0 = no limit)
 #  max_pilots_R: 20  # Max pilots in the Rank table
 #  max_pilots_S: 20  # Max pilots in the Session table
