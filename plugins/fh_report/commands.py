@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.39"
+FH_REPORT_RELEASE = "14.1.40"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1291,6 +1291,28 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
 
 
+_pilot_cap_warned: set[str] = set()
+
+
+def _pilot_cap(cfg: dict, role: str) -> int | None:
+    """How many pilots one table (role = R, S or D) may list: max_pilots_<role>,
+    else max_pilots, else no limit (None). A limit is a whole number of 1 or
+    more (0 also means no limit); anything else is ignored with one warning."""
+    for key in (f"max_pilots_{role}", "max_pilots"):
+        value = cfg.get(key)
+        if value is None or value == "":
+            continue
+        ok = (isinstance(value, int) and not isinstance(value, bool)) or \
+             (isinstance(value, str) and value.strip().isdigit())
+        if ok and int(value) >= 0:
+            return int(value) or None
+        if f"{key}={value!r}" not in _pilot_cap_warned:
+            _pilot_cap_warned.add(f"{key}={value!r}")
+            log.warning(f"Fh_Report: {key} {value!r} is not a whole number of 1 or more — no limit applied.")
+        return None
+    return None
+
+
 DISCORD_MAX_FIELDS = 25   # Discord rejects embeds with more fields
 
 
@@ -1793,9 +1815,7 @@ def _render_layout_tables(
     embed (table options read from `cfg`). `points_detail` is a dict
     {"D": "...", "S": "...", "R": "..."} — a role missing from it shows only
     its own value. See the module-level comment above for the grammar."""
-    max_pilots          = cfg.get("max_pilots") or None
-    max_pilots_2t       = cfg.get("max_pilots_2t") or None
-    max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None
+    pilot_caps          = {role: _pilot_cap(cfg, role) for role in ("R", "S", "D")}
     show_punishment     = _bool_cfg(cfg.get("show_punishment"))
     show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots"))
     strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign"))
@@ -1824,17 +1844,6 @@ def _render_layout_tables(
     badge_role_done = False
 
     pp = punishment_points or {}
-    surplus = 0
-
-    # All tables share one cap chosen by the number of R/S/D tables:
-    # max_pilots_3t -> max_pilots_2t -> max_pilots. Unused room cascades on.
-    _table_count = len(roles_in_layout)
-    if _table_count <= 1:
-        table_limit = max_pilots
-    elif _table_count == 2:
-        table_limit = max_pilots_2t or max_pilots
-    else:
-        table_limit = max_pilots_3t or max_pilots_2t or max_pilots
 
     for letter in layout:
         if letter == "P":
@@ -1873,12 +1882,10 @@ def _render_layout_tables(
         if not items:
             continue
 
-        limit = table_limit
         total_items = len(items)
-        limit_eff = (limit + surplus) if limit else None
-        if limit_eff:
-            items = items[:limit_eff]
-        surplus = max(0, limit_eff - len(items)) if limit_eff else 0
+        limit = pilot_caps[role]
+        if limit:
+            items = items[:limit]
         hidden = total_items - len(items)
 
         lines = []

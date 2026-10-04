@@ -71,9 +71,8 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
 | `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
-| `max_pilots` | all | Max pilots when `report_layout` has just 1 table |
-| `max_pilots_2t` | all | Max pilots per table when `report_layout` has exactly 2 tables. Falls back to `max_pilots` |
-| `max_pilots_3t` | all | Max pilots per table when `report_layout` has 3 or more tables. Falls back to `max_pilots_2t`, then `max_pilots` |
+| `max_pilots` | all | Max pilots listed in each leaderboard table (R, S, D) — a whole number of 1 or more; omit it to list everyone |
+| `max_pilots_R` / `max_pilots_S` / `max_pilots_D` | `max_pilots` | The same, for the Rank / Session / Daily table only. See [Pilot limits](#pilot-limits-per-table) |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
@@ -468,6 +467,25 @@ DEFAULT:
 - It is per server, since the Scheduler's `timezone` is. Changing it for your restarts moves the daily reset too.
 
 It affects everything that depends on the daily reset: the Daily table, the Podium day labels and the daily `BoB` count. After a change, one daily period is longer or shorter than 24 hours as the counters switch to the new hour (nothing is lost), and the Podium dates are the dates in that zone from then on.
+
+---
+
+## Pilot limits per table
+
+Every table has its own limit, whatever `report_layout` is or rotates through: `max_pilots_R`, `max_pilots_S` and `max_pilots_D` for the Rank, Session and Daily tables, with `max_pilots` as the limit of any table that has none of its own. Nothing is shared or moved between tables, and the Podium has no limit here.
+
+```yaml
+DEFAULT:
+  max_pilots: 15       # every table lists at most 15 pilots...
+  max_pilots_R: 20     # ...except Rank, which lists 20
+  max_pilots_D: 10     # ...and Daily, 10
+```
+
+- A limit is a whole number of 1 or more; `0` means no limit for that table; anything else is ignored with a warning in the bot log.
+- What does not fit is cut with `+ N more pilots`, or listed in extra fields with `show_all_pilots: true`. Discord's own size limits (1024 characters per field, 6000 per embed) still apply when you set none.
+- Pilot cards, `BoB` and the penalty lines make each pilot taller, so a low limit helps when several tables are shown.
+
+Older versions chose the limit by the number of tables (`max_pilots`, `max_pilots_2t`, `max_pilots_3t`). The installer converts them for you, keeping what each table shows today: with a layout of one table, `max_pilots` stays as it is; with two or more it takes the value that `_2t` / `_3t` gave, and a server that changes the layout gets its own explicit lines. The installer prints what it changed. `max_pilots_2t` and `max_pilots_3t` are no longer read, so if you update by copying files without running the installer, set the per-table limits by hand.
 
 ---
 

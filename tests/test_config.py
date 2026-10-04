@@ -168,3 +168,68 @@ def test_migration_adds_show_bob_as_true_and_keeps_a_user_choice(tmp_path):
         text = base.replace("  show_bob: true  #", f"  show_bob: {written}  #")
         again, _ = _migrate(tmp_path, text)
         assert re.search(rf"^  show_bob: {expected}  # ", again, re.M), written
+
+
+# ── pilot limits are per table ─────────────────────────────────────────────────
+
+def _limits_file(layout="R", extra="", server_layout=None, with_old=True):
+    old = "  max_pilots: 20  # note\n  max_pilots_2t: 15\n  max_pilots_3t: 6\n" if with_old else ""
+    server = f"  report_layout: {server_layout}\n" if server_layout else ""
+    return (open(YAML, encoding="utf-8").read()
+            .replace("  report_layout: R  #", f"  report_layout: {layout}  #", 1)
+            .replace("  show_all_pilots: false  #", old + "  show_all_pilots: false  #", 1)
+            .replace("DCS_Server:                             # instance name from nodes.yaml\n",
+                     "DCS_Server:                             # instance name from nodes.yaml\n" + server + extra, 1))
+
+
+def _live(text, section="DEFAULT"):
+    block = text.split(f"{section}:")[1].split("\n\n")[0] if section == "DEFAULT" else text.split(f"{section}:")[1]
+    return {m.group(1): m.group(2) for m in re.finditer(r"^[ \t]+(max_pilots\w*):[ \t]*(\d+)", block, re.M)}
+
+
+@pytest.mark.parametrize("layout, expected", [
+    ("R", {"max_pilots": "20"}),                          # one table: the old max_pilots, unchanged
+    ("DS", {"max_pilots": "15"}),                         # two tables: what max_pilots_2t gave
+    ("DSR", {"max_pilots": "6"}),                         # three tables: what max_pilots_3t gave
+    ("DP, SR", {"max_pilots": "15", "max_pilots_D": "20"}),   # rotation: D alone had 20, S and R shared 15
+])
+def test_old_limits_become_per_table_limits_that_show_the_same_pilots(tmp_path, layout, expected):
+    migrated, out = _migrate(tmp_path, _limits_file(layout))
+    assert _live(migrated) == expected
+    assert "max_pilots_2t" not in migrated and "max_pilots_3t" not in migrated
+    assert "Pilot limits are now per table" in out
+
+
+def test_a_server_with_another_layout_gets_explicit_limits_only_when_it_needs_them(tmp_path):
+    same, _ = _migrate(tmp_path, _limits_file("DS", server_layout="DS"))
+    assert _live(same, "DCS_Server") == {}                                    # it inherits the DEFAULT, same result
+    other, _ = _migrate(tmp_path, _limits_file("DS", server_layout="DSR"))
+    assert _live(other, "DCS_Server") == {"max_pilots": "6"}                   # 3 tables used 6, not the DEFAULT's 15
+    rot, _ = _migrate(tmp_path, _limits_file("DP, SR", server_layout="DS"))
+    assert _live(rot, "DCS_Server") == {"max_pilots_D": "15"}                 # S already inherits 15
+
+
+def test_the_three_limits_end_up_together_in_order_before_show_all_pilots(tmp_path):
+    migrated, _ = _migrate(tmp_path, _limits_file("DP, SR"))
+    lines = [l.strip() for l in migrated.split("DEFAULT:")[1].split("\n\n")[0].splitlines()]
+    at = [i for i, l in enumerate(lines) if re.match(r"#?\s*max_pilots", l)]
+    assert [lines[i].lstrip("# ").split(":")[0] for i in at] == ["max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D"]
+    assert at == list(range(at[0], at[0] + 4)) and lines[at[-1] + 1].startswith("show_all_pilots")
+    assert lines[at[0]].startswith("max_pilots:") and lines[at[1]].startswith("#")     # live kept, missing ones as examples
+
+
+def test_a_config_without_the_old_two_and_three_table_keys_is_left_as_it_was(tmp_path):
+    text = _limits_file("DSR", with_old=False).replace("  show_all_pilots: false  #", "  max_pilots: 12\n  show_all_pilots: false  #", 1)
+    migrated, out = _migrate(tmp_path, text)
+    assert _live(migrated) == {"max_pilots": "12"} and "Pilot limits are now per table" not in out
+
+
+def test_the_pilot_limit_migration_is_repeatable(tmp_path):
+    migrated, _ = _migrate(tmp_path, _limits_file("DP, SR", server_layout="DS"))
+    again, out = _migrate(tmp_path, migrated)
+    assert again == migrated and "Pilot limits are now per table" not in out
+
+
+def test_the_new_limit_keys_are_known_and_the_old_ones_are_not():
+    assert {"max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D"} <= mc.KNOWN_VARS
+    assert not {"max_pilots_2t", "max_pilots_3t"} & mc.KNOWN_VARS

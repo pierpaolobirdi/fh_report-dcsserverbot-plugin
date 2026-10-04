@@ -199,13 +199,16 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
-#   max_pilots       - Max pilots shown when report_layout has just 1 table (default: all)
-#   max_pilots_2t    - Max pilots per table when report_layout has exactly
-#                      2 tables (Podium doesn't count)                    (default: all)
-#                      Falls back to max_pilots if not set.
-#   max_pilots_3t    - Max pilots per table when report_layout has 3 or
-#                      more tables (Podium doesn't count)                 (default: all)
-#                      Falls back to max_pilots_2t, then max_pilots.
+#   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
+#                      Daily (default: all). A whole number of 1 or more.
+#   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
+#   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
+#   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
+#                      Every table has its own limit, whatever report_layout is or
+#                      rotates through: nothing is shared or moved between tables. The
+#                      Podium has no limit here. What does not fit is cut with
+#                      "+ N more pilots" (see show_all_pilots), and Discord's size
+#                      limits still apply when you set none.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -352,8 +355,9 @@ KNOWN_VARS = {
     "sort_zones_by_waypoint",
     "strip_callsign",
     "max_pilots",
-    "max_pilots_2t",
-    "max_pilots_3t",
+    "max_pilots_R",
+    "max_pilots_S",
+    "max_pilots_D",
     "show_all_pilots",
     "show_pilot_card",
     "pilot_card_icon",
@@ -656,6 +660,127 @@ def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
 
 _DAYS = "mon|tue|wed|thu|fri|sat|sun"
 
+# max_pilots used to depend on how many tables the layout had (max_pilots for one,
+# max_pilots_2t for two, max_pilots_3t for three or more). Now every table has its own
+# limit: max_pilots_R / _S / _D, with max_pilots as the default of all of them.
+_OLD_PILOT_KEYS = re.compile(r"^[ \t]+max_pilots(?:_2t|_3t)?[ \t]*:.*\n", re.MULTILINE)
+_OLD_PILOT_TEMPLATES = re.compile(r"^[ \t]*#[ \t]*max_pilots_(?:2t|3t)[ \t]*:.*\n", re.MULTILINE)
+
+
+def _cap(value: str | None) -> int | None:
+    value = (value or "").strip().strip("\"'")
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def _layout_tables(layout: str) -> list[set]:
+    """Tables (R/S/D) of every rotation group of a report_layout; the Podium
+    and groups without tables ("none") don't count."""
+    groups = [{c for c in g.upper() if c in "RSD"} for g in (layout or "R").split(",")]
+    return [g for g in groups if g]
+
+
+def _old_pilot_caps(layout: str, mp, m2, m3) -> dict:
+    """What the old rule gave each table of this layout (None = unlimited):
+    the limit of the group's size, the most restrictive over the groups a table is in."""
+    caps: dict = {}
+    for group in _layout_tables(layout):
+        n = len(group)
+        limit = mp if n <= 1 else (m2 or mp) if n == 2 else (m3 or m2 or mp)
+        for table in sorted(group):
+            if table not in caps or caps[table] is None:
+                caps[table] = limit
+            elif limit is not None:
+                caps[table] = min(caps[table], limit)
+    return caps
+
+
+def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
+    """max_pilots / _2t / _3t (by number of tables) -> max_pilots / _R / _S / _D
+    (per table), keeping what each table shows today. Only needed when a live
+    _2t or _3t exists: without them the old max_pilots already applied to every
+    table, which is exactly the new meaning. Leftover _2t/_3t template comments are
+    dropped either way."""
+    changes: list[str] = []
+    if not re.search(r"^[ \t]+max_pilots_(?:2t|3t)[ \t]*:", content, re.MULTILINE):
+        content, n = _OLD_PILOT_TEMPLATES.subn("", content)
+        return content, changes
+
+    # A block starts at a live top-level line and runs to the next one: comment lines
+    # at column 0 (the template's commented examples) belong to the block they sit in.
+    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE)
+             if re.match(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$', m.group(0))]
+    blocks = [(h.start(), heads[i + 1].start() if i + 1 < len(heads) else len(content))
+              for i, h in enumerate(heads)]
+    texts = {a: content[a:b] for a, b in blocks}
+
+    def live(text: str, key: str):
+        m = _find_kv_line(text, key)
+        return _cap(m.group(2)) if m else None
+
+    def layout_of(text: str):
+        m = _find_kv_line(text, "report_layout")
+        return m.group(2).strip().strip("\"'") if m and m.group(2).strip() else None
+
+    default_text = next((t for t in texts.values() if t.startswith("DEFAULT")), "")
+    d_layout = layout_of(default_text) or "R"
+    d_old = [live(default_text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+    d_caps = _old_pilot_caps(d_layout, *d_old)
+    present = [t for t in "RSD" if t in d_caps and d_caps[t]]
+    common = max((d_caps[t] for t in present), key=lambda v: [d_caps[t] for t in present].count(v)) if present else None
+    d_new = {t: d_caps[t] for t in d_caps if d_caps[t] != common}      # tables that differ from max_pilots
+    def eff_default(table):                      # what the new DEFAULT gives a table
+        return d_new[table] if table in d_new else common
+
+    def render(indent, default, per_table):
+        out = []
+        if default is not None:
+            out.append(f"{indent}max_pilots: {default}\n")
+        for t in "RSD":
+            if t in per_table:
+                out.append(f"{indent}max_pilots_{t}: {per_table[t] or 0}"
+                           + ("  # 0 = no limit\n" if not per_table[t] else "\n"))
+        return out
+
+    new_content = content
+    for start, end in sorted(blocks, reverse=True):
+        text = texts[start]
+        is_default = text.startswith("DEFAULT")
+        old_lines = list(_OLD_PILOT_KEYS.finditer(text))
+        layout = layout_of(text) or d_layout
+        if is_default:
+            lines = render("  ", common, d_new) if old_lines else []
+            label = "DEFAULT"
+        else:
+            own = [live(text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+            merged = [o if o is not None else d for o, d in zip(own, d_old)]
+            needed = _old_pilot_caps(layout, *merged)
+            differing = {t: c for t, c in needed.items() if c != eff_default(t)}
+            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines else "  ")
+            lines = []
+            if differing:
+                if not d_new and len({needed[t] for t in needed}) == 1:
+                    lines = render(indent, next(iter(needed.values())) or 0, {})
+                else:
+                    lines = render(indent, None, differing)
+            label = text.split(":", 1)[0].strip().strip('"')
+            if not old_lines and not lines:
+                continue
+        if not old_lines and not lines:
+            continue
+        anchor = old_lines[0].start() if old_lines else None
+        if anchor is None:                       # no old line to replace: put it under report_layout
+            m = re.search(r"^[ \t]+report_layout[ \t]*:.*\n", text, re.MULTILINE)
+            anchor = m.end() if m else len(text)
+        stripped = _OLD_PILOT_KEYS.sub("", text)
+        shift = sum(len(m.group(0)) for m in old_lines if m.start() < anchor)
+        text_new = stripped[:anchor - shift] + "".join(lines) + stripped[anchor - shift:]
+        new_content = new_content[:start] + text_new + new_content[end:]
+        was = ", ".join(f"{k} {v}" for k, v in zip(("max_pilots", "_2t", "_3t"), [live(text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]) if v)
+        now = ", ".join(l.split("#")[0].strip().replace(": ", " ") for l in lines) or "no explicit limit needed"
+        changes.append(f"{label}: {was or ('inherited limits' if not is_default else 'no limit')}  →  {now}")
+    new_content = _OLD_PILOT_TEMPLATES.sub("", new_content)
+    return new_content, changes
+
 
 def migrate_reset_times(content: str) -> tuple[str, list[str]]:
     """daily_reset_hour and the days of daily_reset_schedule used to be a plain
@@ -736,6 +861,13 @@ def main():
     if podium_rename_changes:
         print("  Renamed:")
         for item in podium_rename_changes:
+            print(f"    {item}")
+
+    # ── 1f. max_pilots by number of tables -> one limit per table.
+    content, limit_changes = migrate_pilot_limits(content)
+    if limit_changes:
+        print("  Pilot limits are now per table (max_pilots / max_pilots_R / _S / _D):")
+        for item in limit_changes:
             print(f"    {item}")
 
     # ── 1e. Reset times: a plain hour (4) becomes HH:MM (4:00) — format only.
@@ -917,6 +1049,28 @@ def main():
             # daily_reset_hour should always be in DEFAULTS, but fall back
             # to the original position rather than lose the block.
             extra_lines[schedule_start:schedule_start] = schedule_block
+
+    # ── 5d. The pilot limits belong together, in order, right before show_all_pilots
+    # (the option they work with). Live lines keep their value; a missing one
+    # is shown as a commented example.
+    limit_re = re.compile(r"^[ \t]*(#[ \t]*)?(max_pilots(?:_[RSD])?)[ \t]*:")
+    found: dict = {}
+    for l in list(extra_lines):
+        m = limit_re.match(l)
+        if m:
+            extra_lines.remove(l)
+            if m.group(2) not in found or not m.group(1):      # a live line wins over a commented one
+                found[m.group(2)] = l.strip() if not m.group(1) else l.strip()
+    examples = {"max_pilots": "15", "max_pilots_R": "20", "max_pilots_S": "10", "max_pilots_D": "10"}
+    limit_lines = []
+    for key, example in examples.items():
+        if key in found and not found[key].startswith("#"):
+            limit_lines.append("  " + found[key] + "\n")
+        else:
+            limit_lines.append(f"#  {key}: {example}\n")
+    insert_at = next((i for i, l in enumerate(new_default_lines) if l.strip().startswith("show_all_pilots:")),
+                     len(new_default_lines))
+    new_default_lines[insert_at:insert_at] = limit_lines
 
     new_default_block = "DEFAULT:\n" + "".join(new_default_lines)
     if extra_lines:

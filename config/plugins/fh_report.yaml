@@ -187,13 +187,16 @@
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
-#   max_pilots       - Max pilots shown when report_layout has just 1 table (default: all)
-#   max_pilots_2t    - Max pilots per table when report_layout has exactly
-#                      2 tables (Podium doesn't count)                    (default: all)
-#                      Falls back to max_pilots if not set.
-#   max_pilots_3t    - Max pilots per table when report_layout has 3 or
-#                      more tables (Podium doesn't count)                 (default: all)
-#                      Falls back to max_pilots_2t, then max_pilots.
+#   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
+#                      Daily (default: all). A whole number of 1 or more.
+#   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
+#   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
+#   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
+#                      Every table has its own limit, whatever report_layout is or
+#                      rotates through: nothing is shared or moved between tables. The
+#                      Podium has no limit here. What does not fit is cut with
+#                      "+ N more pilots" (see show_all_pilots), and Discord's size
+#                      limits still apply when you set none.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -337,6 +340,10 @@ DEFAULT:
   slot_status: false  # false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△
   sort_zones_by_waypoint: false  # false = sort by level/damage  |  true = sort by mission waypoint number
   strip_callsign: false  
+#  max_pilots: 15
+#  max_pilots_R: 20
+#  max_pilots_S: 10
+#  max_pilots_D: 10
   show_all_pilots: false  # false = cut at limit  |  true = split into multiple fields
   show_pilot_card: false  # false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)
   pilot_card_icon: 🔸  # Emoji at the start of the pilot career card line (default: 🔸)
@@ -353,9 +360,6 @@ DEFAULT:
   show_bob: true  # false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics
   show_player_cmd_hint: true  # false = disabled  |  true = show /fh_report player reminder in footer
   player_cmd_hint_text: "Type /fh_report player to see your own stats."  # Text shown in the footer when show_player_cmd_hint is true
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
 #  excluded_ucids:
 
 DCS_Server:                             # instance name from nodes.yaml
@@ -380,9 +384,10 @@ DCS_Server:                             # instance name from nodes.yaml
 #  slot_status: false
 #  sort_zones_by_waypoint: false
 #  strip_callsign: false
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
+#  max_pilots: 15
+#  max_pilots_R: 20
+#  max_pilots_S: 10
+#  max_pilots_D: 10
 #  show_all_pilots: false
 #  show_pilot_card: false
 #  pilot_card_icon: 🔸
@@ -427,9 +432,10 @@ DCS_Server:                             # instance name from nodes.yaml
 #  slot_status: false
 #  sort_zones_by_waypoint: false
 #  strip_callsign: false
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
+#  max_pilots: 15
+#  max_pilots_R: 20
+#  max_pilots_S: 10
+#  max_pilots_D: 10
 #  show_all_pilots: false
 #  show_pilot_card: false
 #  pilot_card_icon: 🔸
