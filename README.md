@@ -1,4 +1,4 @@
-# FH_Report — DCSServerBot Plugin
+# Fh_Report — DCSServerBot Plugin
 
 Automatically posts and keeps updated a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files. No database required.
 
@@ -61,8 +61,9 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
 | `update_interval` | `300` | Seconds between embed refreshes |
-| `daily_reset_hour` | `0` | Hour (UTC) when daily points reset |
-| `daily_reset_schedule` | — | Per-day reset hour override (e.g. different hour on weekends) |
+| `daily_reset_hour` | `0:00` | Time (`HH:MM`, 24 h, e.g. `8:30`) when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time](#daily-reset-time) |
+| `daily_reset_schedule` | — | Per-day reset time override (`HH:MM`, e.g. a different time on weekends) |
+| `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
 | `bar_length` | `40` | Number of squares in the progress bar |
 | `bar_style_emoji` | `false` | `true` = emoji bar 🟦🟥 (recommended for mobile) |
 | `max_zones` | `15` | Max zones per column. Omit for all |
@@ -70,9 +71,8 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
 | `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
-| `max_pilots` | all | Max pilots when `report_layout` has just 1 table |
-| `max_pilots_2t` | all | Max pilots per table when `report_layout` has exactly 2 tables. Falls back to `max_pilots` |
-| `max_pilots_3t` | all | Max pilots per table when `report_layout` has 3 or more tables. Falls back to `max_pilots_2t`, then `max_pilots` |
+| `max_pilots` | `20` | Max pilots listed in each leaderboard table (R, S, D) — a whole number of 1 or more, `0` = no limit. The shipped config sets 20 so a new install on a big community does not list everyone; a config with no such line has no limit |
+| `max_pilots_R` / `max_pilots_S` / `max_pilots_D` | `max_pilots` | The same, for the Rank / Session / Daily table only; shipped commented out, so they follow `max_pilots` until you uncomment one. See [Pilot limits](#pilot-limits-per-table) |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
@@ -83,8 +83,9 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
+| `show_bob` | `true` | `false` = hide every Blue on Blue (`BoB`) count, taken from DCSServerBot's Mission Statistics plugin — see [Blue-on-blue](#blue-on-blue-bob) |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
-| `disable_updates` | `false` | `true` = this instance never reads, posts, or edits anything for this server — see [Duplicate installs](#duplicate-installs-disable_updates) below |
+| `enable_updates` | `true` | `false` = this instance never reads, posts, or edits anything for this server — see [Enabling or disabling per instance](#enabling-or-disabling-per-instance-enable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
@@ -257,6 +258,34 @@ Stats shown:
 - In-flight refuels received
 - Pilot deaths
 
+### Blue-on-blue (`BoB`)
+
+`show_bob` (default `true`; a config without the line counts as `true`) switches all of this on or off. `false` hides every `BoB` below and skips its database queries; the penalties in force of `/fh_report player` stay under `show_punishment`.
+
+`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
+
+- *Destroyed*: every kill of a friendly unit.
+- *Damaged*: DCS reports every single hit as an event, so hits are grouped into one incident per attacker, victim and minute. A group is not counted when a kill of that victim type happened in that same minute, so a kill never counts twice.
+- Hits on yourself and on neutral units are ignored.
+
+| Card | Counts |
+|---|---|
+| Rank (`show_pilot_card`) | everything Mission Statistics has kept, on all servers |
+| Session (`show_session_card`) | this server since the current session started |
+| Daily (`show_daily_card`) | this server since the last daily reset |
+
+**Session** here is the life of the Foothold campaign (the *Session Leaderboard*): it starts when the campaign is reset and keeps going through mission reloads. It is only used to count things since then (the session `BoB`); no date is ever shown. A reset is noticed when:
+- the **save file changes name** (another map) or **reappears** after the "campaign not started" screen (the admin deleted the tracking files): a new session right away;
+- the save is **reset in place** (Foothold empties the *same* file when a campaign is won, so the file's creation date says nothing): every known pilot gone, or points and kills both dropping. It is confirmed on a second look one cycle later, so a read that catches the file while Foothold is rewriting it cannot restart the session.
+
+The start is dated at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed when there is none or the gap is over an hour. A campaign already running when Fh_Report first looks at it has no known start, so it counts from the daily reset before that first look: the session always includes the day, until the next reset is noticed. Each noticed reset is written to the bot log (`new campaign session … from …`). The state, with a small baseline of pilots so a bot restart does not lose track, is kept in `.fhc/fhr_session.json`.
+
+`/fh_report player` adds, before Career Stats:
+- **Career Stats** gets a `Blue-on-Blue (BoB)` line under `Kills`, with the same all-time number as the rank card and its detail, e.g. `19 (5 destroyed · 14 damaged)`;
+- the **Session Stats / Daily** table gets a `BoB` row (session and daily counts side by side, second-to-last, before Deaths; left out when both are zero);
+- **Blue-on-Blue (BoB)**: this session's and today's counts (no all-time total, so it matches the stats; the section is left out when both are zero), and the incidents of the **current session on this server** (up to the latest 10, with a note when there are more), with date and victim (the player's name, or `AI unit (type)`).
+- **Penalties in force** (only with `show_punishment: true`, from the **Punishment** plugin): the level, name and hammers the player currently holds, as in the main embed, plus what sustains it by event (`Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)`). These are the points left **after Punishment's decay**: they drop level by level and the section disappears once they reach zero, while the BoB history stays. Punishment counts everything it sanctions (not only BoB) and cannot be tied to one specific BoB incident.
+
 ### Session and daily stats cards (`show_session_card` / `show_daily_card`)
 
 Similar cards showing combat stats for the current session or the current day, shown only on the Session table (`S`) or Daily table (`D`) respectively. Data comes from the campaign save file (playerStats), not from career totals.
@@ -270,7 +299,7 @@ Shows up to 7 fields, in priority order: missions completed (any stat key contai
 
 The daily card uses the same daily reset mechanism as daily leaderboard points (see `daily_reset_hour` above). Icons are configurable independently via `session_card_icon` and `daily_card_icon` (default: 🔸 for both).
 
-**Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/daily_snapshot.json` — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
+**Manual reset**: this plugin has no commands. To manually reset the daily counters (points and stats), delete `saves_dir/.fhc/fhr_daily_snapshot.json` (and the older `daily_snapshot.json` too, if it is still there) — the counter always restarts cleanly at 0, never retroactively counting what was already accumulated. A campaign restart (new map, admin reset) is also detected automatically: if both total points and total kills drop for common players, the snapshot resets on its own.
 
 ---
 
@@ -299,6 +328,21 @@ admin: Admin, SomeSpecificUser
 
 Comma-separated list — each entry can be a Discord **role name** (as defined in your server) or a specific **username**. Defaults to `Admin` if not set. Anyone not on this list can only ever see their own stats.
 
+### Map in the title (`show_map`)
+
+When DCSServerBot knows which map the mission runs on, it's shown as a second line of the embed title:
+
+```
+📡  Operation Nova314 — FootHold
+🗺️  Afghanistan
+```
+
+The map is read from DCSServerBot — it is never configured here, so it can't disagree with the mission. The last known map is kept per server while the bot runs and replaced when DCSServerBot reports another one. If none is known yet (for example, the bot restarted while the server is stopped), it is read once from the current mission file. Until a map is known, nothing is shown. Hide it with `show_map: false`.
+
+### Files in `.fhc`
+
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+
 ### Footer reminder (`show_player_cmd_hint`)
 
 By default, the main campaign embed's footer includes a short reminder pointing players to the command:
@@ -313,8 +357,8 @@ Disable with `show_player_cmd_hint: false`, or customize the wording with `playe
 
 This applies to both `/fh_report player` and `/fh_report podium`.
 
-- **One server configured**: nothing to do — both commands work from any channel, and there's nothing to specify.
-- **More than one server configured**: a `server` option (with autocomplete) appears on both commands, and you must fill it in — the channel is never used to guess which server you mean, since two servers could otherwise end up sharing a channel by mistake. This is required regardless of which channel you're running the command from, even the report channel itself.
+- **One server available** (configured and registered in DCSServerBot — the ones the `server` option lists): nothing to do — both commands work from any channel, and there's nothing to specify. A block of a server that is off or not registered does not count as a second one.
+- **More than one server available**: a `server` option (with autocomplete) appears on both commands. Leave it empty only in the channel DCSServerBot assigns to one of your servers (the option's list then shows just that server, and that is the one used); anywhere else you must pick one from the list. The list shows every server when you run the command outside those channels.
 
 By default, both commands can be run from **any channel**, for any number of servers. To restrict that, set `commands_channel_id` per server — a list of extra channels (besides that server's own report channel) where its commands are allowed:
 
@@ -353,30 +397,103 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 ---
 
-## Duplicate installs (`disable_updates`)
+## Enabling or disabling per instance (`enable_updates`)
 
-If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, running one config next to the master and another on an agent box that hosts that instance — both installations will try to manage the same Discord message.
+Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (the key is the instance name from `nodes.yaml`). `enable_updates` lets you switch any of them on or off without deleting its settings.
 
-Starting in this version, that can no longer produce **duplicate messages**: before posting, the plugin checks the target channel for an existing FH_Report message matching that campaign and adopts it instead of creating a new one. So even with two configs pointing at the same channel, you'll only ever see one message.
+- `enable_updates: true` (default) — normal operation.
+- `enable_updates: false` — that instance never reads files, posts or edits anything, as if it weren't in the config at all. Its settings stay in the file, so you can turn it back on later.
 
-What it doesn't prevent on its own is **both configs updating that same message** — since each installation runs its own update cycle, the embed would flip between the two configurations (e.g. different `report_layout`, `bar_style_emoji`, etc.) every time either one refreshes.
-
-To avoid that, set `disable_updates: true` on every duplicate copy except the one that should actually be in control:
+Because `DEFAULT` is merged into every block, you can also work the other way round: switch everything off by default and enable only the instances you want.
 
 ```yaml
-DCS_Server:
+DEFAULT:
+  enable_updates: false      # off unless an instance says otherwise
+
+DCS.foothold1:
+  enable_updates: true       # Fh_Report active here
   channel_id: 1458145804685541508
-  campaign_name: "Operation — FootHold"
-  disable_updates: true   # this copy stays completely silent for this server
+  campaign_name: "Operation A"
+
+DCS.foothold2:               # inherits false: stays silent
+  channel_id: 1458145804685541509
+  campaign_name: "Operation B"
 ```
 
-When `disable_updates: true`, that instance skips the server entirely on every cycle — no file reads, no posts, no edits — as if it weren't listed in the config at all. Omitting the option (or leaving it `false`) is the normal, default behavior.
+Changes are picked up when the plugin is reloaded (or the bot restarts).
+
+The older `disable_updates: true` still works exactly like `enable_updates: false`; if both are set, `enable_updates` wins.
+
+### Duplicate installs
+
+If the same Foothold instance is reachable from more than one `fh_report` installation in the same cluster — for example, one config next to the master and another on an agent box hosting that instance — both installations would try to manage the same Discord message.
+
+The plugin never creates **duplicate messages**: before posting, it checks the channel for an existing Fh_Report message for that campaign and adopts it. But both configs would still keep **updating that same message**, flipping it between their settings. To avoid that, set `enable_updates: false` on every duplicate copy except the one that should be in control.
+
+---
+
+## Daily reset time
+
+The reset time is written as `HH:MM` on a 24-hour clock, with minutes if you want them, and each weekday can have its own:
+
+```yaml
+DEFAULT:
+  daily_reset_hour: 8:30          # 08:30 (08:30 and 15:30 are valid too)
+  daily_reset_schedule:
+    sat: 7:00
+    sun: 15:30
+```
+
+A plain number is still read as an hour (`4` means `4:00`), so a configuration written for the older versions keeps working; the installer rewrites those to `4:00` and touches nothing else. An invalid value (`24:00`, `8:60`, `ocho`) falls back to `0:00` and logs a warning once. The counters are checked every `update_interval`, so a reset shows in the first update after its time.
+
+### Time zone
+
+`daily_reset_hour` and `daily_reset_schedule` are written in the time zone DCSServerBot already knows for the server: the `timezone` of that instance in the **Scheduler** plugin (`config/plugins/scheduler.yaml`). Fh_Report has no time zone setting of its own.
+
+```yaml
+# config/plugins/scheduler.yaml
+DCS.mi_servidor:
+  timezone: Europe/Madrid
+```
+```yaml
+# config/plugins/fh_report.yaml
+DEFAULT:
+  daily_reset_hour: 6        # 06:00 Madrid time, all year round
+```
+
+- With a `timezone` (an IANA name such as `Europe/Madrid`), the hour is the local wall-clock hour and follows summer/winter time by itself. The weekdays of `daily_reset_schedule` are the weekdays in that zone.
+- Without one (or without the Scheduler plugin) the hour is **UTC**, as it always was. Note this differs from the Scheduler's own default, which is the machine's local time.
+- An unknown zone name falls back to UTC and logs a warning.
+- It is per server, since the Scheduler's `timezone` is. Changing it for your restarts moves the daily reset too.
+
+It affects everything that depends on the daily reset: the Daily table, the Podium day labels and the daily `BoB` count. After a change, one daily period is longer or shorter than 24 hours as the counters switch to the new hour (nothing is lost), and the Podium dates are the dates in that zone from then on.
+
+---
+
+## Pilot limits per table
+
+Every table has its own limit, whatever `report_layout` is or rotates through: `max_pilots_R`, `max_pilots_S` and `max_pilots_D` for the Rank, Session and Daily tables, with `max_pilots` as the limit of any table that has none of its own. Nothing is shared or moved between tables, and the Podium has no limit here.
+
+```yaml
+DEFAULT:
+  max_pilots: 15       # every table lists at most 15 pilots...
+  max_pilots_R: 20     # ...except Rank, which lists 20
+  max_pilots_D: 10     # ...and Daily, 10
+```
+
+- A limit is a whole number of 1 or more; `0` means no limit for that table; anything else is ignored with a warning in the bot log.
+- What does not fit is cut with `+ N more pilots`, or listed in extra fields with `show_all_pilots: true`. Discord's own size limits (1024 characters per field, 6000 per embed) still apply when you set none.
+- Pilot cards, `BoB` and the penalty lines make each pilot taller, so a low limit helps when several tables are shown.
+
+The shipped config has one live line, `max_pilots: 20` (every table lists 20 pilots), and the three per-table lines as commented examples to uncomment if you want a table to differ. An existing config that listed everyone is not changed by an update: the installer adds `max_pilots: 0  # before: not set (no limit)`, so only new installs start at 20.
+
+Older versions chose the limit by the number of tables (`max_pilots`, `max_pilots_2t`, `max_pilots_3t`). The installer converts them for you, keeping what each table shows today: with a layout of one table, `max_pilots` stays as it is; with two or more it takes the value that `_2t` / `_3t` gave, and a server that changes the layout gets its own explicit lines. The lines it writes carry a comment with the old values (`# before: max_pilots 20, max_pilots_2t 15`), and it prints what it changed. `max_pilots_2t` and `max_pilots_3t` are no longer read, so if you update by copying files without running the installer, set the per-table limits by hand.
 
 ---
 
 ## Daily Podium
 
-A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or on a detected campaign restart), FH_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/daily_history.json`) — no database, no manual steps.
+A historical leaderboard, tracked automatically day by day. Every time the daily counters reset (midnight UTC by default, or in the Scheduler's time zone, or on a detected campaign restart), Fh_Report records who held the top spots that day into a small local file (`saves_dir/.fhc/fhr_daily_history.json`) — no database, no manual steps.
 
 ### Seeing it in the main embed (`P` combined with other letters)
 
@@ -452,7 +569,7 @@ By default, zones in each column are sorted by level and slot damage. Turning th
 sort_zones_by_waypoint: true
 ```
 
-This needs a one-time cache shared with FH_Control (if installed) and only refreshes automatically when needed (missing cache, or a detected campaign restart) — never on every update, and only while the mission is actually running. Until that cache is available, zones fall back to the normal level-based sort automatically.
+This needs a one-time cache shared with Fh_Control (if installed) and only refreshes automatically when needed (missing cache, or a detected campaign restart) — never on every update, and only while the mission is actually running. Until that cache is available, zones fall back to the normal level-based sort automatically.
 
 ---
 

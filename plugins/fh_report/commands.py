@@ -1,5 +1,5 @@
 """
-FH_Report Plugin for DCSServerBot
+Fh_Report Plugin for DCSServerBot
 Reads Foothold campaign save files and posts/updates a Discord embed
 with front-line status and pilot leaderboard. No database required.
 """
@@ -10,13 +10,15 @@ import asyncio
 import calendar
 import functools
 import importlib.util
+import glob
 import json
 import logging
 import os
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 from typing import Type
 
 import discord
@@ -33,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.0"
+FH_REPORT_RELEASE = "14.2.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -65,21 +67,52 @@ async def _do_script(server, lua: str) -> None:
     await server.send_to_dcs({"command": "do_script", "script": lua})
 
 
-# ── Lua table helpers (brace counting) ───────────────────────────────────────
+# ── Lua table helpers ─────────────────────────────────────────────────────────
+# Foothold writes EVERY string (player names, keys) with string.format('%q'): double
+# quotes, a '"' inside becomes \", a backslash becomes \\, a newline becomes backslash +
+# newline, and an apostrophe stays as is. So a quoted string is matched with its
+# escapes, never "up to the next quote of any kind".
+
+_LUA_STR = r'"[^"\\]*(?:\\[\s\S][^"\\]*)*"|\'[^\'\\]*(?:\\[\s\S][^\'\\]*)*\''
+_LUA_TOKEN = re.compile(r"[{}]|" + _LUA_STR)                 # a brace, or a whole string (skipped)
+_LUA_KEY = re.compile(r"\[\s*(" + _LUA_STR + r")\s*\]\s*=\s*\{")
+_LUA_NUM = re.compile(r"\[\s*(" + _LUA_STR + r")\s*\]\s*=\s*(-?\d+(?:\.\d+)?)")
+_UCID_PAIR = re.compile(r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*(" + _LUA_STR + ")")
+_LUA_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
+def _lua_unquote(token: str) -> str:
+    """The text of a quoted Lua string token (quotes and escapes included)."""
+    body = token[1:-1]
+    if "\\" not in body:
+        return body
+
+    def one(m):
+        c = m.group(1)
+        return chr(int(c)) if c.isdigit() else _LUA_ESCAPES.get(c, c)
+    return re.sub(r"\\(\d{1,3}|[\s\S])", one, body)
+
+
+def _lua_quote(text: str) -> str:
+    """text as Lua's string.format('%q') writes it."""
+    return '"' + (text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\\n")
+                  .replace("\r", "\\r").replace("\0", "\\000")) + '"'
+
 
 def _lua_block(text: str, brace_pos: int) -> tuple[str, int]:
     """`brace_pos` is the index of a '{' in `text`. Returns (inner content,
-    index just past the matching '}'), using brace counting so it's robust
-    to any indentation/nesting in Foothold's Lua files."""
-    depth, i, n = 1, brace_pos + 1, len(text)
-    while i < n and depth > 0:
-        c = text[i]
-        if c == "{":
+    index just past the matching '}'). Braces inside quoted strings (a player
+    named "Joe :}") don't count; indentation and nesting don't matter."""
+    depth = 1
+    for m in _LUA_TOKEN.finditer(text, brace_pos + 1):
+        tok = m.group()
+        if tok == "{":
             depth += 1
-        elif c == "}":
+        elif tok == "}":
             depth -= 1
-        i += 1
-    return text[brace_pos + 1:i - 1], i
+            if depth == 0:
+                return text[brace_pos + 1:m.start()], m.end()
+    return text[brace_pos + 1:], len(text)               # unbalanced (a half-written file)
 
 
 def _lua_table(text: str, pattern: str) -> str | None:
@@ -91,21 +124,48 @@ def _lua_table(text: str, pattern: str) -> str | None:
     return _lua_block(text, m.end() - 1)[0]
 
 
-def _lua_entries(block: str, key_pattern: str):
-    """Yield (key, inner) for every `["key"]={...}` (or single-quoted) whose
-    key matches `key_pattern`."""
-    for m in re.finditer(r"\[[\"'](" + key_pattern + r")[\"']\]\s*=\s*\{", block):
-        yield m.group(1), _lua_block(block, m.end() - 1)[0]
+def _lua_entries(block: str, ucid_only: bool = False):
+    """Yield (key, inner) for each top-level `["key"]={...}` entry of `block`
+    (either quote style, escapes decoded). ucid_only keeps only 32-hex UCID keys."""
+    pos = 0
+    while True:
+        m = _LUA_KEY.search(block, pos)
+        if not m:
+            return
+        inner, pos = _lua_block(block, m.end() - 1)
+        key = _lua_unquote(m.group(1))
+        if not ucid_only or _UCID_RE.fullmatch(key):
+            yield key, inner
+
+
+def _find_entry(text: str, key: str):
+    """The match of the first `["key"]={` whose decoded key is `key`, or None."""
+    for m in _LUA_KEY.finditer(text):
+        if _lua_unquote(m.group(1)) == key:
+            return m
+    return None
+
+
+def _lua_field_str(block: str, field: str) -> str | None:
+    """The string assigned to `["field"]=` in `block` (decoded), or None."""
+    q = re.escape(field)
+    m = re.search(r"\[\s*(?:\"" + q + r"\"|\'" + q + r"\')\s*\]\s*=\s*(" + _LUA_STR + ")", block)
+    return _lua_unquote(m.group(1)) if m else None
 
 
 def _lua_numbers(block: str, skip: tuple[str, ...] = ()) -> dict:
     """{key: int|float} for every quoted-key numeric assignment in `block`."""
     out = {}
-    for m in re.finditer(r'\[["\']([^"\']+)["\']\]\s*=\s*(-?\d+(?:\.\d+)?)', block):
-        key, val = m.group(1), m.group(2)
+    for m in _LUA_NUM.finditer(block):
+        key, val = _lua_unquote(m.group(1)), m.group(2)
         if key not in skip:
             out[key] = float(val) if "." in val else int(val)
     return out
+
+
+def _ucid_names(text: str) -> list[tuple[str, str]]:
+    """(ucid, name) for every `["<ucid>"]="name"` pair (the ucidToName tables)."""
+    return [(m.group(1), _lua_unquote(m.group(2))) for m in _UCID_PAIR.finditer(text)]
 
 
 def _lua_num_str(value: float) -> str:
@@ -114,9 +174,6 @@ def _lua_num_str(value: float) -> str:
 
 _RANKS_PLAYERS_RE  = r"RankSave\[[\"']players[\"']\]\s*=\s*\{"
 _PLAYER_STATS_RE   = r"zonePersistance\[[\"']playerStats[\"']\]\s*=\s*\{"
-_UCID_TO_NAME_RE   = r"\[[\'\"]([a-f0-9]{32})[\'\"]\]\s*=\s*[\'\"]([^\'\"]+)[\'\"]"
-_ANY_KEY           = r"[^\"']+"
-_UCID_KEY          = r"[a-f0-9]{32}"
 
 
 def _ranks_version(content: str) -> int | None:
@@ -144,11 +201,14 @@ class _UpdateReadCache:
             self._files[path] = await self._node.read_file(path)
         return self._files[path]
 
-    async def list_directory(self, path: str):
-        return await self._node.list_directory(path)
-
     def invalidate(self, path: str) -> None:
         self._files.pop(path, None)
+
+    def __getattr__(self, name):
+        # list_directory, create_directory, remove_file... go straight to the node
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._node, name)
 
 
 def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str | None]:
@@ -161,12 +221,12 @@ def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str 
         interval = int(configured)
     except (TypeError, ValueError):
         return default, (
-            f"FH_Report: DEFAULT.update_interval ({configured!r}) is not a valid "
+            f"Fh_Report: DEFAULT.update_interval ({configured!r}) is not a valid "
             f"integer — falling back to the default of {default}s."
         )
     if interval <= 0:
         return default, (
-            f"FH_Report: DEFAULT.update_interval ({interval}) must be greater than "
+            f"Fh_Report: DEFAULT.update_interval ({interval}) must be greater than "
             f"zero — falling back to the default of {default}s."
         )
     return interval, None
@@ -223,11 +283,63 @@ def get_rank(credits: float) -> str:
     return RANK_NAMES[rank_idx]
 
 
+def _node_listing(listing) -> tuple[list[str], bool]:
+    """(basenames, newest_first) from a node.list_directory() result. DCSSB
+    returns (directory, [full paths]) ordered newest first; older versions
+    returned plain names, in no particular order."""
+    if isinstance(listing, tuple) and len(listing) == 2:
+        return [os.path.basename(str(p).replace("\\", "/")) for p in listing[1]], True
+    return [os.path.basename(str(p).replace("\\", "/")) for p in listing], False
+
+
+async def _dir_exists(node, path: str) -> bool | None:
+    """Whether `path` is an existing folder on the node; None if that can't be
+    told. list_directory() lists nothing for a missing folder instead of failing,
+    so ask the parent folder for a folder of that name."""
+    parent, name = os.path.split(path.rstrip("/\\"))
+    if not name:
+        return None
+    try:
+        names, _ = _node_listing(await node.list_directory(parent, pattern=glob.escape(name), is_dir=True))
+    except Exception:
+        return None
+    return any(n.lower() == name.lower() for n in names)
+
+
+async def _ensure_fhc_dir(node, saves_dir: str) -> None:
+    """Create saves_dir/.fhc on the node, local or remote: write_file() doesn't
+    create folders. Not done while saves_dir itself is missing (the Foothold
+    mission never ran there)."""
+    if await _dir_exists(node, saves_dir) is False:
+        return
+    fhc = os.path.join(saves_dir, ".fhc")
+    try:
+        if hasattr(node, "create_directory"):
+            await node.create_directory(fhc)
+        elif os.path.isdir(saves_dir):          # older DCSSB: local nodes only
+            os.makedirs(fhc, exist_ok=True)
+    except Exception as e:
+        log.debug(f"Fh_Report: could not create {fhc}: {e}")
+
+
+async def _remove_file(node, path: str) -> None:
+    """Best-effort delete through the node (remote nodes too). DCSSB's
+    remove_file() takes a glob pattern, hence the escape. Older DCSSB without
+    it: local delete only."""
+    try:
+        if hasattr(node, "remove_file"):
+            await node.remove_file(glob.escape(path))
+        elif os.path.isfile(path):
+            os.remove(path)
+    except Exception as e:
+        log.debug(f"Fh_Report: could not remove {path}: {e}")
+
+
 async def find_persistence_file(saves_dir: str, node) -> str | None:
     """Active Foothold save: the file named in foothold.status (basename
     only — the stored path may be a Windows path invalid on this host),
-    else the newest-named foothold_*.lua in saves_dir. Reads go through
-    `node` so remote agent nodes work.
+    else the most recently modified foothold_*.lua in saves_dir. Reads go
+    through `node` so remote agent nodes work.
     """
     status_file = os.path.join(saves_dir, "foothold.status")
     try:
@@ -249,17 +361,21 @@ async def find_persistence_file(saves_dir: str, node) -> str | None:
         pass
     # Fallback: list directory and find foothold_*.lua candidates
     try:
-        entries = await node.list_directory(saves_dir)
+        names, newest_first = _node_listing(await node.list_directory(saves_dir))
         candidates = [
-            os.path.join(saves_dir, e) for e in entries
-            if e.lower().startswith("foothold_") and e.lower().endswith(".lua")
-            and "rank" not in e.lower()
+            n for n in names
+            if n.lower().startswith("foothold_") and n.lower().endswith(".lua") and "rank" not in n.lower()
         ]
         if not candidates:
             return None
-        return sorted(candidates)[-1]
+        return os.path.join(saves_dir, candidates[0] if newest_first else sorted(candidates)[-1])
     except Exception:
         return None
+
+
+_ZONE_NAME_RE = re.compile(r"zonePersistance\[[\"']zones[\"']\]\[\s*(" + _LUA_STR + r")\s*\]")
+_ZONE_BLOCK_RE = re.compile(
+    r"zonePersistance\[[\"']zones[\"']\]\[\s*(" + _LUA_STR + r")\s*\] = \{(.*?)(?=\nzonePersistance|\Z)", re.DOTALL)
 
 
 async def parse_zones(filepath: str, node) -> dict:
@@ -268,13 +384,7 @@ async def parse_zones(filepath: str, node) -> dict:
     content = data.decode("utf-8", errors="replace")
 
     zones = {"blue": [], "red": [], "neutral": 0}
-    zone_names = [
-        a or b for a, b in
-        re.findall(
-            r'zonePersistance\[["\']zones["\']\]\[(?:"([^"]+)"|\x27([^\x27]+)\x27)\]',
-            content
-        )
-    ]
+    zone_names = [_lua_unquote(t) for t in _ZONE_NAME_RE.findall(content)]
 
     # BLUE-only extra slots (ZoneCommander:addExtraSlot): +1 per zone, +1 more
     # when globalExtraUnlock is true. RED has its own mechanic, not handled here.
@@ -284,11 +394,8 @@ async def parse_zones(filepath: str, node) -> dict:
     # One pass over the file: first ` = {` block per zone, up to the next
     # top-level zonePersistance line.
     zone_blocks: dict[str, str] = {}
-    for m in re.finditer(
-        r"zonePersistance\[[\"']zones[\"']\]\[(?:\"([^\"]+)\"|'([^']+)')\] = \{(.*?)(?=\nzonePersistance|\Z)",
-        content, re.DOTALL
-    ):
-        zone_blocks.setdefault(m.group(1) or m.group(2), m.group(3))
+    for m in _ZONE_BLOCK_RE.finditer(content):
+        zone_blocks.setdefault(_lua_unquote(m.group(1)), m.group(2))
 
     for zone in zone_names:
         block = zone_blocks.get(zone)
@@ -379,9 +486,9 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
             if filepath not in _unsupported_version_warned:
                 _unsupported_version_warned.add(filepath)
                 log.warning(
-                    f"FH_Report: {filepath} reports playerStatsIdentityVersion={version}, "
-                    f"which this version of FH_Report doesn't understand yet — "
-                    f"please update FH_Report. Skipping this file for now."
+                    f"Fh_Report: {filepath} reports playerStatsIdentityVersion={version}, "
+                    f"which this version of Fh_Report doesn't understand yet — "
+                    f"please update Fh_Report. Skipping this file for now."
                 )
             return {}, {}, {}
 
@@ -394,14 +501,13 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
 
         # Old format: name-keyed, stats inline in the player block.
         # New format (4.9.1+): UCID-keyed, "name" + nested "stats" table.
-        for key, player_block in _lua_entries(block, _ANY_KEY if version is None else _UCID_KEY):
+        for key, player_block in _lua_entries(block, ucid_only=version is not None):
             if version is None:
                 name, stats_block = key, player_block
             else:
-                name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', player_block)
-                if not name_m:
+                name = _lua_field_str(player_block, "name")
+                if not name:
                     continue
-                name = name_m.group(1)
                 stats_block = _lua_table(player_block, r'\[(?:"stats"|\'stats\')\]\s*=\s*\{')
                 if stats_block is None:
                     continue
@@ -419,8 +525,8 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
             # use it opportunistically if so, costs nothing if absent.
             ucid_block = _lua_table(content, r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{")
             if ucid_block:
-                for um in re.finditer(_UCID_TO_NAME_RE, ucid_block):
-                    name_to_ucid[um.group(2)] = um.group(1)
+                for ucid, name in _ucid_names(ucid_block):
+                    name_to_ucid[name] = ucid
 
         return results, raw_all, name_to_ucid
     except Exception:
@@ -430,7 +536,7 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
 async def hot_write_waypoints(server) -> None:
     """Inject Lua that dumps the mission's in-memory WaypointList (zone ->
     waypoint suffix, never saved by Foothold) to saves_dir/.fhc/fhc_waypoints.lua.
-    Same file and technique as FH_Control, so either plugin can refresh it.
+    Same file and technique as Fh_Control, so either plugin can refresh it.
     No-op if the mission doesn't define WaypointList.
     """
     lua = (
@@ -439,7 +545,7 @@ async def hot_write_waypoints(server) -> None:
         "  local _p = lfs.writedir() .. [[Missions/Saves/.fhc/fhc_waypoints.lua]] "
         "  local _f = io.open(_p, 'w') "
         "  if _f then "
-        "    _f:write([[-- FH_Report/FH_Control waypoint cache\n]]) "
+        "    _f:write([[-- Fh_Report/Fh_Control waypoint cache\n]]) "
         "    _f:write([[WaypointList = {\n]]) "
         "    for _k,_v in pairs(WaypointList) do "
         "      _f:write([[  [\"]] .. _k .. [[\"] = \"]] .. _v .. [[\",\n]]) "
@@ -454,7 +560,7 @@ async def hot_write_waypoints(server) -> None:
 
 async def load_waypoint_list(saves_dir: str, node) -> dict:
     """{zone_name: waypoint number} from fhc_waypoints.lua (written by us or
-    FH_Control). Zones without a numeric suffix are omitted; a missing or
+    Fh_Control). Zones without a numeric suffix are omitted; a missing or
     unreadable file returns {}.
     """
     path = os.path.join(saves_dir, ".fhc", "fhc_waypoints.lua")
@@ -469,6 +575,67 @@ async def load_waypoint_list(saves_dir: str, node) -> dict:
         if num_match:
             result[zone_name] = int(num_match.group(1))
     return result
+
+
+# ── Campaign session start ────────────────────────────────────────────────────
+# "Session" is the life of the Foothold campaign (the Session Leaderboard). It
+# starts when the campaign is reset: Foothold empties the SAME save file and
+# restarts the mission (so the file's creation date means nothing), or an admin
+# deletes the tracking files, or the map changes (another save file). Nothing
+# stores the start, so a reset is noticed and dated here. It is only used to
+# count things since then (BoB), never shown.
+#   - save file name changed / save reappeared after "campaign not started":
+#     a new session at once.
+#   - save reset in place (every known player gone, or points and kills both
+#     dropped): confirmed on a second look one cycle later, so a read caught
+#     while Foothold is rewriting the file can't restart the session.
+#   - the start is dated at the mission start DCSServerBot recorded since the
+#     campaign was last seen intact (Foothold reloads the mission right after a
+#     reset), or the moment it was noticed.
+# State (start, last seen intact, a small baseline of players) lives in
+# .fhc/fhr_session.json, written by the updater only.
+
+_SESSION_ISO = "%Y-%m-%dT%H:%M:%S"
+_SESSION_WINDOW = timedelta(hours=1)    # widest "last seen intact -> noticed" gap still narrowed
+_SESSION_SEEN_EVERY = timedelta(minutes=15)   # how often the baseline is written to disk
+
+
+def _session_migrate(old: dict) -> dict:
+    """fhr_session.json written by 14.1.28 (creation-time probe) -> this format."""
+    if not old or old.get("kind") in ("detected", "first_seen"):
+        return old
+    kind = old.get("fallback_kind") or "first_seen"
+    start = old.get("fallback") or old.get("start")
+    return {"file": old.get("file", ""), "start": start, "kind": kind, "seen": start} if start else {}
+
+
+def _session_start_for(st: dict, cfg: dict, tz: tzinfo = timezone.utc) -> datetime | None:
+    """Session start to count from. A campaign already running when Fh_Report
+    first looked ("first_seen") started at some unknown earlier time, so it
+    counts at least from the daily reset before that first look: the session
+    includes the day, as the Session Leaderboard does. A detected reset counts
+    from the reset."""
+    start = _parse_utc((st or {}).get("start"))
+    if start and st.get("kind") == "first_seen":
+        start = min(start, _day_start(cfg, start.replace(tzinfo=timezone.utc), tz).replace(tzinfo=None))
+    return start
+
+
+def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
+    """Has the campaign been reset in place between two readings? `prev` and
+    `cur` are {"points": {id: points}, "kills": {id: Air+Ground kills}}.
+    True when nobody known is left, or points AND kills both fell for the
+    players present in both (the rule the daily counter uses too)."""
+    if not prev or not prev.get("points"):
+        return False
+    common = set(prev["points"]) & set(cur["points"])
+    if not common:
+        return sum(prev["points"].values()) > 0
+    prev_pts = sum(prev["points"][i] for i in common)
+    cur_pts = sum(cur["points"][i] for i in common)
+    prev_kills = sum(prev["kills"].get(i, 0) for i in common)
+    cur_kills = sum(cur["kills"].get(i, 0) for i in common)
+    return prev_pts > 0 and cur_pts < prev_pts * 0.5 and prev_kills > 0 and cur_kills < prev_kills
 
 
 _unsupported_version_warned: set[str] = set()
@@ -498,9 +665,9 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
         if filepath not in _unsupported_version_warned:
             _unsupported_version_warned.add(filepath)
             log.warning(
-                f"FH_Report: {filepath} reports playerIdentityVersion={version}, "
-                f"which this version of FH_Report doesn't understand yet — "
-                f"please update FH_Report. Skipping this file for now."
+                f"Fh_Report: {filepath} reports playerIdentityVersion={version}, "
+                f"which this version of Fh_Report doesn't understand yet — "
+                f"please update Fh_Report. Skipping this file for now."
             )
         return {}
 
@@ -511,12 +678,12 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     excluded = set(excluded_ucids or [])
     # Old format: name-keyed, UCID resolved via the separate ucidToName table.
     name_to_ucid = (
-        {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, content)}
+        {name: ucid for ucid, name in _ucid_names(content)}
         if version is None else {}
     )
 
     players = {}
-    for key, block in _lua_entries(players_block, _ANY_KEY if version is None else _UCID_KEY):
+    for key, block in _lua_entries(players_block, ucid_only=version is not None):
         credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
         if not credit_m:
             continue
@@ -525,10 +692,10 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
             ucid = name_to_ucid.get(clean_name)
         else:
             ucid = key
-            name_m = re.search(r'\[(?:"name"|\'name\')\]\s*=\s*["\']([^"\']+)["\']', block)
-            if not name_m:
+            name = _lua_field_str(block, "name")
+            if not name:
                 continue
-            clean_name = name_m.group(1).strip()
+            clean_name = name.strip()
         if len(clean_name) < 2 or (ucid and ucid in excluded):
             continue
 
@@ -580,7 +747,7 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _dedup_write_warned.discard(target_path)
             return True
         elif log:
-            log.debug(f"FH_Report: node.write_file (new API) returned {status!r} for {target_path}")
+            log.debug(f"Fh_Report: node.write_file (new API) returned {status!r} for {target_path}")
     except TypeError:
         # Old signature (filename, url, overwrite): pre-3.0.4.28 DCSServerBot.
         global _old_dcssb_api_warned
@@ -588,16 +755,16 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _old_dcssb_api_warned = True
             if log:
                 log.info(
-                    "FH_Report: detected an older DCSServerBot version (older "
+                    "Fh_Report: detected an older DCSServerBot version (older "
                     "than 3.0.4.28) — falling back to local file writes, which "
                     "work fine for local/master-node instances. Update "
                     "DCSServerBot to 3.0.4.28 or later to enable full "
-                    "remote-agent-node compatibility for FH_Report's file-write "
+                    "remote-agent-node compatibility for Fh_Report's file-write "
                     "features. This message won't repeat."
                 )
     except Exception as e:
         if log:
-            log.debug(f"FH_Report: node.write_file (new API) failed for {target_path}: {e}")
+            log.debug(f"Fh_Report: node.write_file (new API) failed for {target_path}: {e}")
     finally:
         if tmp_local_path:
             try:
@@ -618,17 +785,17 @@ async def write_bytes_to_node(node, target_path: str, data: bytes, log=None) -> 
             _dedup_write_warned.add(target_path)
             if log:
                 log.error(
-                    f"FH_Report: could not write {target_path} via either the new "
+                    f"Fh_Report: could not write {target_path} via either the new "
                     f"node.write_file() API or a local write ({e}). If this "
                     f"instance runs on a remote agent node, please update "
                     f"DCSServerBot to 3.0.4.28 or later (currently on the 'dev' "
                     f"branch as of writing) — it adds the remote file-write "
-                    f"support FH_Report needs for this. This message won't repeat "
+                    f"support Fh_Report needs for this. This message won't repeat "
                     f"until the write succeeds, or fails again after that."
                 )
         else:
             if log:
-                log.debug(f"FH_Report: write to {target_path} failed again: {e}")
+                log.debug(f"Fh_Report: write to {target_path} failed again: {e}")
         return False
 
 
@@ -641,6 +808,44 @@ async def _read_json(node, path: str) -> dict:
         return {}
 
 
+MAP_PROBE_TIMEOUT = 15   # seconds to wait for DCSSB to read the map from the mission file
+
+FHR_PREFIX = "fhr_"    # files this plugin keeps in saves_dir/.fhc (Fh_Control uses fhc_)
+
+
+def _fhr_path(saves_dir: str, name: str) -> str:
+    return os.path.join(saves_dir, ".fhc", FHR_PREFIX + name)
+
+
+_legacy_cleaned: set[str] = set()      # old files already dealt with this run
+
+
+async def _remove_legacy_file(node, path: str) -> None:
+    """Delete an old, un-prefixed file once its fhr_ replacement is confirmed.
+    Once per file and run (a remote delete is an RPC); a file that is already
+    gone is simply a no-op."""
+    if path in _legacy_cleaned:
+        return
+    _legacy_cleaned.add(path)
+    await _remove_file(node, path)
+    log.debug(f"Fh_Report: legacy file {path} cleaned up (replaced by its {FHR_PREFIX} copy)")
+
+
+async def _read_fhr_json(node, saves_dir: str, name: str, cleanup: bool = False) -> dict:
+    """Read saves_dir/.fhc/fhr_<name>, falling back to the old un-prefixed
+    <name> (files written before the fhr_ prefix existed). Writers always use the fhr_ name, so an old
+    file is read only until the next write creates its fhr_ replacement.
+    With cleanup=True (the updater, the only writer), the old file is removed
+    the first time the fhr_ file is read back OK — never in the same step that
+    wrote it, so a bad write still leaves the old data to fall back on."""
+    data = await _read_json(node, _fhr_path(saves_dir, name))
+    if data:
+        if cleanup:
+            await _remove_legacy_file(node, os.path.join(saves_dir, ".fhc", name))
+        return data
+    return await _read_json(node, os.path.join(saves_dir, ".fhc", name))
+
+
 async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     """Once per bot session and saves_dir, write/read back/delete a tiny
     test file through write_bytes_to_node, so a write problem shows up at
@@ -651,28 +856,23 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
     if saves_dir in _write_self_tested:
         return
 
-    try:
-        await node.list_directory(saves_dir)
-    except FileNotFoundError:
+    if await _dir_exists(node, saves_dir) is False:
+        # None = couldn't tell (timeout, permissions...): not assumed missing.
         if log:
             log.debug(
-                f"FH_Report: write self-test skipped for {saves_dir} — the save "
+                f"Fh_Report: write self-test skipped for {saves_dir} — the save "
                 f"folder doesn't exist yet (mission/server probably hasn't run "
                 f"yet). Will retry on a later cycle once it exists."
             )
         return
-    except Exception:
-        # Inconclusive (timeout, permission issue, etc.) — don't assume the
-        # folder is missing; fall through and run the self-test as normal.
-        pass
 
     _write_self_tested.add(saves_dir)
 
     test_path = os.path.join(saves_dir, "fhrep_write_test.tmp")
-    test_content = b"FH_Report write self-test - safe to delete"
+    test_content = b"Fh_Report write self-test - safe to delete"
 
     if log:
-        log.debug(f"FH_Report: running one-time write self-test for {saves_dir}")
+        log.debug(f"Fh_Report: running one-time write self-test for {saves_dir}")
 
     ok = await write_bytes_to_node(node, test_path, test_content, log=log)
     if not ok:
@@ -685,22 +885,17 @@ async def run_write_self_test(node, saves_dir: str, log=None) -> None:
         if readback != test_content:
             if log:
                 log.warning(
-                    f"FH_Report: write self-test for {saves_dir} wrote successfully "
+                    f"Fh_Report: write self-test for {saves_dir} wrote successfully "
                     f"but read back different content than expected — file writes "
                     f"may not be fully reliable for this instance."
                 )
         elif log:
-            log.debug(f"FH_Report: write self-test for {saves_dir} passed (write + read-back verified)")
+            log.debug(f"Fh_Report: write self-test for {saves_dir} passed (write + read-back verified)")
     except Exception as e:
         if log:
-            log.debug(f"FH_Report: write self-test for {saves_dir}: could not read back test file: {e}")
+            log.debug(f"Fh_Report: write self-test for {saves_dir}: could not read back test file: {e}")
 
-    # Best-effort cleanup, local nodes only (no remote delete API); a leftover
-    # test file on a remote node is harmless.
-    try:
-        os.remove(test_path)
-    except OSError:
-        pass
+    await _remove_file(node, test_path)
 
 
 async def deduplicate_ranks(ranks_file: str, persistence_file, node,
@@ -729,7 +924,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     last_seen_re = r"(\[[\x27\x22]lastSeen[\x27\x22]\]\s*=\s*)([\d.]+)"
 
     entries: dict[str, dict] = {}
-    for name, block in _lua_entries(players_block, _ANY_KEY):
+    for name, block in _lua_entries(players_block):
         cr_m = re.search(credits_re, block)
         if cr_m and len(name) >= 2:
             ls_m = re.search(last_seen_re, block)
@@ -746,7 +941,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     if not duplicates:
         return False
 
-    raw_to_ucid = {m.group(2): m.group(1) for m in re.finditer(_UCID_TO_NAME_RE, original)}
+    raw_to_ucid = {name: ucid for ucid, name in _ucid_names(original)}
     ranks_data  = original
     modified    = False
 
@@ -758,7 +953,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
         if len(names_with_ucid) != 1:
             if len(names_with_ucid) > 1:
                 log.debug(
-                    f"FH_Report: deduplicate_ranks: '{base_name}' has "
+                    f"Fh_Report: deduplicate_ranks: '{base_name}' has "
                     f"{len(names_with_ucid)} raw names each with their own "
                     f"live UCID ({names_with_ucid}) — treating as distinct "
                     f"players who share a stripped base name. Skipping merge."
@@ -773,9 +968,9 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
 
         # ── Remove each raw entry ─────────────────────────────────────────
         for raw in raw_names:
-            m = re.search(r"\[[\x27\x22]" + re.escape(raw) + r"[\x27\x22]\]\s*=\s*\{", ranks_data)
+            m = _find_entry(ranks_data, raw)
             if not m:
-                log.warning(f"FH_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
+                log.warning(f"Fh_Report: deduplicate_ranks: could not find entry for '{raw}' to remove")
                 continue
             _, end_pos = _lua_block(ranks_data, m.end() - 1)
             line_start = ranks_data.rfind("\n", 0, m.start())
@@ -793,20 +988,19 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
             inner = re.sub(last_seen_re, lambda mm: mm.group(1) + _lua_num_str(max_last_seen), inner, count=1)
         else:
             inner = inner.rstrip() + f'\n    ["lastSeen"]={_lua_num_str(max_last_seen)},\n  '
-        new_entry  = '  ["' + canonical + '"]={' + inner + '},\n'
+        new_entry  = "  [" + _lua_quote(canonical) + "]={" + inner + "},\n"
         ranks_data = re.sub(r'(RankSave\[[\'\"]players[\'\"]\]\s*=\s*\{)',
                             lambda mm: mm.group(1) + "\n" + new_entry, ranks_data, count=1)
 
         # ── Update ucidToName ─────────────────────────────────────────────
-        for q in ('"', "'"):
-            old_e = f'[{q}{ucid}{q}]={q}{name_with_ucid}{q}'
-            if old_e in ranks_data:
-                ranks_data = ranks_data.replace(old_e, f'["{ucid}"]="{canonical}"', 1)
+        for m in _UCID_PAIR.finditer(ranks_data):
+            if m.group(1) == ucid and _lua_unquote(m.group(2)) == name_with_ucid:
+                ranks_data = ranks_data[:m.start()] + f'["{ucid}"]={_lua_quote(canonical)}' + ranks_data[m.end():]
                 break
 
         modified = True
         log.info(
-            f"FH_Report: merged duplicate entries {raw_names} -> '{canonical}' "
+            f"Fh_Report: merged duplicate entries {raw_names} -> '{canonical}' "
             f"(credits: {total_credits}, lastSeen: {max_last_seen})"
         )
 
@@ -819,7 +1013,7 @@ async def deduplicate_ranks(ranks_file: str, persistence_file, node,
     recheck = (await node.read_file(ranks_file)).decode("utf-8")
     if recheck != original:
         log.warning(
-            f"FH_Report: {ranks_file} changed since read (likely written by "
+            f"Fh_Report: {ranks_file} changed since read (likely written by "
             f"Foothold) — skipping deduplication this cycle, will retry next."
         )
         return False
@@ -1097,6 +1291,28 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
 
 
+_pilot_cap_warned: set[str] = set()
+
+
+def _pilot_cap(cfg: dict, role: str) -> int | None:
+    """How many pilots one table (role = R, S or D) may list: max_pilots_<role>,
+    else max_pilots, else no limit (None). A limit is a whole number of 1 or
+    more (0 also means no limit); anything else is ignored with one warning."""
+    for key in (f"max_pilots_{role}", "max_pilots"):
+        value = cfg.get(key)
+        if value is None or value == "":
+            continue
+        ok = (isinstance(value, int) and not isinstance(value, bool)) or \
+             (isinstance(value, str) and value.strip().isdigit())
+        if ok and int(value) >= 0:
+            return int(value) or None
+        if f"{key}={value!r}" not in _pilot_cap_warned:
+            _pilot_cap_warned.add(f"{key}={value!r}")
+            log.warning(f"Fh_Report: {key} {value!r} is not a whole number of 1 or more — no limit applied.")
+        return None
+    return None
+
+
 DISCORD_MAX_FIELDS = 25   # Discord rejects embeds with more fields
 
 
@@ -1171,7 +1387,7 @@ def _fmt_compact(n: int) -> str:
     return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
 
 
-def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
+def _build_pilot_card(career: dict, icon: str = "🔸", bnb: int = 0) -> str | None:
     """One-line career card from Foothold_Ranks.lua career stats (fixed/helo
     hours, kills, traps, fuel received, deaths). None if all are zero.
     """
@@ -1201,6 +1417,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸") -> str | None:
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
+    if bnb > 0:        parts.append(f"BoB: {bnb}")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1215,7 +1432,7 @@ _NON_MISSION_STATS = frozenset({
     "Air", "Helo", "Ground Units", "Ship", "SAM", "Structure", "Infantry",
     "Demolition kill", "Deaths", "Captured by enemy", "Zone capture",
     "Zone upgrade", "Zone supply delivery", "Pilot Rescue", "Refueling",
-    "Points", "Points spent", "Flight time", "Achievement",
+    "Points", "Points spent", "Flight time", "Achievement", "BoB",
 })
 
 
@@ -1230,17 +1447,18 @@ def _is_mission_stat(key: str) -> bool:
     return base not in _NON_MISSION_STATS
 
 
-def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
+def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> str | None:
     """One-line session/daily card from raw playerStats keys, in priority
     order: Msn (every mission objective, see _is_mission_stat), Ach, Air
     (Air+Helo), SAM, Ground (Ground Units+Structure+Infantry), Ship, Resc,
     Refuels, Deaths. Capped at 7 entries, dropping the lowest priority first
-    but always keeping Deaths. 'Flight time' is left out on purpose: Foothold
+    but always keeping BoB (blue-on-blue, from DCSSB) and Deaths. 'Flight time' is left out on purpose: Foothold
     only records it for a few transport/helo types, so it would read 0 for
     most pilots. None if everything is zero.
     """
-    if not raw_stats:
+    if not raw_stats and bnb <= 0:
         return None
+    raw_stats = raw_stats or {}
 
     missions = sum(
         int(v) for k, v in raw_stats.items()
@@ -1266,17 +1484,17 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸") -> str | None:
         (5, f"{ship} Ship") if ship > 0 else None,
         (6, f"{rescues} Resc") if rescues > 0 else None,
         (7, f"{refuels} Refuels") if refuels > 0 else None,
-        (8, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
+        (8, f"BoB: {bnb}") if bnb > 0 else None,
+        (9, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
 
-    # Cap at 7 fields — drop lowest-priority fields first, but always keep deaths
+    # Cap at 7 fields — drop lowest-priority fields first, but always keep
+    # BoB and deaths (ranks 8 and 9)
     if len(candidates) > 7:
-        deaths_entry = next((c for c in candidates if c[0] == 8), None)
-        others       = [c for c in candidates if c[0] != 8]
-        keep_count   = 6 if deaths_entry else 7
-        others       = sorted(others, key=lambda c: c[0])[:keep_count]
-        candidates   = sorted(others + ([deaths_entry] if deaths_entry else []), key=lambda c: c[0])
+        kept   = [c for c in candidates if c[0] >= 8]
+        others = sorted((c for c in candidates if c[0] < 8), key=lambda c: c[0])[:7 - len(kept)]
+        candidates = sorted(others + kept, key=lambda c: c[0])
 
     parts = [label for _, label in candidates]
 
@@ -1322,10 +1540,12 @@ def _order_stat_items(stats: dict) -> list[tuple[str, float]]:
     full-detail stats sections: Missions (every mission objective, incl.
     map-specific ones — see _is_mission_stat), Achievement, Air, Helo, SAM,
     Infantry, Ground Units, Structure, Ship, Pilot Rescue, Refueling, any
-    other known keys (alphabetical), then Deaths always last."""
+    other known keys (alphabetical), BoB, then Deaths always last."""
     def rank(key: str) -> tuple[int, str]:
         if key == "Deaths":
             return (99, key)
+        if key == "BoB":
+            return (98, "\uffff")   # penultimate: after every other category, right before Deaths
         if key in _STAT_KEY_ORDER:
             return (_STAT_KEY_ORDER.index(key) + 1, key)
         if _is_mission_stat(key):
@@ -1397,9 +1617,11 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                last_seen, session_points: float,
                                daily_points: float, session_stats: dict,
                                mission_status: str,
-                               daily_stats: dict | None = None) -> discord.Embed:
+                               daily_stats: dict | None = None,
+                               bnb: dict | None = None,
+                               penalties: dict | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
-    No buttons, no editing — mirrors FH_Control's player embed sections
+    No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
     """
     credits = float(data.get("credits", 0))
@@ -1423,6 +1645,13 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
 
     # ── Session + Daily stats in one aligned table (Points shown in the title) ─
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+    # BoB (blue-on-blue, from DCSSB) is one more row of the table, with its session
+    # and daily counts like any other category; absent when zero.
+    session_stats = dict(session_stats or {})
+    if bnb and bnb.get("session_known", True) and bnb.get("session"):
+        session_stats["BoB"] = bnb["session"]
+    if bnb and daily_stats is not None and bnb.get("day"):
+        daily_stats = {**daily_stats, "BoB": bnb["day"]}
     other_stats = {k: v for k, v in session_stats.items() if k != "Points"} if session_stats else {}
     daily_filtered = {k: v for k, v in daily_stats.items() if k != "Points" and v} if daily_stats else {}
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
@@ -1435,6 +1664,47 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     else:
         embed.add_field(name=combined_title,
                         value="_No stats yet — will appear after first flight._", inline=False)
+
+    # ── Blue-on-blue (from DCSServerBot's Mission Statistics) ───────────
+    # Only what the stats are about: this session and today. The all-time total
+    # is left out on purpose (it is on the rank card), and nothing is shown when
+    # neither has an incident.
+    if bnb and (bnb.get("session") or bnb.get("day") or bnb.get("recent")):
+        session_txt = f"**Session:** {bnb['session']}" if bnb.get("session_known", True) else "**Session:** n/a"
+        head = [f"- {session_txt} · **Today:** {bnb['day']}"]
+        events = []
+        for when, kind, target_id, victim, target_type in bnb.get("recent") or []:
+            ts = int(calendar.timegm(when.timetuple()))
+            if victim:
+                who = f" → {_safe_code_span(victim)}"
+            elif target_id:
+                who = " → unknown player"
+            else:   # no player UCID on the victim: an AI unit
+                who = f" → AI unit ({target_type})" if target_type else " → AI unit"
+            events.append(f"· <t:{ts}:d> {BNB_LABELS.get(kind, kind)}{who}")
+        # Fit Discord's 1024-character field value: drop the oldest lines first,
+        # keeping room for the note that says the list is partial.
+        def _render(n: int) -> str:
+            partial = n < len(events) or bnb.get("more")
+            note = [f"_Showing only the latest {n}._"] if partial else []
+            return "\n".join(head + events[:n] + note)
+        shown = len(events)
+        while shown > 0 and len(_render(shown)) > 1024:
+            shown -= 1
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+        embed.add_field(name="⚠️ __Blue-on-Blue (BoB)__", value=_render(shown)[:1024], inline=False)
+
+    # ── Penalties in force (Punishment plugin, after decay) ─────────────
+    if penalties and penalties.get("total", 0) >= 1:
+        badge = get_punishment_badge(penalties["total"])
+        parts = [f"{PU_LABELS.get(ev, ev.replace('_', ' ').title())} ×{n} ({pts:.1f} p.p.)"
+                 for ev, n, pts in penalties.get("rows") or []]
+        lines = [badge] if badge else []
+        if parts:
+            lines.append("·　" + " · ".join(parts))
+        lines.append("_Points fade over time (decay)._")
+        embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
+        embed.add_field(name="⚖️ __Penalties in force__", value="\n".join(lines)[:1024], inline=False)
 
     # ── Career Stats (Foothold v4.5, from Foothold_Ranks.lua) ──────────
     # Rank Points and rank name shown in the section title itself.
@@ -1449,6 +1719,9 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Flight Hours (helo):** {_fmt_career_time(helo_s)}")
     if career.get(CAREER_KILLS, 0) > 0:
         career_lines.append(f"- **Kills:** {int(career[CAREER_KILLS])}")
+    if bnb and bnb.get("total"):    # the same all-time number as the rank card, with its detail
+        career_lines.append(f"- **Blue-on-Blue (BoB):** {bnb['total']} "
+                            f"({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)")
     if career.get(CAREER_TRAPS, 0) > 0:
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
@@ -1465,7 +1738,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
-    embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only player report")
+    embed.set_footer(text=f"{_version_text()} · Read-only player report")
     return embed
 
 
@@ -1543,9 +1816,7 @@ def _render_layout_tables(
     embed (table options read from `cfg`). `points_detail` is a dict
     {"D": "...", "S": "...", "R": "..."} — a role missing from it shows only
     its own value. See the module-level comment above for the grammar."""
-    max_pilots          = cfg.get("max_pilots") or None
-    max_pilots_2t       = cfg.get("max_pilots_2t") or None
-    max_pilots_3t       = int(cfg.get("max_pilots_3t") or 0) or None
+    pilot_caps          = {role: _pilot_cap(cfg, role) for role in ("R", "S", "D")}
     show_punishment     = _bool_cfg(cfg.get("show_punishment"))
     show_all_pilots     = _bool_cfg(cfg.get("show_all_pilots"))
     strip_callsign_flag = _bool_cfg(cfg.get("strip_callsign"))
@@ -1574,17 +1845,6 @@ def _render_layout_tables(
     badge_role_done = False
 
     pp = punishment_points or {}
-    surplus = 0
-
-    # All tables share one cap chosen by the number of R/S/D tables:
-    # max_pilots_3t -> max_pilots_2t -> max_pilots. Unused room cascades on.
-    _table_count = len(roles_in_layout)
-    if _table_count <= 1:
-        table_limit = max_pilots
-    elif _table_count == 2:
-        table_limit = max_pilots_2t or max_pilots
-    else:
-        table_limit = max_pilots_3t or max_pilots_2t or max_pilots
 
     for letter in layout:
         if letter == "P":
@@ -1623,12 +1883,10 @@ def _render_layout_tables(
         if not items:
             continue
 
-        limit = table_limit
         total_items = len(items)
-        limit_eff = (limit + surplus) if limit else None
-        if limit_eff:
-            items = items[:limit_eff]
-        surplus = max(0, limit_eff - len(items)) if limit_eff else 0
+        limit = pilot_caps[role]
+        if limit:
+            items = items[:limit]
         hidden = total_items - len(items)
 
         lines = []
@@ -1659,15 +1917,18 @@ def _render_layout_tables(
             block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
 
             if show_pilot_card and role == "R":
-                card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon)
+                card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon,
+                                         bnb=(data.get("bnb") or {}).get("total", 0))
                 if card:
                     block.append(card)
             if show_session_card and role == "S":
-                s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon)
+                s_card = _build_session_card(data.get("session_stats") or {}, icon=session_card_icon,
+                                             bnb=(data.get("bnb") or {}).get("session", 0))
                 if s_card:
                     block.append(s_card)
             if show_daily_card and role == "D":
-                d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon)
+                d_card = _build_session_card(data.get("daily_stats") or {}, icon=daily_card_icon,
+                                             bnb=(data.get("bnb") or {}).get("day", 0))
                 if d_card:
                     block.append(d_card)
 
@@ -1747,8 +2008,11 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 punishment_points: dict | None = None,
                 daily_history: dict | None = None,
                 waypoint_map: dict | None = None,
-                name_to_ucid: dict | None = None) -> discord.Embed:
-    """Build the Discord embed from parsed Foothold data. Display options
+                name_to_ucid: dict | None = None,
+                map_name: str | None = None,
+                bnb: dict | None = None) -> discord.Embed:
+    """Build the Discord embed from parsed Foothold data. `bnb` is
+    {ucid: {"total", "day", "session"}} blue-on-blue counts from DCSSB. Display options
     are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
     campaign_name       = cfg.get("campaign_name", "Foothold Campaign")
     max_zones           = cfg.get("max_zones") or None
@@ -1803,11 +2067,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     # tables section) so the report_layout engine below can add its own
     # fields onto the same embed object.
     embed = discord.Embed(
-        title=f"📡  {campaign_name}",
-        description=(
-            f"**Front Status — {timestamp}**\n\n"
-            f"{progress}"
-        ),
+        title=_embed_title(campaign_name, map_name if _show_map(cfg) else None),
+        description=f"**Front Status — {timestamp}**\n\n{progress}",
         color=0x3498DB
     )
     embed.add_field(name=f"🔵 BLUE Zones ({blue_count})", value=blue_text[:1024], inline=True)
@@ -1834,6 +2095,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
             if raw is None and base in srs_idx:
                 raw = srs[srs_idx[base]]
             data["session_stats"] = raw or {}
+        if bnb and "bnb" not in data and data.get("ucid") in bnb:
+            data["bnb"] = bnb[data["ucid"]]
         if "daily_stats" not in data:
             draw = drs.get(name)
             if draw is None and base in drs_idx:
@@ -1869,7 +2132,7 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    footer_lines = [f"FH_Report {FH_REPORT_RELEASE}"]
+    footer_lines = [_version_text()]
     if player_cmd_hint:
         footer_lines.append(player_cmd_hint)
     footer_lines.append(f"{campaign_name} • Updated automatically")
@@ -1878,8 +2141,36 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     return _trim_embed(embed)
 
 
+def _version_text() -> str:
+    """How the version is written everywhere it shows (embed footers, log)."""
+    return f"Fh_Report Ver. {FH_REPORT_RELEASE}"
+
+
+def _show_map(cfg: dict) -> bool:
+    """show_map: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_map")
+    return True if raw is None else _bool_cfg(raw)
+
+
+def _show_bob(cfg: dict) -> bool:
+    """show_bob: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_bob")
+    return True if raw is None else _bool_cfg(raw)
+
+
+def _embed_title(campaign_name: str, map_name: str | None) -> str:
+    """Report title; when the map is known it's a second line of the title
+    itself, so it shares the title's font. The first line is what identifies
+    this instance's message in the channel (see _publish_embed)."""
+    title = f"📡  {campaign_name}"
+    if map_name:
+        title += f"\n🗺️  {map_name}"
+    return title[:256]          # Discord's title limit
+
+
 def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points_detail: dict,
-                            punishment_points: dict | None = None) -> discord.Embed:
+                            punishment_points: dict | None = None,
+                            map_name: str | None = None) -> discord.Embed:
     """Embed for an instance whose Foothold mission hasn't created its save
     file yet (new server, or campaign not started). Same title as the real
     report, so that message simply becomes the report once the save appears.
@@ -1887,7 +2178,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     campaign_name = cfg.get("campaign_name", "Foothold Campaign")
     timestamp = f"<t:{int(datetime.now(timezone.utc).timestamp())}:f>"
     embed = discord.Embed(
-        title=f"📡  {campaign_name}",
+        title=_embed_title(campaign_name, map_name if _show_map(cfg) else None),
         description=(f"**Front Status — {timestamp}**\n\n"
                      "⏸️ **Campaign not started yet** or this server has no Foothold mission loaded."),
         color=0x95A5A6
@@ -1900,7 +2191,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
 
 # ── Per-player identity (UCID-first) ──────────────────────────────────────────
 # Daily/session figures are keyed by player ID: the UCID (from the save, then
-# Foothold_Ranks.lua, then daily_snapshot.json history), else the name for
+# Foothold_Ranks.lua, then fhr_daily_snapshot.json history), else the name for
 # old UCID-less saves. Names are for display only.
 _UCID_RE = re.compile(r"[0-9a-f]{32}")
 
@@ -2127,7 +2418,7 @@ def _by_display_name(by_id: dict, players: dict, names_by_id: dict,
 class _FHServerTransformer(utils.ServerTransformer):
     """DCSServerBot's ServerTransformer (public server names, hides
     unregistered servers, honours managed_by, pre-selects the channel's
-    server), filtered to servers that have an FH_Report block.
+    server), filtered to servers that have an Fh_Report block.
     """
 
     async def autocomplete(self, interaction: discord.Interaction,
@@ -2147,7 +2438,7 @@ class _FHServerTransformer(utils.ServerTransformer):
             return filtered
 
         # super() short-circuits empty input to the channel's server; if that one
-        # has no FH_Report block, list every eligible server instead.
+        # has no Fh_Report block, list every eligible server instead.
         is_admin = self.is_admin(interaction)
         out: list[app_commands.Choice[str]] = []
         for name, srv in interaction.client.servers.items():
@@ -2175,7 +2466,7 @@ def _load_hook():
         spec.loader.exec_module(mod)
         return mod, True
     except Exception as e:
-        log.warning(f"FH_Report: fh_hook load error: {e}")
+        log.warning(f"Fh_Report: fh_hook load error: {e}")
         return None, False
 
 _fh_hook, _HAS_HOOK = _load_hook()
@@ -2193,20 +2484,144 @@ def _bool_cfg(value) -> bool:
     return False
 
 
-def _reset_hour_today(cfg: dict) -> int:
-    """daily_reset_hour, overridden by today's entry in daily_reset_schedule."""
+def _updates_enabled(cfg: dict) -> bool:
+    """enable_updates (default true) switches an instance on or off. The older
+    disable_updates: true is still honoured when enable_updates isn't set."""
+    if cfg.get("enable_updates") is not None:
+        return _bool_cfg(cfg["enable_updates"])
+    return not _bool_cfg(cfg.get("disable_updates"))
+
+
+_tz_warned: set[str] = set()
+
+
+def _tz_from_name(name) -> tzinfo:
+    """Time zone for the daily reset: an IANA name (Europe/Madrid, which
+    follows summer/winter time by itself), else UTC. An unknown name falls
+    back to UTC with one warning."""
+    name = str(name or "").strip()
+    if not name or name.lower() in ("utc", "gmt", "z"):
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        if name not in _tz_warned:
+            _tz_warned.add(name)
+            log.warning(f"Fh_Report: time zone {name!r} (from the Scheduler plugin) is not a known "
+                        f"time zone name (like Europe/Madrid) — using UTC.")
+        return timezone.utc
+
+
+_HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
+_hhmm_warned: set[str] = set()
+
+
+def _parse_hhmm(value, default: tuple[int, int] = (0, 0)) -> tuple[int, int]:
+    """(hour, minute) from a daily reset setting. Accepts "8:30", "08:30",
+    "15:30"; a plain number is an hour (4 or "4" = 4:00, the pre-HH:MM
+    format). An integer of 60 or more is how a YAML 1.1 reader (PyYAML) turns an
+    unquoted H:MM into minutes of the day (8:30 -> 510), so it is read back as
+    that; DCSServerBot's own reader (ruamel) keeps it as text. Anything else
+    falls back to `default` with one warning."""
+    parsed = None
+    if isinstance(value, bool) or value is None or value == "":
+        parsed = None if isinstance(value, bool) else default
+    elif isinstance(value, int):
+        if 0 <= value <= 23:
+            parsed = (value, 0)
+        elif 60 <= value <= 1439:
+            parsed = divmod(value, 60)
+    elif isinstance(value, str):
+        text = value.strip()
+        m = _HHMM.match(text)
+        if m:
+            parsed = (int(m.group(1)), int(m.group(2)))
+        elif text.isdigit():
+            parsed = (int(text), 0)
+    if parsed is None or not (0 <= parsed[0] <= 23 and 0 <= parsed[1] <= 59):
+        key = repr(value)
+        if key not in _hhmm_warned:
+            _hhmm_warned.add(key)
+            log.warning(f"Fh_Report: daily reset time {value!r} is not a valid HH:MM (00:00 to 23:59, "
+                        f"for example 8:30) — using {default[0]}:{default[1]:02d}.")
+        return default
+    return parsed
+
+
+def _reset_time_today(cfg: dict, tz: tzinfo = timezone.utc) -> tuple[int, int]:
+    """(hour, minute) of today's daily reset: daily_reset_hour, overridden by
+    today's entry in daily_reset_schedule (today is the weekday in the reset
+    time zone `tz`)."""
+    base = _parse_hhmm(cfg.get("daily_reset_hour"))
     schedule = cfg.get("daily_reset_schedule") or {}
-    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).weekday()]
-    if today in schedule:
-        return int(schedule[today])
-    return int(cfg.get("daily_reset_hour") or 0)
+    today = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[datetime.now(timezone.utc).astimezone(tz).weekday()]
+    return _parse_hhmm(schedule[today], base) if today in schedule else base
 
 
-def _ensure_local_fhc_dir(saves_dir: str) -> None:
-    """Create saves_dir/.fhc when saves_dir is on this machine. For a remote
-    agent node the path only exists there, so nothing is created locally."""
-    if os.path.isdir(saves_dir):
-        os.makedirs(os.path.join(saves_dir, ".fhc"), exist_ok=True)
+# Blue-on-blue (BoB) = friendly fire as DCS reported it (DCSSB Mission
+# Statistics, `missionstats`): a player's hit or kill on a unit of their own
+# coalition. Every hit is its own event, so hits are grouped into one incident
+# per attacker + victim + minute (the same grouping Punishment uses), and a
+# group is dropped when a kill of that victim type landed in that minute,
+# so a kill is never counted twice. BoB = destroyed (kills) + damaged (hits).
+BNB_LABELS = {"kill": "Team kill", "hit": "Friendly fire"}
+BNB_RECENT = 10   # latest incidents listed in /fh_report player (the embed says when partial)
+PU_LABELS = {
+    "kill":           "Team kill",
+    "collision_kill": "Collision kill",
+    "friendly_fire":  "Friendly fire",
+    "collision_hit":  "Collision hit",
+    "reslot":         "Reslot when shot at",
+}
+
+_BNB_INCIDENTS_SQL = """
+WITH ff AS (
+    SELECT m.init_id, m.event, m.target_id, m.target_type, m.time, s.server_name
+    FROM missionstats m JOIN missions s ON s.id = m.mission_id
+    WHERE m.event IN ('S_EVENT_KILL', 'S_EVENT_HIT')
+      AND m.init_id = ANY(%(ucids)s)
+      AND m.init_side = m.target_side AND m.init_side <> '0'
+      AND m.target_id IS DISTINCT FROM m.init_id
+), incidents AS (
+    SELECT init_id, server_name, time, 'kill' AS kind, target_id, target_type
+    FROM ff WHERE event = 'S_EVENT_KILL'
+    UNION ALL
+    SELECT h.init_id, h.server_name, MIN(h.time), 'hit', MAX(h.target_id), MAX(h.target_type)
+    FROM ff h
+    WHERE h.event = 'S_EVENT_HIT'
+      AND NOT EXISTS (SELECT 1 FROM ff k
+                      WHERE k.event = 'S_EVENT_KILL' AND k.init_id = h.init_id
+                        AND k.target_type IS NOT DISTINCT FROM h.target_type
+                        AND date_trunc('minute', k.time) = date_trunc('minute', h.time))
+    GROUP BY h.init_id, h.server_name, COALESCE(h.target_id, h.target_type, ''),
+             date_trunc('minute', h.time)
+)
+"""
+
+
+def _day_start(cfg: dict, now: datetime | None = None, tz: tzinfo = timezone.utc) -> datetime:
+    """Most recent daily reset instant (as an aware UTC datetime): today's
+    reset hour if it has passed, else yesterday's (each day with its own
+    daily_reset_schedule hour), the hours being in the reset time zone `tz`."""
+    now = (now or datetime.now(timezone.utc)).astimezone(tz)
+    schedule = cfg.get("daily_reset_schedule") or {}
+    default  = _parse_hhmm(cfg.get("daily_reset_hour"))
+    names    = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    def at(day: datetime) -> datetime:
+        name = names[day.weekday()]
+        hour, minute = _parse_hhmm(schedule[name], default) if name in schedule else default
+        return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    start = at(now)
+    return (start if now >= start else at(now - timedelta(days=1))).astimezone(timezone.utc)
+
+
+def _parse_utc(text) -> datetime | None:
+    try:
+        return datetime.strptime(str(text), "%Y-%m-%dT%H:%M:%S") if text else None
+    except ValueError:
+        return None
 
 
 async def _resolve_saves_dir(server, cfg: dict) -> str:
@@ -2216,7 +2631,7 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
-class FH_Report(Plugin):
+class Fh_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
     Supports multiple server instances defined in fh_report.yaml.
     Uses server.node.read_file() so it works transparently in multi-node
@@ -2230,9 +2645,13 @@ class FH_Report(Plugin):
         self._last_update: float = 0.0
         self._post_sleep_reset: bool = False
         self._cycle_punishment: dict | None = None
+        self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
+        self._campaign_watch: dict[str, dict] = {}   # saves_dir -> last intact reading, for _update_session
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
+        self._last_maps: dict[str, str] = {}          # last known map per instance
+        self._map_probed: set[str] = set()            # instances whose mission file was already tried
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2271,7 +2690,33 @@ class FH_Report(Plugin):
             with open(self._message_ids_file, "w", encoding="utf-8") as f:
                 json.dump(self._message_ids, f, indent=2)
         except OSError as e:
-            self.log.error(f"FH_Report: could not save message IDs: {e}")
+            self.log.error(f"Fh_Report: could not save message IDs: {e}")
+
+    # ── Map of the mission (from DCSServerBot, kept in memory) ─────────────
+
+    async def _known_map(self, server, show: bool = True) -> str | None:
+        """The map DCSServerBot reports for this instance's mission, kept in
+        memory so it's still shown while no mission is loaded; replaced as soon
+        as DCSSB reports another. If nothing is known (e.g. the bot restarted
+        while the server is stopped), it is read ONCE from the mission file —
+        that opens the whole .miz, so never on every cycle. None if unknown."""
+        instance_name = server.instance.name
+        try:
+            current = getattr(getattr(server, "current_mission", None), "map", None)
+        except Exception:
+            current = None
+        if isinstance(current, str) and current.strip():
+            self._last_maps[instance_name] = current.strip()
+        elif show and instance_name not in self._last_maps and instance_name not in self._map_probed:
+            self._map_probed.add(instance_name)
+            try:
+                theatre = await asyncio.wait_for(server.get_current_mission_theatre(), MAP_PROBE_TIMEOUT)
+            except Exception as e:
+                self.log.debug(f"Fh_Report [{instance_name}]: could not read the map from the mission file: {e!r}")
+                theatre = None
+            if isinstance(theatre, str) and theatre.strip():
+                self._last_maps[instance_name] = theatre.strip()
+        return self._last_maps.get(instance_name)
 
     # ── Core update task ──────────────────────────────────────────────────
 
@@ -2315,7 +2760,7 @@ class FH_Report(Plugin):
             if cfg_key not in _unmatched_instance_warned:
                 _unmatched_instance_warned.add(cfg_key)
                 self.log.warning(
-                    f"FH_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
+                    f"Fh_Report: server key '{cfg_key}' in fh_report.yaml doesn't match "
                     f"any configured DCSServerBot instance name — check the instance name "
                     f"in nodes.yaml. This server block will be skipped until fixed."
                 )
@@ -2335,7 +2780,7 @@ class FH_Report(Plugin):
                 await self._update_server(server, cfg)
             except Exception as e:
                 self.log.error(
-                    f"FH_Report [{server.instance.name}]: unexpected error: {e}", exc_info=True
+                    f"Fh_Report [{server.instance.name}]: unexpected error: {e}", exc_info=True
                 )
 
     @updater.before_loop
@@ -2367,27 +2812,27 @@ class FH_Report(Plugin):
         return layout, detail
 
     def _get_daily_file(self, saves_dir: str) -> str:
-        """Return path to daily_snapshot.json cache file."""
-        return os.path.join(saves_dir, ".fhc", "daily_snapshot.json")
+        """Return path to fhr_daily_snapshot.json cache file."""
+        return _fhr_path(saves_dir, "daily_snapshot.json")
 
     def _get_history_file(self, saves_dir: str) -> str:
-        """Return path to daily_history.json — the Podium's record of each
+        """Return path to fhr_daily_history.json — the Podium's record of each
         day's top 50, keyed by date (YYYY-MM-DD)."""
-        return os.path.join(saves_dir, ".fhc", "daily_history.json")
+        return _fhr_path(saves_dir, "daily_history.json")
 
-    async def _load_daily_history(self, saves_dir: str, node) -> dict:
-        """daily_history.json: {date: [event, ...]}, each event
+    async def _load_daily_history(self, saves_dir: str, node, cleanup: bool = False) -> dict:
+        """fhr_daily_history.json: {date: [event, ...]}, each event
         {"campaign_restart": bool, "top": [{"name", "points"[, "ucid"]}]}. A date
         can hold more than one event. {} if missing.
         """
-        return await _read_json(node, self._get_history_file(saves_dir))
+        return await _read_fhr_json(node, saves_dir, "daily_history.json", cleanup)
 
     async def _save_daily_history(self, saves_dir: str, data: dict, node) -> None:
-        """Write daily_history.json via write_bytes_to_node (newest date first,
+        """Write fhr_daily_history.json via write_bytes_to_node (newest date first,
         for readability only).
         """
         path = self._get_history_file(saves_dir)
-        _ensure_local_fhc_dir(saves_dir)
+        await _ensure_fhc_dir(node, saves_dir)
         # Newest date first, for humans only — readers re-sort.
         sorted_data = dict(sorted(data.items(), key=lambda kv: kv[0], reverse=True))
         await write_bytes_to_node(
@@ -2396,16 +2841,16 @@ class FH_Report(Plugin):
             log=self.log
         )
 
-    async def _load_daily_snapshot(self, saves_dir: str, node) -> dict:
-        """daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
+    async def _load_daily_snapshot(self, saves_dir: str, node, cleanup: bool = False) -> dict:
+        """fhr_daily_snapshot.json exactly as stored (see _pack_daily_snapshot);
         callers unpack it with _unpack_daily_snapshot. {} if missing.
         """
-        return await _read_json(node, self._get_daily_file(saves_dir))
+        return await _read_fhr_json(node, saves_dir, "daily_snapshot.json", cleanup)
 
     async def _save_daily_snapshot(self, saves_dir: str, data: dict, node) -> None:
-        """Write daily_snapshot.json via write_bytes_to_node."""
+        """Write fhr_daily_snapshot.json via write_bytes_to_node."""
         path = self._get_daily_file(saves_dir)
-        _ensure_local_fhc_dir(saves_dir)
+        await _ensure_fhc_dir(node, saves_dir)
         await write_bytes_to_node(
             node, path,
             json.dumps(data, indent=2).encode("utf-8"),
@@ -2414,7 +2859,7 @@ class FH_Report(Plugin):
 
     def _identify_players(self, snap_unpacked: dict, campaign_stats: dict, session_stats_raw: dict,
                           players: dict, name_to_ucid_native: dict) -> tuple[dict, dict, dict, dict]:
-        """`snap_unpacked` is daily_snapshot.json after _unpack_daily_snapshot.
+        """`snap_unpacked` is fhr_daily_snapshot.json after _unpack_daily_snapshot.
         Full name -> UCID map (snapshot history < Foothold_Ranks.lua < save
         file's native UCIDs) and the save data regrouped by player ID. Returns
         (campaign_by_id, session_by_id, names_by_id, name_to_ucid).
@@ -2427,16 +2872,18 @@ class FH_Report(Plugin):
         return campaign_by_id, session_by_id, names_by_id, name_to_ucid
 
     async def _compute_daily_points(self, saves_dir: str, campaign_stats: dict,
-                              session_stats_raw: dict, reset_hour: int, node,
+                              session_stats_raw: dict, reset_hour: int | tuple, node,
                               persistence_filename: str | None = None,
                               name_to_ucid: dict | None = None,
                               names_by_id: dict | None = None,
                               live_names: set | None = None,
                               snap: dict | None = None,
                               persist: bool = True,
-                              snap_unpacked: dict | None = None) -> tuple[dict, dict, bool]:
+                              snap_unpacked: dict | None = None,
+                              tz: tzinfo = timezone.utc) -> tuple[dict, dict, bool]:
         """Today's points and stat deltas per player ID, against the baseline
-        snapshot taken at reset_hour UTC. Returns (daily_pts, daily_stats,
+        snapshot taken at reset_hour (an hour, or an (hour, minute) pair) in time zone `tz` (the server's Scheduler
+        timezone, UTC without one). Returns (daily_pts, daily_stats,
         campaign_restarted).
 
         Inputs are already grouped by player ID (see _group_by_player_id), so
@@ -2450,13 +2897,14 @@ class FH_Report(Plugin):
         place — instead moves today's totals into carry_over and rebases the
         snapshot, so daily = (current - snapshot) + carry_over continues
         seamlessly. To reset the daily counters manually, delete
-        saves_dir/.fhc/daily_snapshot.json (a missing snapshot starts at 0).
+        saves_dir/.fhc/fhr_daily_snapshot.json — and daily_snapshot.json too if
+        it's still there (a missing snapshot starts at 0).
         """
-        now_utc   = datetime.now(timezone.utc)
-        today_str = now_utc.strftime("%Y-%m-%d")
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        today_str = now_local.strftime("%Y-%m-%d")
 
         if snap is None:
-            snap = await self._load_daily_snapshot(saves_dir, node)
+            snap = await self._load_daily_snapshot(saves_dir, node, cleanup=persist)
         snap_on_disk = snap          # exactly what's on disk, to skip no-op writes below
         snap = snap_unpacked if snap_unpacked is not None else _unpack_daily_snapshot(snap)
         if snap:
@@ -2506,9 +2954,10 @@ class FH_Report(Plugin):
         mission_reset = filename_changed or data_vanished or campaign_restarted
 
         # ── Real calendar-day reset (the only thing that closes a day) ─────
-        reset_time     = now_utc.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+        reset_h, reset_m = reset_hour if isinstance(reset_hour, tuple) else (int(reset_hour), 0)
+        reset_time     = now_local.replace(hour=reset_h, minute=reset_m, second=0, microsecond=0)
         first_run      = not snap_date
-        date_reset_due = (not first_run) and snap_date != today_str and now_utc >= reset_time
+        date_reset_due = (not first_run) and snap_date != today_str and now_local >= reset_time
 
         if first_run:
             # No prior day to close or carry over — start completely fresh.
@@ -2519,7 +2968,7 @@ class FH_Report(Plugin):
 
         elif date_reset_due:
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
-            self.log.debug(f"FH_Report: daily reset for {saves_dir} at {reset_hour:02d}:00 UTC{reason}")
+            self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_h:02d}:{reset_m:02d} {tz}{reason}")
 
             # Close the day for the Podium from the current snapshot/carry_over (which
             # already include earlier mid-day swaps); last_daily_saved covers a swap
@@ -2531,7 +2980,7 @@ class FH_Report(Plugin):
 
             if closing_daily and persist:
                 top_list = sorted(closing_daily.items(), key=lambda kv: kv[1], reverse=True)[:50]
-                history    = await self._load_daily_history(saves_dir, node)
+                history    = await self._load_daily_history(saves_dir, node, cleanup=True)
                 # Store the UCID too, so the Podium can show the CURRENT name/rank later.
                 _top_entries = []
                 for pid, p in top_list:
@@ -2564,7 +3013,7 @@ class FH_Report(Plugin):
             # NEW file, so today's earnings come from last_daily_saved. Fold them into
             # carry_over and rebase the snapshot onto the new file.
             self.log.debug(
-                f"FH_Report: mid-day mission/map reset detected for {saves_dir} "
+                f"Fh_Report: mid-day mission/map reset detected for {saves_dir} "
                 f"(filename_changed={filename_changed}, data_vanished={data_vanished}, "
                 f"campaign_restarted={campaign_restarted}) — carrying today's totals "
                 f"forward, no Podium entry."
@@ -2648,6 +3097,171 @@ class FH_Report(Plugin):
 
         return daily, daily_stats, campaign_restarted
 
+    def _reset_tz(self, server) -> tzinfo:
+        """Time zone of this server's daily reset: the `timezone` the Scheduler
+        plugin has for it (DCSServerBot's own setting), UTC when it has none or
+        the Scheduler plugin is not there."""
+        try:
+            name = (self.get_config(server, plugin_name="scheduler") or {}).get("timezone")
+        except Exception:
+            name = None
+        return _tz_from_name(name)
+
+    async def _reset_moment(self, server, seen: datetime | None, now: datetime) -> datetime:
+        """When a campaign reset noticed at `now` most likely happened: Foothold
+        restarts the mission seconds after a reset, so the first mission start
+        DCSServerBot recorded since the campaign was last seen intact. `now`
+        when there is none, or the window is too wide to say."""
+        if seen and timedelta(0) < now - seen <= _SESSION_WINDOW:
+            try:
+                async with self.apool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT MIN(mission_start) FROM missions "
+                            "WHERE server_name = %s AND mission_start > %s AND mission_start <= %s",
+                            (server.name, seen, now))
+                        row = await cur.fetchone()
+                        if row and row[0]:
+                            return row[0]
+            except Exception as e:
+                self.log.debug(f"Fh_Report: mission start not available: {e}")
+        return now
+
+    async def _update_session(self, server, saves_dir: str, node, source_node,
+                              persistence_file: str, points: dict, kills: dict, cfg: dict | None = None) -> datetime:
+        """Notice campaign resets, keep .fhc/fhr_session.json current, and
+        return the session start (naive UTC). `points` / `kills` are the
+        campaign points and Air+Ground kills per player ID. See the comment above."""
+        basename = os.path.basename(persistence_file)
+        raw = await _read_fhr_json(node, saves_dir, "session.json")
+        old = _session_migrate(raw)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cur = {"points": dict(points), "kills": dict(kills)}
+        absent = saves_dir in self._campaign_absent
+        self._campaign_absent.discard(saves_dir)
+
+        watch = self._campaign_watch.get(saves_dir)
+        if watch is None and old and old.get("file") == basename and old.get("base"):   # after a bot restart
+            watch = {**old["base"], "seen": _parse_utc(old.get("seen")), "pending": False}
+        seen = (watch or {}).get("seen") or _parse_utc((old or {}).get("seen"))
+
+        reset = False
+        if not old:
+            st = {"file": basename, "start": now.strftime(_SESSION_ISO), "kind": "first_seen"}
+            self.log.debug(f"Fh_Report [{server.instance.name}]: campaign {basename} first seen {st['start']} UTC")
+            watch = {**cur, "seen": now, "pending": False}
+        elif old.get("file") != basename or absent:       # other map, or the save reappeared
+            reset, watch = True, {**cur, "seen": now, "pending": False}
+        elif _campaign_looks_reset(watch, cur):
+            if watch.get("pending"):                      # second look agrees: it's a reset
+                reset, watch = True, {**cur, "seen": now, "pending": False}
+            else:                                         # keep the old baseline, look again next cycle
+                watch = {**watch, "pending": True}
+        else:
+            watch = {**cur, "seen": now, "pending": False}
+        if reset:
+            st = {"file": basename, "kind": "detected",
+                  "start": (await self._reset_moment(server, seen, now)).strftime(_SESSION_ISO)}
+            self.log.info(f"Fh_Report [{server.instance.name}]: new campaign session ({basename}) from {st['start']} UTC "
+                          f"(noticed {now.strftime(_SESSION_ISO)} UTC)")
+        elif old:
+            st = {k: old[k] for k in ("file", "start", "kind")}
+        self._campaign_watch[saves_dir] = watch
+
+        stale = not raw or now - (_parse_utc(raw.get("seen")) or now) >= _SESSION_SEEN_EVERY
+        if reset or not old or raw.get("start") != st["start"] or raw.get("file") != st["file"] or (stale and not watch["pending"]):
+            st.update(seen=(watch["seen"] or now).strftime(_SESSION_ISO),
+                      base={"points": watch["points"], "kills": watch["kills"]})
+            await _ensure_fhc_dir(source_node, saves_dir)
+            await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
+                                      json.dumps(st, indent=2).encode("utf-8"), log=self.log)
+        return _session_start_for(st, cfg or {}, self._reset_tz(server))
+
+    async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
+        """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
+        {ucid: {"total", "day", "session"}}. Total is every server and all the
+        history kept; day and session only count this server since the last
+        daily reset / session start. Empty when the plugin's table isn't there."""
+        if not ucids:
+            return {}
+        day_from = _day_start(cfg, tz=self._reset_tz(server)).replace(tzinfo=None)
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(_BNB_INCIDENTS_SQL + """
+                        SELECT init_id, COUNT(*),
+                               COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
+                               COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(session)s)
+                        FROM incidents GROUP BY init_id
+                    """, {"ucids": list(ucids), "server": server.name, "day": day_from,
+                          "session": session or datetime.max})
+                    return {r[0]: {"total": int(r[1]), "day": int(r[2]), "session": int(r[3])}
+                            for r in await cur.fetchall()}
+        except Exception as e:
+            self.log.debug(f"Fh_Report: BoB data not available: {e}")
+            return {}
+
+    async def _fetch_bnb_detail(self, server, cfg: dict, session: datetime | None, ucid: str,
+                                with_penalties: bool = False, with_bnb: bool = True) -> tuple[dict | None, dict | None]:
+        """One player's detail for /fh_report player: (bnb, penalties).
+        bnb: totals split into destroyed / damaged, today and this session on
+        this server, plus the latest incidents. penalties (only when asked):
+        what Punishment still holds against the player after decay, by event.
+        Each is None when there is nothing or the plugin's table is missing.
+        `session` is the campaign session start (naive UTC), or None when unknown."""
+        day_from = _day_start(cfg, tz=self._reset_tz(server)).replace(tzinfo=None)
+        bnb = penalties = None
+        try:
+            async with self.apool.connection() as conn:
+                async with conn.cursor() as cur:
+                    params = {"ucids": [ucid], "server": server.name, "day": day_from,
+                              "session": session or datetime.max}
+                    try:
+                        if not with_bnb:
+                            raise LookupError("BoB switched off")
+                        await cur.execute(_BNB_INCIDENTS_SQL + """
+                            SELECT kind, COUNT(*),
+                                   COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
+                                   COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(session)s)
+                            FROM incidents GROUP BY kind
+                        """, params)
+                        by_kind = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in await cur.fetchall()}
+                        if by_kind:
+                            await cur.execute(_BNB_INCIDENTS_SQL + """
+                                SELECT i.time, i.kind, i.target_id, t.name, i.target_type
+                                FROM incidents i LEFT JOIN players t ON t.ucid = i.target_id
+                                WHERE i.server_name = %(server)s AND i.time >= %(since)s
+                                ORDER BY i.time DESC LIMIT %(limit)s
+                            """, {**params, "since": session or datetime.min, "limit": BNB_RECENT + 1})
+                            rows = [tuple(r) for r in await cur.fetchall()]   # this server, this session
+                            bnb = {
+                                "total":     sum(v[0] for v in by_kind.values()),
+                                "day":       sum(v[1] for v in by_kind.values()),
+                                "session":   sum(v[2] for v in by_kind.values()),
+                                "destroyed": by_kind.get("kill", (0, 0, 0))[0],
+                                "damaged":   by_kind.get("hit", (0, 0, 0))[0],
+                                "recent":    rows[:BNB_RECENT],
+                                "more":      len(rows) > BNB_RECENT,
+                                "session_known": session is not None,
+                            }
+                    except LookupError:
+                        pass
+                    except Exception as e:
+                        self.log.debug(f"Fh_Report: BoB detail not available: {e}")
+                    if with_penalties:
+                        try:
+                            await cur.execute(
+                                "SELECT event, COUNT(*), SUM(points) FROM pu_events "
+                                "WHERE init_id = %s GROUP BY event ORDER BY SUM(points) DESC", (ucid,))
+                            rows = [(r[0], int(r[1]), float(r[2])) for r in await cur.fetchall()]
+                            if rows:
+                                penalties = {"total": sum(r[2] for r in rows), "rows": rows}
+                        except Exception as e:
+                            self.log.debug(f"Fh_Report: penalties not available: {e}")
+        except Exception as e:
+            self.log.debug(f"Fh_Report: BoB/penalties connection failed: {e}")
+        return bnb, penalties
+
     async def _fetch_punishment_points(self) -> dict:
         """Fetch total punishment points per UCID from pu_events table."""
         try:
@@ -2662,7 +3276,7 @@ class FH_Report(Plugin):
                     rows = await cur.fetchall()
                     return {row[0]: float(row[1]) for row in rows}
         except Exception as e:
-            self.log.debug(f"FH_Report: punishment points not available: {e}")
+            self.log.debug(f"Fh_Report: punishment points not available: {e}")
             return {}
 
     async def _update_server(self, server, cfg: dict):
@@ -2672,25 +3286,26 @@ class FH_Report(Plugin):
 
         instance_name = server.instance.name
 
-        if _bool_cfg(cfg.get("disable_updates")):
-            # Silenced instance (e.g. a duplicate install elsewhere in the cluster
-            # posting to the same channel): no read, no post.
+        if not _updates_enabled(cfg):
+            # Switched-off instance (or a duplicate install elsewhere in the
+            # cluster posting to the same channel): no read, no post.
             return
 
         channel_id    = _single_channel_id(cfg.get("channel_id"))
         if not channel_id:
-            self.log.warning(f"FH_Report [{instance_name}]: channel_id not configured.")
+            self.log.warning(f"Fh_Report [{instance_name}]: channel_id not configured.")
             return
 
         channel = self.bot.get_channel(int(channel_id))
         if not channel:
-            self.log.warning(f"FH_Report [{instance_name}]: channel {channel_id} not found.")
+            self.log.warning(f"Fh_Report [{instance_name}]: channel {channel_id} not found.")
             return
 
         saves_dir = await _resolve_saves_dir(server, cfg)
 
         source_node = server.node
         node = _UpdateReadCache(source_node)
+        map_name = await self._known_map(server, _show_map(cfg))
 
         # One-time-per-instance write self-test — see run_write_self_test()
         # for why this doesn't wait for a real correction to be needed.
@@ -2698,11 +3313,11 @@ class FH_Report(Plugin):
 
         persistence_file = await find_persistence_file(saves_dir, node)
         if not persistence_file:
-            await self._post_not_started(server, cfg, channel, channel_id, saves_dir, node)
+            await self._post_not_started(server, cfg, channel, channel_id, saves_dir, node, map_name)
             return
         if instance_name in _missing_save_warned:
             _missing_save_warned.discard(instance_name)
-            self.log.info(f"FH_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
+            self.log.debug(f"Fh_Report [{instance_name}]: Foothold save found in {saves_dir} — full report resumed.")
 
         ranks_file    = os.path.join(saves_dir, "Foothold_Ranks.lua")
         ranks_missing = False
@@ -2711,7 +3326,7 @@ class FH_Report(Plugin):
             ranks_source = await node.read_file(ranks_file)
         except FileNotFoundError:
             self.log.debug(
-                f"FH_Report [{instance_name}]: Foothold_Ranks.lua not found — "
+                f"Fh_Report [{instance_name}]: Foothold_Ranks.lua not found — "
                 f"showing zone status without leaderboard."
             )
             ranks_missing = True
@@ -2722,7 +3337,7 @@ class FH_Report(Plugin):
                 if await deduplicate_ranks(ranks_file, persistence_file, source_node, ranks_source):
                     node.invalidate(ranks_file)
             except Exception as e:
-                self.log.error(f"FH_Report [{instance_name}]: deduplication error: {e}")
+                self.log.error(f"Fh_Report [{instance_name}]: deduplication error: {e}")
 
         try:
             excluded_ucids = cfg.get("excluded_ucids") or []
@@ -2730,7 +3345,7 @@ class FH_Report(Plugin):
             players        = {} if ranks_missing else await parse_ranks(ranks_file, excluded_ucids, node)
             campaign_stats, session_stats_raw, name_to_ucid_native = await parse_player_stats(persistence_file, node)
         except Exception as e:
-            self.log.error(f"FH_Report [{instance_name}]: error parsing data: {e}")
+            self.log.error(f"Fh_Report [{instance_name}]: error parsing data: {e}")
             return
 
         # Optional private hook — post-processes players dict
@@ -2738,7 +3353,7 @@ class FH_Report(Plugin):
             try:
                 players = _fh_hook.post_process(players, cfg, instance_name, campaign_stats)
             except Exception as e:
-                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+                self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
 
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
@@ -2765,20 +3380,32 @@ class FH_Report(Plugin):
         campaign_restarted_now = False
         # Must run even with empty campaign_stats: right after a mission change it's
         # what detects the swap and carries today's points over.
-        daily_snap = await self._load_daily_snapshot(saves_dir, node) if needs_daily else {}
+        daily_snap = await self._load_daily_snapshot(saves_dir, node, cleanup=True) if needs_daily else {}
         snap_unpacked = _unpack_daily_snapshot(daily_snap)
         campaign_by_id, session_by_id, names_by_id, name_to_ucid = self._identify_players(
             snap_unpacked, campaign_stats, session_stats_raw, players, name_to_ucid_native)
         live_names = set(campaign_stats) | set(session_stats_raw)
         if needs_daily:
-            reset_hour = _reset_hour_today(cfg)
+            tz = self._reset_tz(server)
+            reset_hour = _reset_time_today(cfg, tz)
             daily_pts, daily_stats, campaign_restarted_now = await self._compute_daily_points(
                 saves_dir, campaign_by_id, session_by_id, reset_hour, source_node,
                 os.path.basename(persistence_file) if persistence_file else None,
-                name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked)
+                name_to_ucid, names_by_id, live_names, daily_snap, snap_unpacked=snap_unpacked,
+                tz=tz)
+
+        # Campaign session start (always kept up to date: /fh_report player reads it too)
+        session = await self._update_session(
+            server, saves_dir, node, source_node, persistence_file, campaign_by_id,
+            {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()}, cfg)
+        bnb = {}
+        if _show_bob(cfg) and any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
+            bnb = await self._fetch_bnb(
+                server, cfg, session,
+                [d["ucid"] for d in players.values() if d.get("ucid")])
 
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
-        daily_history_data = (await self._load_daily_history(saves_dir, source_node)
+        daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
                               if "P" in current_layout else None)
 
         # Waypoint ordering: dump WaypointList (in-memory only) via hot injection
@@ -2800,11 +3427,11 @@ class FH_Report(Plugin):
                     await asyncio.sleep(1.5)
                     node.invalidate(wp_cache_file)
                 except Exception as e:
-                    self.log.warning(f"FH_Report [{instance_name}]: waypoint hot-write failed: {e}")
+                    self.log.warning(f"Fh_Report [{instance_name}]: waypoint hot-write failed: {e}")
             try:
                 waypoint_map = await load_waypoint_list(saves_dir, node)
             except Exception as e:
-                self.log.warning(f"FH_Report [{instance_name}]: could not load waypoint cache: {e}")
+                self.log.warning(f"Fh_Report [{instance_name}]: could not load waypoint cache: {e}")
                 waypoint_map = {}
 
         u2rn = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
@@ -2823,20 +3450,24 @@ class FH_Report(Plugin):
             # player has had, plus current ones) — lets the Podium identify
             # old entries by UCID and show the player's current name/rank.
             name_to_ucid      = name_to_ucid if "P" in current_layout else None,
+            map_name          = map_name,
+            bnb               = bnb,
         )
 
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
 
     async def _post_not_started(self, server, cfg: dict, channel, channel_id,
-                                saves_dir: str, node) -> None:
+                                saves_dir: str, node, map_name: str | None = None) -> None:
         """No Foothold save yet (new server / campaign not started): post a
         "not started" embed, with the rank table if Foothold_Ranks.lua exists.
-        Logged once per instance, not every cycle."""
+        Logged once (DEBUG) per instance, not every cycle."""
         instance_name = server.instance.name
+        self._campaign_absent.add(saves_dir)   # the save reappearing marks a new campaign session
+        self._campaign_watch.pop(saves_dir, None)
         if instance_name not in _missing_save_warned:
             _missing_save_warned.add(instance_name)
-            self.log.warning(
-                f"FH_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
+            self.log.debug(
+                f"Fh_Report [{instance_name}]: no foothold_*.lua found in {saves_dir} — showing "
                 f"'campaign not started' until the Foothold mission creates its save files."
             )
         try:
@@ -2848,14 +3479,14 @@ class FH_Report(Plugin):
             try:
                 players = _fh_hook.post_process(players, cfg, instance_name, {})
             except Exception as e:
-                self.log.debug(f"FH_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+                self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
         punishment_points = {}
         if players and _bool_cfg(cfg.get("show_punishment")):
             if self._cycle_punishment is None:
                 self._cycle_punishment = await self._fetch_punishment_points()
             punishment_points = self._cycle_punishment
         layout, detail = self._resolve_report_layout(instance_name, cfg)
-        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points)
+        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points, map_name)
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
 
     async def _publish_embed(self, instance_name: str, channel, channel_id, cfg: dict,
@@ -2870,22 +3501,22 @@ class FH_Report(Plugin):
                     await channel.get_partial_message(msg_id).edit(embed=embed)
                     return
                 except discord.NotFound:
-                    self.log.warning(f"FH_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
+                    self.log.warning(f"Fh_Report [{instance_name}]: previous message not found, searching channel for an existing one.")
                     self._message_ids.pop(instance_name, None)
 
             if msg is None:
-                # Unknown message id: adopt an existing FH_Report message in the channel
+                # Unknown message id: adopt an existing Fh_Report message in the channel
                 # before posting, so duplicate posts can't happen.
                 campaign_name  = cfg.get("campaign_name", "Foothold Campaign")
                 expected_title = f"📡  {campaign_name}"
                 async for hist_msg in channel.history(limit=50):
                     if (hist_msg.author.id == self.bot.user.id and hist_msg.embeds
-                            and hist_msg.embeds[0].title == expected_title):
+                            and (hist_msg.embeds[0].title or "").split("\n")[0] == expected_title):
                         msg = hist_msg
                         self._message_ids[instance_name] = msg.id
                         self._save_message_ids()
                         self.log.info(
-                            f"FH_Report [{instance_name}]: adopted existing message "
+                            f"Fh_Report [{instance_name}]: adopted existing message "
                             f"{msg.id} in channel {channel_id} (message_ids.json was out of sync)."
                         )
                         break
@@ -2899,7 +3530,7 @@ class FH_Report(Plugin):
             self._save_message_ids()
 
         except discord.HTTPException as e:
-            self.log.error(f"FH_Report [{instance_name}]: Discord error: {e}")
+            self.log.error(f"Fh_Report [{instance_name}]: Discord error: {e}")
 
     # ── /fh_report player ────────────────────────────────────────────────
 
@@ -2907,6 +3538,30 @@ class FH_Report(Plugin):
         """Return instance-name keys configured in fh_report.yaml (excludes DEFAULT)."""
         raw = self.locals or {}
         return [k for k in raw.keys() if k != "DEFAULT"]
+
+    def _eligible_instances(self, interaction: discord.Interaction) -> list[str]:
+        """Configured instances the user can actually pick: the ones DCSServerBot
+        has registered (and shows to this user), which is what the `server`
+        option lists. A leftover or offline block in fh_report.yaml must not count
+        as a second server the user can't see."""
+        is_admin = _FHServerTransformer.is_admin(interaction)
+        out = []
+        for name in self._configured_instances():
+            srv = self._get_server_by_instance(name)
+            if srv is None or srv.status == Status.UNREGISTERED:
+                continue
+            if (is_admin and srv.locals.get("managed_by") and
+                    not utils.check_roles(srv.locals.get("managed_by"), interaction.user)):
+                continue
+            out.append(name)
+        return out
+
+    def _channel_server(self, interaction: discord.Interaction):
+        """The server DCSServerBot assigns to the channel of the command, or None."""
+        try:
+            return self.bot.get_server(interaction)
+        except Exception:
+            return None
 
     def _get_server_by_instance(self, instance_name: str):
         """Find the DCSSB Server object matching a configured instance name."""
@@ -2953,23 +3608,36 @@ class FH_Report(Plugin):
         check. Returns (instance_name, error_message), exactly one None.
         server_param may be a Server (transformer), a public server name
         (autocomplete namespace) or None.
-        - Instance: with one configured it's always that one; with several the
-          `server` option is required (the channel is never used to guess).
+        - Instance: with one available (registered in DCSServerBot, so listed in
+          the `server` option) it's always that one; with several the `server`
+          option is required, except in the channel DCSServerBot assigns to one
+          of them (the server the option's list pre-selects). Blocks of servers
+          that are not registered don't count: they can't be picked.
         - Channel: unrestricted unless commands_channel_id is set; then only the
           instance's channel_id or one listed in commands_channel_id.
         """
         configured = self._configured_instances()
         if not configured:
-            return None, "❌ FH_Report has no servers configured."
+            return None, "❌ Fh_Report has no servers configured."
 
-        if len(configured) == 1:
-            server_name = configured[0]
+        # Nothing registered yet (still starting up): fall back to the whole config.
+        available = self._eligible_instances(interaction) or configured
+        if len(available) == 1:
+            server_name = available[0]
         else:
             if not server_param:
-                return None, (
-                    "❌ More than one server is configured — please choose one "
-                    "from the `server` option list."
-                )
+                # The `server` list pre-selects the server of the channel the command is
+                # run in (DCSServerBot's own rule) and lists only that one; leaving the
+                # option empty must mean exactly that server, not an error.
+                srv = self._channel_server(interaction)
+                if srv is not None and srv.instance.name in available:
+                    server_param = srv
+                else:
+                    names = ", ".join(f"**{getattr(self._get_server_by_instance(n), 'name', n)}**" for n in available)
+                    return None, (
+                        f"❌ More than one server is available ({names}) — please choose one "
+                        f"from the `server` option list."
+                    )
             if isinstance(server_param, str):
                 srv = self.bot.servers.get(server_param)
                 if srv is None:
@@ -2980,7 +3648,7 @@ class FH_Report(Plugin):
             else:
                 srv = server_param
             if srv.instance.name not in configured:
-                return None, f"❌ FH_Report isn't configured for **{srv.name}**."
+                return None, f"❌ Fh_Report isn't configured for **{srv.name}**."
             server_name = srv.instance.name
 
         cfg = self._merged_cfg(server_name)
@@ -3224,12 +3892,13 @@ class FH_Report(Plugin):
         s_stats = _lookup(srs_disp, None) or {}
 
         # Daily points — reuse the same snapshot-based computation as the embed
-        reset_hour = _reset_hour_today(cfg)
+        tz = self._reset_tz(srv)
+        reset_hour = _reset_time_today(cfg, tz)
         daily_pts_all, daily_stats_all, _ = await self._compute_daily_points(
             saves_dir, campaign_by_id, session_by_id, reset_hour, node,
             os.path.basename(persistence_file) if persistence_file else None,
             name_to_ucid, names_by_id, set(campaign_stats) | set(session_stats_raw), daily_snap,
-            persist=False, snap_unpacked=snap_unpacked)
+            persist=False, snap_unpacked=snap_unpacked, tz=tz)
         d_pts   = _lookup(_by_display_name(daily_pts_all, players, names_by_id, u2rn), 0)
         d_stats = _lookup(_by_display_name(daily_stats_all, players, names_by_id, u2rn), None) or {}
 
@@ -3256,10 +3925,16 @@ class FH_Report(Plugin):
         else:
             mission_status = f"⏹️ **{self._public_server_name(server)}** Mission not running."
 
+        sess = await _read_fhr_json(node, saves_dir, "session.json")
+        bnb, penalties = (await self._fetch_bnb_detail(
+            srv, cfg, _session_start_for(sess, cfg, tz), ucid,
+            with_penalties=_bool_cfg(cfg.get("show_punishment")), with_bnb=_show_bob(cfg))
+            if ucid else (None, None))
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
-            mission_status=mission_status, daily_stats=d_stats
+            mission_status=mission_status, daily_stats=d_stats,
+            bnb=bnb, penalties=penalties,
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
@@ -3341,10 +4016,10 @@ class FH_Report(Plugin):
             color=0xF1C40F, timestamp=datetime.now(timezone.utc)
         )
         _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"FH_Report {FH_REPORT_RELEASE} · Read-only historical report")
+        embed.set_footer(text=f"{_version_text()} · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
 async def setup(bot: DCSServerBot):
-    await bot.add_cog(FH_Report(bot))
-    log.info(f"  => FH_Report v{FH_REPORT_RELEASE} loaded.")
+    await bot.add_cog(Fh_Report(bot))
+    log.info(f"  => {_version_text()} loaded.")

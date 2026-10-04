@@ -6,7 +6,16 @@ import itertools
 import random
 from datetime import datetime, timezone
 
+import pytest
+
 from conftest import UCID, check_golden, commands, digest, embed_dump
+
+
+@pytest.fixture(autouse=True)
+def _pin_release(monkeypatch):
+    """The footer's length decides how many lines fit in Discord's 6000 characters, so a
+    longer version number (14.1.9 -> 14.1.10) would shift the golden output."""
+    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "12.5.4")
 
 
 def _zone(name, level, active, suspended=False, true_max=None):
@@ -107,3 +116,69 @@ def test_embed_respects_discord_limits():
     assert len(embed.fields) <= 25
     assert all(len(f.value) <= 1024 for f in embed.fields)
     assert commands._embed_size(embed) <= commands.DISCORD_EMBED_LIMIT
+
+
+def test_version_is_written_as_fh_report_ver_everywhere():
+    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+    main = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
+    assert main.footer.text.splitlines()[0] == commands._version_text()
+    notstarted = commands.build_not_started_embed({}, {"campaign_name": "C"}, "R", {})
+    assert notstarted.footer.text.splitlines()[0] == commands._version_text()
+    player = commands._build_player_report_embed("P", {"credits": 1}, None, None, 0, 0, {}, "ok")
+    assert player.footer.text.startswith(commands._version_text() + " · ")
+
+
+# ── max_pilots: one limit per table ────────────────────────────────────────────
+
+def _table_sizes(cfg, layout="DSR"):
+    """{table letter: pilots listed} for an embed with plenty of pilots in every table."""
+    players, data = _big_data()
+    data = {**data, "report_layout": layout}
+    embed = commands.build_embed(copy.deepcopy(ZONES), copy.deepcopy(players), {"campaign_name": "C", **cfg},
+                                 **copy.deepcopy(data))
+    titles = {"Daily Leaderboard": "D", "Session Leaderboard": "S", "Pilot Leaderboard": "R"}
+    sizes, current = {}, None
+    for f in embed.fields:
+        hit = next((t for name, t in titles.items() if name in f.name), None)
+        if hit:
+            current = hit
+            sizes[current] = 0
+        if current:
+            sizes[current] += sum(1 for line in f.value.splitlines() if line.startswith(("🥇", "🥈", "🥉", "🎖", "•")))
+    return sizes
+
+
+def test_every_table_has_its_own_limit_whatever_the_layout():
+    assert _table_sizes({"max_pilots": 4}) == {"D": 4, "S": 4, "R": 4}
+    assert _table_sizes({"max_pilots": 4}, layout="R") == {"R": 4}
+    assert _table_sizes({"max_pilots": 4, "max_pilots_R": 7, "max_pilots_D": 2}) == {"D": 2, "S": 4, "R": 7}
+    assert _table_sizes({"max_pilots_S": 3}) == {"D": _table_sizes({})["D"], "S": 3, "R": _table_sizes({})["R"]}
+
+
+def test_a_table_does_not_borrow_room_from_the_others():
+    """Nothing is shared: a limit of 4 stays 4 even when a table before it is short."""
+    sizes = _table_sizes({"max_pilots": 4, "max_pilots_D": 1})
+    assert sizes["D"] == 1 and sizes["S"] == 4 and sizes["R"] == 4
+
+
+def test_the_old_two_and_three_table_keys_are_gone():
+    assert _table_sizes({"max_pilots_2t": 2, "max_pilots_3t": 1}) == _table_sizes({})
+
+
+import pytest
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, None), ("", None), (15, 15), ("15", 15), (" 7 ", 7), (0, None), ("0", None),
+    (-3, None), ("-3", None), ("many", None), (4.5, None), (True, None), ([5], None),
+])
+def test_pilot_limit_values(value, expected):
+    assert commands._pilot_cap({"max_pilots": value}, "R") == expected
+
+
+def test_pilot_limit_resolution_order():
+    cfg = {"max_pilots": 10, "max_pilots_S": 3, "max_pilots_D": 0}
+    assert commands._pilot_cap(cfg, "R") == 10            # the default
+    assert commands._pilot_cap(cfg, "S") == 3             # its own
+    assert commands._pilot_cap(cfg, "D") is None          # its own 0 = no limit, ignoring max_pilots
+    assert commands._pilot_cap({"max_pilots_R": "x", "max_pilots": 5}, "R") is None   # a bad own value is not papered over

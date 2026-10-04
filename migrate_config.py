@@ -1,5 +1,5 @@
 """
-FH_Report config migration script.
+Fh_Report config migration script.
 Called by install.bat when fh_report.yaml already exists.
 Reads the existing config, adds any missing variables with their default values,
 and warns about any obsolete variables found in server blocks.
@@ -10,7 +10,7 @@ import re
 
 
 # ── Canonical header comment for fh_report.yaml ───────────────────────────────
-HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
+HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 # Place this file in: config/plugins/fh_report.yaml
 #
 # SERVER IDENTIFICATION:
@@ -42,12 +42,16 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                                                 one of these
 #                           - WHETHER you must specify `server` on the
 #                             command — only needed if you have MORE THAN
-#                             ONE server configured at all (the channel is
-#                             never used to guess between several, since two
-#                             servers could end up sharing a
-#                             commands_channel_id by mistake). With exactly
-#                             one server configured, there's nothing to
-#                             guess and `server` is never asked for.
+#                             ONE server available (configured here AND
+#                             registered in DCSServerBot, i.e. the ones the
+#                             `server` option lists). With several, leaving
+#                             `server` empty works only in the channel that
+#                             DCSServerBot assigns to one of them (the one
+#                             the option pre-selects); anywhere else you
+#                             must pick. With exactly one server available,
+#                             `server` is never asked for — a leftover
+#                             block of a server that is off or not
+#                             registered does not count.
 #                         Example:
 #                           commands_channel_id:
 #                             - 1234567890123456789
@@ -119,21 +123,39 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
+#                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
+#                          number (4) still works and means 4:00. The counters are
+#                          checked every update_interval, so the change shows in the
+#                          first update after that time.
+#                          The time is in the time zone of this server's `timezone` in
+#                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
+#                          for example `timezone: Europe/Madrid` on the instance; it follows
+#                          summer/winter time by itself). Without one, or without the
+#                          Scheduler plugin, the time is UTC. There is no separate setting
+#                          here: change the Scheduler's timezone and the reset moves with it
+#                          (one daily period is then longer or shorter than 24 hours, once).
 #                          Manual reset (no commands in this plugin): delete
-#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
-#                          restarts cleanly at 0, it never retroactively counts
+#                          saves_dir/.fhc/fhr_daily_snapshot.json (and the older
+#                          daily_snapshot.json too, if it's still there) — the daily
+#                          counter restarts cleanly at 0, it never retroactively counts
 #                          everything accumulated up to that point.
 #                          Campaign restart is also detected automatically: if both
 #                          total points and total kills drop for common players,
 #                          the daily snapshot resets on its own — no action needed.
-#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
-#                          Only define the days that differ from daily_reset_hour.
+#   daily_reset_schedule - Optional: override the reset time for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour (same HH:MM format).
 #                          Days: mon, tue, wed, thu, fri, sat, sun
-#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                          The days are the days in that same time zone.
+#                          Example: reset at midnight except Thursday at 6:00 and Saturday at 7:30:
 #                            daily_reset_schedule:
-#                              thu: 6
-#                              sat: 6
+#                              thu: 6:00
+#                              sat: 7:30
+#   show_map         - Show the mission's map on a second line of the embed title  (default: true)
+#                      The map is read from DCSServerBot (never configured here) and the
+#                      last known one is kept while the bot runs; if none is known yet it
+#                      is read once from the mission file. Nothing is shown until it is known.
+#                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
@@ -166,7 +188,7 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      flavorText) — never written to any save file on its
 #                      own, so this requires a one-time hot-injection dump
 #                      to a shared cache file (saves_dir/.fhc/fhc_waypoints.lua,
-#                      also used by FH_Control if installed). The dump is
+#                      also used by Fh_Control if installed). The dump is
 #                      only triggered when that cache is missing, or when a
 #                      campaign restart was just detected — never on every
 #                      ordinary cycle, since the mapping is static for the
@@ -177,13 +199,18 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
-#   max_pilots       - Max pilots shown when report_layout has just 1 table (default: all)
-#   max_pilots_2t    - Max pilots per table when report_layout has exactly
-#                      2 tables (Podium doesn't count)                    (default: all)
-#                      Falls back to max_pilots if not set.
-#   max_pilots_3t    - Max pilots per table when report_layout has 3 or
-#                      more tables (Podium doesn't count)                 (default: all)
-#                      Falls back to max_pilots_2t, then max_pilots.
+#   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
+#                      Daily (default: 20 here; without the line, no limit). A whole number
+#                      of 1 or more; 0 = no limit. The 20 keeps a new install on a big
+#                      community from listing everyone until you choose.
+#   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
+#   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
+#   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
+#                      Every table has its own limit, whatever report_layout is or
+#                      rotates through: nothing is shared or moved between tables. The
+#                      Podium has no limit here. What does not fit is cut with
+#                      "+ N more pilots" (see show_all_pilots), and Discord's size
+#                      limits still apply when you set none.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -266,17 +293,33 @@ HEADER_COMMENT = """# fh_report.yaml — FH_Report Plugin Configuration
 #                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
+#   show_bob         - Show the Blue on Blue (BoB) friendly-fire counts  (default: true)
+#                      Taken from the Mission Statistics plugin of DCSServerBot (never from
+#                      Foothold): friendly units destroyed + damaged. Without that plugin
+#                      nothing is shown and nothing breaks.
+#                      false = hidden everywhere
+#                      true  = shown: "BoB: n" in the stats card (it also needs show_pilot_card,
+#                              show_session_card and/or show_daily_card), and in /fh_report
+#                              player the BoB row of the stats table, the Blue-on-Blue section
+#                              and a line in Career Stats.
+#                      A config without this line counts as true.
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
-#   disable_updates  - Silence this instance's embed entirely      (default: false)
-#                      false = normal operation
-#                      true  = this instance never reads, posts, or edits
+#   enable_updates   - Switch Fh_Report on/off for this instance   (default: true)
+#                      true  = normal operation
+#                      false = this instance never reads, posts, or edits
 #                              anything for this server — as if it weren't
-#                              in the config at all. Useful when the same
-#                              Foothold instance is reachable from more than
-#                              one fh_report installation in the same cluster
-#                              (e.g. one config per agent box) — set this to
-#                              true on every duplicate copy except the one
-#                              that should actually post.
+#                              in the config at all (its settings stay in the
+#                              file, so you can switch it back on later).
+#                              Also useful when the same Foothold instance is
+#                              reachable from more than one fh_report
+#                              installation in the same cluster (e.g. one
+#                              config per agent box) — set this to false on
+#                              every duplicate copy except the one that should
+#                              actually post.
+#                              Can be set in DEFAULT (e.g. false) and turned on
+#                              only for the instances that should have it.
+#                      The old disable_updates: true still works the same as
+#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -305,6 +348,7 @@ KNOWN_VARS = {
     "update_interval",
     "daily_reset_hour",
     "daily_reset_schedule",
+    "show_map",
     "bar_length",
     "bar_style_emoji",
     "max_zones",
@@ -313,8 +357,9 @@ KNOWN_VARS = {
     "sort_zones_by_waypoint",
     "strip_callsign",
     "max_pilots",
-    "max_pilots_2t",
-    "max_pilots_3t",
+    "max_pilots_R",
+    "max_pilots_S",
+    "max_pilots_D",
     "show_all_pilots",
     "show_pilot_card",
     "pilot_card_icon",
@@ -328,7 +373,9 @@ KNOWN_VARS = {
     "podium_combined_top",
     "podium_combined_min3_latest_day",
     "show_punishment",
+    "show_bob",
     "excluded_ucids",
+    "enable_updates",
     "disable_updates",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
@@ -345,7 +392,8 @@ DEFAULTS = {
     "admin":            "Admin",
     "report_layout":    "R",
     "update_interval":  300,
-    "daily_reset_hour": 0,
+    "daily_reset_hour": "0:00",
+    "show_map":         True,
     "bar_length":       40,
     "bar_style_emoji":  False,
     "max_zones":        15,
@@ -366,6 +414,7 @@ DEFAULTS = {
     "podium_combined_top":       1,
     "podium_combined_min3_latest_day": False,
     "show_punishment":  False,
+    "show_bob":         True,
     "show_player_cmd_hint":  True,
     "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
 }
@@ -375,14 +424,15 @@ COMMENTS = {
     "report_layout":    "# Letters D/P/S/R, any order/subset — see header",
 
     "update_interval":  "# Seconds between embed refreshes",
-    "daily_reset_hour": "# Hour (UTC) when daily points reset (0 = midnight UTC)",
+    "daily_reset_hour": "# HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)",
+    "show_map":         "# false = hide  |  true = show the map on the title's second line",
     "bar_length":       "# Number of squares in the progress bar",
     "bar_style_emoji":  "# false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)",
     "max_zones":        "# Max zones shown per column (omit for all)",
     "zone_name_length": "# Max chars for zone names (8-24, default 16)",
     "slot_status":      "# false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△",
     "sort_zones_by_waypoint": "# false = sort by level/damage  |  true = sort by mission waypoint number",
-    "strip_callsign":   "",
+    "strip_callsign":   "# false = show names as-is  |  true = remove the flight callsign prefix (squadron tags like [MA] are kept)",
     "show_all_pilots":  "# false = cut at limit  |  true = split into multiple fields",
     "show_pilot_card":  "# false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)",
     "pilot_card_icon":  "# Emoji at the start of the pilot career card line (default: 🔸)",
@@ -396,6 +446,7 @@ COMMENTS = {
     "podium_combined_top":       "# Same as podium_top, but when \"P\" is combined with other letters",
     "podium_combined_min3_latest_day": "# false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
+    "show_bob":         "# false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
 }
@@ -484,10 +535,10 @@ def rename_legacy_keys(content: str, renames: dict) -> tuple[str, list[str]]:
     return content, changes
 
 
-# Keys whose feature was removed from FH_Report entirely — deleted from
+# Keys whose feature was removed from Fh_Report entirely — deleted from
 # DEFAULT and every server block (live or commented-out), not just flagged.
 RETIRED_KEYS = {
-    "inactivity_penalty": "inactivity penalty moved out of FH_Report",
+    "inactivity_penalty": "inactivity penalty moved out of Fh_Report",
 }
 
 
@@ -609,6 +660,165 @@ def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
     return content, changes
 
 
+_DAYS = "mon|tue|wed|thu|fri|sat|sun"
+
+LIMIT_KEYS = ("max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D")
+LIMIT_COMMENTS = {
+    "max_pilots":   "# Max pilots listed in every table without a limit of its own (0 = no limit)",
+    "max_pilots_R": "# Max pilots in the Rank table",
+    "max_pilots_S": "# Max pilots in the Session table",
+    "max_pilots_D": "# Max pilots in the Daily table",
+}
+
+# max_pilots used to depend on how many tables the layout had (max_pilots for one,
+# max_pilots_2t for two, max_pilots_3t for three or more). Now every table has its own
+# limit: max_pilots_R / _S / _D, with max_pilots as the default of all of them.
+_OLD_PILOT_KEYS = re.compile(r"^[ \t]+max_pilots(?:_2t|_3t)?[ \t]*:.*\n", re.MULTILINE)
+_OLD_PILOT_TEMPLATES = re.compile(r"^[ \t]*#[ \t]*max_pilots_(?:2t|3t)[ \t]*:.*\n", re.MULTILINE)
+
+
+def _cap(value: str | None) -> int | None:
+    value = (value or "").strip().strip("\"'")
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def _layout_tables(layout: str) -> list[set]:
+    """Tables (R/S/D) of every rotation group of a report_layout; the Podium
+    and groups without tables ("none") don't count."""
+    groups = [{c for c in g.upper() if c in "RSD"} for g in (layout or "R").split(",")]
+    return [g for g in groups if g]
+
+
+def _old_pilot_caps(layout: str, mp, m2, m3) -> dict:
+    """What the old rule gave each table of this layout (None = unlimited):
+    the limit of the group's size, the most restrictive over the groups a table is in."""
+    caps: dict = {}
+    for group in _layout_tables(layout):
+        n = len(group)
+        limit = mp if n <= 1 else (m2 or mp) if n == 2 else (m3 or m2 or mp)
+        for table in sorted(group):
+            if table not in caps or caps[table] is None:
+                caps[table] = limit
+            elif limit is not None:
+                caps[table] = min(caps[table], limit)
+    return caps
+
+
+def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
+    """max_pilots / _2t / _3t (by number of tables) -> max_pilots / _R / _S / _D
+    (per table), keeping what each table shows today. Only needed when a live
+    _2t or _3t exists: without them the old max_pilots already applied to every
+    table, which is exactly the new meaning. Leftover _2t/_3t template comments are
+    dropped either way."""
+    changes: list[str] = []
+    if not re.search(r"^[ \t]+max_pilots_(?:2t|3t)[ \t]*:", content, re.MULTILINE):
+        content, n = _OLD_PILOT_TEMPLATES.subn("", content)
+        return content, changes
+
+    # A block starts at a live top-level line and runs to the next one: comment lines
+    # at column 0 (the template's commented examples) belong to the block they sit in.
+    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE)
+             if re.match(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$', m.group(0))]
+    blocks = [(h.start(), heads[i + 1].start() if i + 1 < len(heads) else len(content))
+              for i, h in enumerate(heads)]
+    texts = {a: content[a:b] for a, b in blocks}
+
+    def live(text: str, key: str):
+        m = _find_kv_line(text, key)
+        return _cap(m.group(2)) if m else None
+
+    def layout_of(text: str):
+        m = _find_kv_line(text, "report_layout")
+        return m.group(2).strip().strip("\"'") if m and m.group(2).strip() else None
+
+    default_text = next((t for t in texts.values() if t.startswith("DEFAULT")), "")
+    d_layout = layout_of(default_text) or "R"
+    d_old = [live(default_text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+    d_caps = _old_pilot_caps(d_layout, *d_old)
+    present = [t for t in "RSD" if t in d_caps and d_caps[t]]
+    common = max((d_caps[t] for t in present), key=lambda v: [d_caps[t] for t in present].count(v)) if present else None
+    d_new = {t: d_caps[t] for t in d_caps if d_caps[t] != common}      # tables that differ from max_pilots
+    def eff_default(table):                      # what the new DEFAULT gives a table
+        return d_new[table] if table in d_new else common
+
+    def render(indent, default, per_table, note):
+        out = []
+        if default is not None:
+            out.append(f"{indent}max_pilots: {default}  # {note}\n")
+        for t in "RSD":
+            if t in per_table:
+                out.append(f"{indent}max_pilots_{t}: {per_table[t] or 0}  # {note}"
+                           + (" (0 = no limit)\n" if not per_table[t] else "\n"))
+        return out
+
+    def before(text):
+        """The old values a block had, for the comment next to the new lines."""
+        vals = [(k, live(text, k)) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+        return "before: " + (", ".join(f"{k} {v}" for k, v in vals if v) or "inherited from DEFAULT")
+
+    new_content = content
+    for start, end in sorted(blocks, reverse=True):
+        text = texts[start]
+        is_default = text.startswith("DEFAULT")
+        old_lines = list(_OLD_PILOT_KEYS.finditer(text))
+        layout = layout_of(text) or d_layout
+        if is_default:
+            lines = render("  ", common, d_new, before(text)) if old_lines else []
+            label = "DEFAULT"
+        else:
+            own = [live(text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+            merged = [o if o is not None else d for o, d in zip(own, d_old)]
+            needed = _old_pilot_caps(layout, *merged)
+            differing = {t: c for t, c in needed.items() if c != eff_default(t)}
+            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines else "  ")
+            lines = []
+            if differing:
+                if not d_new and len({needed[t] for t in needed}) == 1:
+                    lines = render(indent, next(iter(needed.values())) or 0, {}, before(text))
+                else:
+                    lines = render(indent, None, differing, before(text))
+            label = text.split(":", 1)[0].strip().strip('"')
+            if not old_lines and not lines:
+                continue
+        if not old_lines and not lines:
+            continue
+        anchor = old_lines[0].start() if old_lines else None
+        if anchor is None:                       # no old line to replace: put it under report_layout
+            m = re.search(r"^[ \t]+report_layout[ \t]*:.*\n", text, re.MULTILINE)
+            anchor = m.end() if m else len(text)
+        stripped = _OLD_PILOT_KEYS.sub("", text)
+        shift = sum(len(m.group(0)) for m in old_lines if m.start() < anchor)
+        text_new = stripped[:anchor - shift] + "".join(lines) + stripped[anchor - shift:]
+        new_content = new_content[:start] + text_new + new_content[end:]
+        was = ", ".join(f"{k} {v}" for k, v in zip(("max_pilots", "_2t", "_3t"), [live(text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]) if v)
+        now = ", ".join(l.split("#")[0].strip().replace(": ", " ") for l in lines) or "no explicit limit needed"
+        changes.append(f"{label}: {was or ('inherited limits' if not is_default else 'no limit')}  →  {now}")
+    new_content = _OLD_PILOT_TEMPLATES.sub("", new_content)
+    return new_content, changes
+
+
+def migrate_reset_times(content: str) -> tuple[str, list[str]]:
+    """daily_reset_hour and the days of daily_reset_schedule used to be a plain
+    hour (4); they are now HH:MM (4:00). A plain whole number becomes H:00 and
+    nothing else changes: values that already have a ':' are left alone, so
+    running this again does nothing. Also refreshes the commented-out examples."""
+    changes: list[str] = []
+
+    def fix(key_pattern: str):
+        nonlocal content
+
+        def _replacer(m):
+            changes.append(f"{m.group(2).strip()}: {m.group(3)} → {m.group(3)}:00")
+            return f"{m.group(1)}{m.group(3)}:00{m.group(4)}"
+        content = re.sub(
+            rf"^((?:[ \t]*#)?[ \t]*({key_pattern})[ \t]*:[ \t]*)[\"']?(\d{{1,2}})[\"']?([ \t]*(?:#.*)?)$",
+            _replacer, content, flags=re.MULTILINE)
+
+    fix("daily_reset_hour")
+    fix(_DAYS)
+    return content, changes
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: migrate_config.py <path_to_fh_report.yaml>")
@@ -629,8 +839,9 @@ def main():
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
-    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points",
-    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day"}
+    "show_all_pilots", "show_punishment", "show_bob", "show_pilot_card", "compact_points",
+    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day",
+                 "show_map"}
     bool_converted = []
     for bvar in BOOL_VARS:
         pattern = rf"(^\s+{bvar}\s*:\s*)(0|1)(\s*(?:#.*)?)$"
@@ -667,7 +878,21 @@ def main():
         for item in podium_rename_changes:
             print(f"    {item}")
 
-    # ── 1d. Remove keys of features retired from FH_Report ──────────────────
+    # ── 1f. max_pilots by number of tables -> one limit per table.
+    content, limit_changes = migrate_pilot_limits(content)
+    if limit_changes:
+        print("  Pilot limits are now per table (max_pilots / max_pilots_R / _S / _D):")
+        for item in limit_changes:
+            print(f"    {item}")
+
+    # ── 1e. Reset times: a plain hour (4) becomes HH:MM (4:00) — format only.
+    content, time_changes = migrate_reset_times(content)
+    if time_changes:
+        print("  Daily reset times are now HH:MM:")
+        for item in time_changes:
+            print(f"    {item}")
+
+    # ── 1d. Remove keys of features retired from Fh_Report ──────────────────
     content, retired_changes = remove_retired_keys(content)
     if retired_changes:
         print("  Removed retired variables:")
@@ -840,6 +1065,37 @@ def main():
             # to the original position rather than lose the block.
             extra_lines[schedule_start:schedule_start] = schedule_block
 
+    # ── 5d. The pilot limits belong together, in order, right before show_all_pilots
+    # (the option they work with). max_pilots is always a live line: a config that
+    # had none listed everyone, which is kept as `0` (no limit) — the shipped 20 is
+    # for new installs only. The per-table lines are optional overrides: the ones
+    # the user has stay as they are, the missing ones are shown as commented examples.
+    limit_re = re.compile(r"^[ \t]*(#[ \t]*)?(max_pilots(?:_[RSD])?)[ \t]*:")
+    found: dict = {}
+    for l in list(extra_lines):
+        m = limit_re.match(l)
+        if m:
+            extra_lines.remove(l)
+            live_line = not m.group(1)
+            if m.group(2) not in found or (live_line and not found[m.group(2)][0]):   # a live line wins
+                found[m.group(2)] = (live_line, l.strip())
+    added_limits: dict = {}
+    limit_lines = []
+    for key in LIMIT_KEYS:
+        if key in found and found[key][0]:
+            line = found[key][1]
+            if "#" not in line:
+                line += "  " + LIMIT_COMMENTS[key]
+            limit_lines.append("  " + line + "\n")
+        elif key == "max_pilots":
+            limit_lines.append("  max_pilots: 0  # before: not set (no limit)\n")
+            added_limits[key] = 0
+        else:
+            limit_lines.append(f"#  {key}: 20  {LIMIT_COMMENTS[key]}\n")
+    insert_at = next((i for i, l in enumerate(new_default_lines) if l.strip().startswith("show_all_pilots:")),
+                     len(new_default_lines))
+    new_default_lines[insert_at:insert_at] = limit_lines
+
     new_default_block = "DEFAULT:\n" + "".join(new_default_lines)
     if extra_lines:
         while extra_lines and not extra_lines[-1].strip():
@@ -871,10 +1127,12 @@ def main():
     # ── 4. Save and report ─────────────────────────────────────────────────────
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write(content)
-    if added:
-        print(f"Migration complete. Added {len(added)} new variable(s) to DEFAULT:")
+    if added or added_limits:
+        print(f"Migration complete. Added {len(added) + len(added_limits)} new variable(s) to DEFAULT:")
         for key in added:
             print(f"  + {key}: {DEFAULTS[key]}")
+        for key, value in added_limits.items():
+            print(f"  + {key}: {value}")
     else:
         print("Config is already up to date. No new variables needed.")
     print("  Header comments updated.")
@@ -882,7 +1140,7 @@ def main():
     if obsolete:
         print()
         print("WARNING: The following variables were found in your server blocks")
-        print("         but are no longer used in this version of FH_Report.")
+        print("         but are no longer used in this version of Fh_Report.")
         print("         They have no effect and can be safely removed or commented out:")
         for var in obsolete:
             print(f"  - {var}")

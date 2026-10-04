@@ -1,4 +1,4 @@
-# fh_report.yaml — FH_Report Plugin Configuration
+# fh_report.yaml — Fh_Report Plugin Configuration
 # Place this file in: config/plugins/fh_report.yaml
 #
 # SERVER IDENTIFICATION:
@@ -30,12 +30,16 @@
 #                                                 one of these
 #                           - WHETHER you must specify `server` on the
 #                             command — only needed if you have MORE THAN
-#                             ONE server configured at all (the channel is
-#                             never used to guess between several, since two
-#                             servers could end up sharing a
-#                             commands_channel_id by mistake). With exactly
-#                             one server configured, there's nothing to
-#                             guess and `server` is never asked for.
+#                             ONE server available (configured here AND
+#                             registered in DCSServerBot, i.e. the ones the
+#                             `server` option lists). With several, leaving
+#                             `server` empty works only in the channel that
+#                             DCSServerBot assigns to one of them (the one
+#                             the option pre-selects); anywhere else you
+#                             must pick. With exactly one server available,
+#                             `server` is never asked for — a leftover
+#                             block of a server that is off or not
+#                             registered does not count.
 #                         Example:
 #                           commands_channel_id:
 #                             - 1234567890123456789
@@ -107,21 +111,39 @@
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
-#   daily_reset_hour     - Hour (UTC) when daily points counter resets  (default: 0)
+#   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
+#                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
+#                          number (4) still works and means 4:00. The counters are
+#                          checked every update_interval, so the change shows in the
+#                          first update after that time.
+#                          The time is in the time zone of this server's `timezone` in
+#                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
+#                          for example `timezone: Europe/Madrid` on the instance; it follows
+#                          summer/winter time by itself). Without one, or without the
+#                          Scheduler plugin, the time is UTC. There is no separate setting
+#                          here: change the Scheduler's timezone and the reset moves with it
+#                          (one daily period is then longer or shorter than 24 hours, once).
 #                          Manual reset (no commands in this plugin): delete
-#                          saves_dir/.fhc/daily_snapshot.json — the daily counter
-#                          restarts cleanly at 0, it never retroactively counts
+#                          saves_dir/.fhc/fhr_daily_snapshot.json (and the older
+#                          daily_snapshot.json too, if it's still there) — the daily
+#                          counter restarts cleanly at 0, it never retroactively counts
 #                          everything accumulated up to that point.
 #                          Campaign restart is also detected automatically: if both
 #                          total points and total kills drop for common players,
 #                          the daily snapshot resets on its own — no action needed.
-#   daily_reset_schedule - Optional: override reset hour for specific days of the week.
-#                          Only define the days that differ from daily_reset_hour.
+#   daily_reset_schedule - Optional: override the reset time for specific days of the week.
+#                          Only define the days that differ from daily_reset_hour (same HH:MM format).
 #                          Days: mon, tue, wed, thu, fri, sat, sun
-#                          Example: reset at midnight except Thursday and Saturday at 6am UTC:
+#                          The days are the days in that same time zone.
+#                          Example: reset at midnight except Thursday at 6:00 and Saturday at 7:30:
 #                            daily_reset_schedule:
-#                              thu: 6
-#                              sat: 6
+#                              thu: 6:00
+#                              sat: 7:30
+#   show_map         - Show the mission's map on a second line of the embed title  (default: true)
+#                      The map is read from DCSServerBot (never configured here) and the
+#                      last known one is kept while the bot runs; if none is known yet it
+#                      is read once from the mission file. Nothing is shown until it is known.
+#                      false = hide it
 #   bar_length       - Number of squares in the progress bar        (default: 40)
 #   bar_style_emoji  - Progress bar style                              (default: false)
 #                      false = ANSI colored blocks (desktop/browser only)
@@ -154,7 +176,7 @@
 #                      flavorText) — never written to any save file on its
 #                      own, so this requires a one-time hot-injection dump
 #                      to a shared cache file (saves_dir/.fhc/fhc_waypoints.lua,
-#                      also used by FH_Control if installed). The dump is
+#                      also used by Fh_Control if installed). The dump is
 #                      only triggered when that cache is missing, or when a
 #                      campaign restart was just detected — never on every
 #                      ordinary cycle, since the mapping is static for the
@@ -165,13 +187,18 @@
 #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
-#   max_pilots       - Max pilots shown when report_layout has just 1 table (default: all)
-#   max_pilots_2t    - Max pilots per table when report_layout has exactly
-#                      2 tables (Podium doesn't count)                    (default: all)
-#                      Falls back to max_pilots if not set.
-#   max_pilots_3t    - Max pilots per table when report_layout has 3 or
-#                      more tables (Podium doesn't count)                 (default: all)
-#                      Falls back to max_pilots_2t, then max_pilots.
+#   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
+#                      Daily (default: 20 here; without the line, no limit). A whole number
+#                      of 1 or more; 0 = no limit. The 20 keeps a new install on a big
+#                      community from listing everyone until you choose.
+#   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
+#   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
+#   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
+#                      Every table has its own limit, whatever report_layout is or
+#                      rotates through: nothing is shared or moved between tables. The
+#                      Podium has no limit here. What does not fit is cut with
+#                      "+ N more pilots" (see show_all_pilots), and Discord's size
+#                      limits still apply when you set none.
 #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
 #                      false = cut at limit, show "+ X more pilots"
 #                      true  = split into multiple fields showing all pilots
@@ -254,17 +281,33 @@
 #                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
+#   show_bob         - Show the Blue on Blue (BoB) friendly-fire counts  (default: true)
+#                      Taken from the Mission Statistics plugin of DCSServerBot (never from
+#                      Foothold): friendly units destroyed + damaged. Without that plugin
+#                      nothing is shown and nothing breaks.
+#                      false = hidden everywhere
+#                      true  = shown: "BoB: n" in the stats card (it also needs show_pilot_card,
+#                              show_session_card and/or show_daily_card), and in /fh_report
+#                              player the BoB row of the stats table, the Blue-on-Blue section
+#                              and a line in Career Stats.
+#                      A config without this line counts as true.
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
-#   disable_updates  - Silence this instance's embed entirely      (default: false)
-#                      false = normal operation
-#                      true  = this instance never reads, posts, or edits
+#   enable_updates   - Switch Fh_Report on/off for this instance   (default: true)
+#                      true  = normal operation
+#                      false = this instance never reads, posts, or edits
 #                              anything for this server — as if it weren't
-#                              in the config at all. Useful when the same
-#                              Foothold instance is reachable from more than
-#                              one fh_report installation in the same cluster
-#                              (e.g. one config per agent box) — set this to
-#                              true on every duplicate copy except the one
-#                              that should actually post.
+#                              in the config at all (its settings stay in the
+#                              file, so you can switch it back on later).
+#                              Also useful when the same Foothold instance is
+#                              reachable from more than one fh_report
+#                              installation in the same cluster (e.g. one
+#                              config per agent box) — set this to false on
+#                              every duplicate copy except the one that should
+#                              actually post.
+#                              Can be set in DEFAULT (e.g. false) and turned on
+#                              only for the instances that should have it.
+#                      The old disable_updates: true still works the same as
+#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -287,17 +330,22 @@ DEFAULT:
   admin: Admin  # Comma-separated Discord role name(s) and/or username(s)
   report_layout: R  # Letters D/P/S/R, any order/subset — see header
   update_interval: 300  # Seconds between embed refreshes
-  daily_reset_hour: 0  # Hour (UTC) when daily points reset (0 = midnight UTC)
+  daily_reset_hour: 0:00  # HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
+  show_map: true  # false = hide  |  true = show the map on the title's second line
   bar_length: 40  # Number of squares in the progress bar
   bar_style_emoji: false  # false = ANSI blocks (desktop only)  true = emoji blocks (mobile compatible)
   max_zones: 15  # Max zones shown per column (omit for all)
   zone_name_length: 16  # Max chars for zone names (8-24, default 16)
   slot_status: false  # false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△
   sort_zones_by_waypoint: false  # false = sort by level/damage  |  true = sort by mission waypoint number
-  strip_callsign: false  
+  strip_callsign: false  # false = show names as-is  |  true = remove the flight callsign prefix (squadron tags like [MA] are kept)
+  max_pilots: 20  # Max pilots listed in every table without a limit of its own (0 = no limit)
+#  max_pilots_R: 20  # Max pilots in the Rank table
+#  max_pilots_S: 20  # Max pilots in the Session table
+#  max_pilots_D: 20  # Max pilots in the Daily table
   show_all_pilots: false  # false = cut at limit  |  true = split into multiple fields
   show_pilot_card: false  # false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)
   pilot_card_icon: 🔸  # Emoji at the start of the pilot career card line (default: 🔸)
@@ -311,11 +359,9 @@ DEFAULT:
   podium_combined_top: 1  # Same as podium_top, but when "P" is combined with other letters
   podium_combined_min3_latest_day: false  # false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day
   show_punishment: false  # false = disabled  |  true = show punishment badges in leaderboard
+  show_bob: true  # false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics
   show_player_cmd_hint: true  # false = disabled  |  true = show /fh_report player reminder in footer
   player_cmd_hint_text: "Type /fh_report player to see your own stats."  # Text shown in the footer when show_player_cmd_hint is true
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
 #  excluded_ucids:
 
 DCS_Server:                             # instance name from nodes.yaml
@@ -329,19 +375,21 @@ DCS_Server:                             # instance name from nodes.yaml
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300
-#  daily_reset_hour: 0
+#  daily_reset_hour: 0:00
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
+#  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
 #  slot_status: false
 #  sort_zones_by_waypoint: false
 #  strip_callsign: false
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
+#  max_pilots: 15
+#  max_pilots_R: 20
+#  max_pilots_S: 10
+#  max_pilots_D: 10
 #  show_all_pilots: false
 #  show_pilot_card: false
 #  pilot_card_icon: 🔸
@@ -355,11 +403,12 @@ DCS_Server:                             # instance name from nodes.yaml
 #  podium_combined_top: 1
 #  podium_combined_min3_latest_day: false
 #  show_punishment: false
+#  show_bob: true
 #  excluded_ucids:
 #    - abcdef1234567890abcdef1234567890   # UCID to hide
 #  show_player_cmd_hint: true
 #  player_cmd_hint_text: "Type /fh_report player to see your own stats."
-#  disable_updates: false                # true = silence this instance entirely
+#  enable_updates: true                  # false = switch this instance off
                                           # (e.g. duplicate config on another agent box)
 
 
@@ -374,19 +423,21 @@ DCS_Server:                             # instance name from nodes.yaml
 #  report_layout: R
 #  points_detail_R: SRD
 #  update_interval: 300
-#  daily_reset_hour: 0
+#  daily_reset_hour: 0:00
 #  daily_reset_schedule:
-#    sat: 6
-#    sun: 6
+#    sat: 7:00
+#    sun: 7:30
+#  show_map: true
 #  bar_style_emoji: false
 #  max_zones: 15
 #  zone_name_length: 16
 #  slot_status: false
 #  sort_zones_by_waypoint: false
 #  strip_callsign: false
-#  max_pilots: 20
-#  max_pilots_2t: 8
-#  max_pilots_3t: 6
+#  max_pilots: 15
+#  max_pilots_R: 20
+#  max_pilots_S: 10
+#  max_pilots_D: 10
 #  show_all_pilots: false
 #  show_pilot_card: false
 #  pilot_card_icon: 🔸
@@ -396,7 +447,8 @@ DCS_Server:                             # instance name from nodes.yaml
 #  podium_combined_top: 1
 #  podium_combined_min3_latest_day: false
 #  show_punishment: false
+#  show_bob: true
 #  excluded_ucids:
 #  show_player_cmd_hint: true
 #  player_cmd_hint_text: "Type /fh_report player to see your own stats."
-#  disable_updates: false
+#  enable_updates: true

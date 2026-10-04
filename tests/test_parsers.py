@@ -74,3 +74,34 @@ def test_strip_callsign():
     }
     for raw, expected in cases.items():
         assert commands.strip_callsign(raw) == expected, raw
+
+
+def test_session_card_bnb_priority_and_cap():
+    from conftest import commands
+    stats = {"Air": 3, "SAM": 1, "Ground Units": 4, "Ship": 1, "Pilot Rescue": 1,
+             "Refueling": 2, "Deaths": 2, "Achievement": 1, "Mission X": 1}
+    card = commands._build_session_card(stats, bnb=2)
+    parts = card.split(" · ")
+    assert len(parts) == 7 and parts[-2] == "BoB: 2" and parts[-1] == "2 Deaths"
+    assert commands._build_session_card({}, bnb=1).endswith("BoB: 1")
+    assert commands._build_session_card({}, bnb=0) is None
+    assert "BoB" not in commands._build_session_card({"Air": 1})
+
+
+def test_pilot_card_bnb_is_penultimate():
+    from conftest import commands
+    card = commands._build_pilot_card({10: 47, 21: 3}, bnb=2)
+    assert card.endswith("47 Kills · BoB: 2 · 3 Deaths")
+    assert "BoB" not in commands._build_pilot_card({10: 47, 21: 3})
+    assert commands._build_pilot_card({}, bnb=1).endswith("BoB: 1")
+
+
+def test_day_start_uses_schedule():
+    from datetime import datetime, timezone
+    from conftest import commands
+    cfg = {"daily_reset_hour": 2, "daily_reset_schedule": {"sat": 6}}
+    fri = datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc)   # before today's reset
+    assert commands._day_start(cfg, fri) == datetime(2026, 10, 1, 2, tzinfo=timezone.utc)
+    sat = datetime(2026, 10, 3, 5, 0, tzinfo=timezone.utc)   # Saturday resets at 6
+    assert commands._day_start(cfg, sat) == datetime(2026, 10, 2, 2, tzinfo=timezone.utc)
+    assert commands._day_start(cfg, sat.replace(hour=7)) == datetime(2026, 10, 3, 6, tzinfo=timezone.utc)
