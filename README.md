@@ -71,8 +71,8 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `slot_status` | `false` | `true` = show active vs destroyed upgrade slots |
 | `sort_zones_by_waypoint` | `false` | `true` = sort zones by mission waypoint number instead of level — see [Zone ordering](#zone-ordering-by-mission-waypoint-sort_zones_by_waypoint) below |
 | `strip_callsign` | `false` | `true` = strip flight callsign prefix from pilot names |
-| `max_pilots` | all | Max pilots listed in each leaderboard table (R, S, D) — a whole number of 1 or more; omit it to list everyone |
-| `max_pilots_R` / `max_pilots_S` / `max_pilots_D` | `max_pilots` | The same, for the Rank / Session / Daily table only. See [Pilot limits](#pilot-limits-per-table) |
+| `max_pilots` | `20` | Max pilots listed in each leaderboard table (R, S, D) — a whole number of 1 or more, `0` = no limit. The shipped config sets 20 so a new install on a big community does not list everyone; a config with no such line has no limit |
+| `max_pilots_R` / `max_pilots_S` / `max_pilots_D` | `20` | The same, for the Rank / Session / Daily table only (they fall back to `max_pilots` when the line is missing). See [Pilot limits](#pilot-limits-per-table) |
 | `show_all_pilots` | `false` | `true` = split into multiple fields showing all pilots |
 | `show_pilot_card` | `false` | `true` = show career stats card per pilot (requires Foothold v4.5+) |
 | `pilot_card_icon` | `🔸` | Emoji shown at the start of the pilot career card line |
@@ -485,7 +485,9 @@ DEFAULT:
 - What does not fit is cut with `+ N more pilots`, or listed in extra fields with `show_all_pilots: true`. Discord's own size limits (1024 characters per field, 6000 per embed) still apply when you set none.
 - Pilot cards, `BoB` and the penalty lines make each pilot taller, so a low limit helps when several tables are shown.
 
-Older versions chose the limit by the number of tables (`max_pilots`, `max_pilots_2t`, `max_pilots_3t`). The installer converts them for you, keeping what each table shows today: with a layout of one table, `max_pilots` stays as it is; with two or more it takes the value that `_2t` / `_3t` gave, and a server that changes the layout gets its own explicit lines. The installer prints what it changed. `max_pilots_2t` and `max_pilots_3t` are no longer read, so if you update by copying files without running the installer, set the per-table limits by hand.
+The four lines are live in the shipped config, all at 20. The installer adds any that are missing to an existing config with the value of its `max_pilots` (20 if there is none) and a `# before: not set` comment, so a per-table line never overrides a smaller `max_pilots`.
+
+Older versions chose the limit by the number of tables (`max_pilots`, `max_pilots_2t`, `max_pilots_3t`). The installer converts them for you, keeping what each table shows today: with a layout of one table, `max_pilots` stays as it is; with two or more it takes the value that `_2t` / `_3t` gave, and a server that changes the layout gets its own explicit lines. The lines it writes carry a comment with the old values (`# before: max_pilots 20, max_pilots_2t 15`), and it prints what it changed. `max_pilots_2t` and `max_pilots_3t` are no longer read, so if you update by copying files without running the installer, set the per-table limits by hand.
 
 ---
 

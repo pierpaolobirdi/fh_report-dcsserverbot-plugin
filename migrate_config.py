@@ -200,7 +200,9 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
 #   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
-#                      Daily (default: all). A whole number of 1 or more.
+#                      Daily (default: 20 here; without the line, no limit). A whole number
+#                      of 1 or more; 0 = no limit. The 20 keeps a new install on a big
+#                      community from listing everyone until you choose.
 #   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
 #   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
 #   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
@@ -660,6 +662,14 @@ def migrate_layout_variables(content: str) -> tuple[str, list[str]]:
 
 _DAYS = "mon|tue|wed|thu|fri|sat|sun"
 
+LIMIT_KEYS = ("max_pilots", "max_pilots_R", "max_pilots_S", "max_pilots_D")
+LIMIT_COMMENTS = {
+    "max_pilots":   "# Max pilots listed in every table without a limit of its own (0 = no limit)",
+    "max_pilots_R": "# Max pilots in the Rank table",
+    "max_pilots_S": "# Max pilots in the Session table",
+    "max_pilots_D": "# Max pilots in the Daily table",
+}
+
 # max_pilots used to depend on how many tables the layout had (max_pilots for one,
 # max_pilots_2t for two, max_pilots_3t for three or more). Now every table has its own
 # limit: max_pilots_R / _S / _D, with max_pilots as the default of all of them.
@@ -731,15 +741,20 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
     def eff_default(table):                      # what the new DEFAULT gives a table
         return d_new[table] if table in d_new else common
 
-    def render(indent, default, per_table):
+    def render(indent, default, per_table, note):
         out = []
         if default is not None:
-            out.append(f"{indent}max_pilots: {default}\n")
+            out.append(f"{indent}max_pilots: {default}  # {note}\n")
         for t in "RSD":
             if t in per_table:
-                out.append(f"{indent}max_pilots_{t}: {per_table[t] or 0}"
-                           + ("  # 0 = no limit\n" if not per_table[t] else "\n"))
+                out.append(f"{indent}max_pilots_{t}: {per_table[t] or 0}  # {note}"
+                           + (" (0 = no limit)\n" if not per_table[t] else "\n"))
         return out
+
+    def before(text):
+        """The old values a block had, for the comment next to the new lines."""
+        vals = [(k, live(text, k)) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
+        return "before: " + (", ".join(f"{k} {v}" for k, v in vals if v) or "inherited from DEFAULT")
 
     new_content = content
     for start, end in sorted(blocks, reverse=True):
@@ -748,7 +763,7 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
         old_lines = list(_OLD_PILOT_KEYS.finditer(text))
         layout = layout_of(text) or d_layout
         if is_default:
-            lines = render("  ", common, d_new) if old_lines else []
+            lines = render("  ", common, d_new, before(text)) if old_lines else []
             label = "DEFAULT"
         else:
             own = [live(text, k) for k in ("max_pilots", "max_pilots_2t", "max_pilots_3t")]
@@ -759,9 +774,9 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
             lines = []
             if differing:
                 if not d_new and len({needed[t] for t in needed}) == 1:
-                    lines = render(indent, next(iter(needed.values())) or 0, {})
+                    lines = render(indent, next(iter(needed.values())) or 0, {}, before(text))
                 else:
-                    lines = render(indent, None, differing)
+                    lines = render(indent, None, differing, before(text))
             label = text.split(":", 1)[0].strip().strip('"')
             if not old_lines and not lines:
                 continue
@@ -1051,23 +1066,35 @@ def main():
             extra_lines[schedule_start:schedule_start] = schedule_block
 
     # ── 5d. The pilot limits belong together, in order, right before show_all_pilots
-    # (the option they work with). Live lines keep their value; a missing one
-    # is shown as a commented example.
+    # (the option they work with), all four as live lines so nothing is left
+    # unlimited by accident. A line the user has keeps its value (and a "before:"
+    # comment written by the conversion above); a missing one is added with the
+    # value of max_pilots (20 when there is none), because a per-table line would
+    # otherwise override a smaller max_pilots.
     limit_re = re.compile(r"^[ \t]*(#[ \t]*)?(max_pilots(?:_[RSD])?)[ \t]*:")
     found: dict = {}
     for l in list(extra_lines):
         m = limit_re.match(l)
         if m:
             extra_lines.remove(l)
-            if m.group(2) not in found or not m.group(1):      # a live line wins over a commented one
-                found[m.group(2)] = l.strip() if not m.group(1) else l.strip()
-    examples = {"max_pilots": "15", "max_pilots_R": "20", "max_pilots_S": "10", "max_pilots_D": "10"}
+            live_line = not m.group(1)
+            if m.group(2) not in found or (live_line and not found[m.group(2)][0]):   # a live line wins
+                found[m.group(2)] = (live_line, l.strip())
+    added_limits: dict = {}
+    base = 20
+    if "max_pilots" in found and found["max_pilots"][0]:
+        m = re.match(r"max_pilots[ \t]*:[ \t]*([^\s#]+)", found["max_pilots"][1])
+        base = m.group(1) if m else 20
     limit_lines = []
-    for key, example in examples.items():
-        if key in found and not found[key].startswith("#"):
-            limit_lines.append("  " + found[key] + "\n")
+    for key in LIMIT_KEYS:
+        if key in found and found[key][0]:
+            line = found[key][1]
+            if "#" not in line:
+                line += "  " + LIMIT_COMMENTS[key]
+            limit_lines.append("  " + line + "\n")
         else:
-            limit_lines.append(f"#  {key}: {example}\n")
+            limit_lines.append(f"  {key}: {base}  # before: not set\n")
+            added_limits[key] = base
     insert_at = next((i for i, l in enumerate(new_default_lines) if l.strip().startswith("show_all_pilots:")),
                      len(new_default_lines))
     new_default_lines[insert_at:insert_at] = limit_lines
@@ -1103,10 +1130,12 @@ def main():
     # ── 4. Save and report ─────────────────────────────────────────────────────
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write(content)
-    if added:
-        print(f"Migration complete. Added {len(added)} new variable(s) to DEFAULT:")
+    if added or added_limits:
+        print(f"Migration complete. Added {len(added) + len(added_limits)} new variable(s) to DEFAULT:")
         for key in added:
             print(f"  + {key}: {DEFAULTS[key]}")
+        for key, value in added_limits.items():
+            print(f"  + {key}: {value}")
     else:
         print("Config is already up to date. No new variables needed.")
     print("  Header comments updated.")

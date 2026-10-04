@@ -188,7 +188,9 @@
 #                      false = show names as-is
 #                      true  = strip prefix. Squadron tags like [MA] are preserved.
 #   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
-#                      Daily (default: all). A whole number of 1 or more.
+#                      Daily (default: 20 here; without the line, no limit). A whole number
+#                      of 1 or more; 0 = no limit. The 20 keeps a new install on a big
+#                      community from listing everyone until you choose.
 #   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
 #   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
 #   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
@@ -340,10 +342,10 @@ DEFAULT:
   slot_status: false  # false = max level only  |  true = first 5 slots: active 🔹/🔺 vs destroyed ◇/△
   sort_zones_by_waypoint: false  # false = sort by level/damage  |  true = sort by mission waypoint number
   strip_callsign: false  
-#  max_pilots: 15
-#  max_pilots_R: 20
-#  max_pilots_S: 10
-#  max_pilots_D: 10
+  max_pilots: 20  # Max pilots listed in every table without a limit of its own (0 = no limit)
+  max_pilots_R: 20  # Max pilots in the Rank table
+  max_pilots_S: 20  # Max pilots in the Session table
+  max_pilots_D: 20  # Max pilots in the Daily table
   show_all_pilots: false  # false = cut at limit  |  true = split into multiple fields
   show_pilot_card: false  # false = disabled  |  true = show career card per pilot (requires Foothold v4.5+)
   pilot_card_icon: 🔸  # Emoji at the start of the pilot career card line (default: 🔸)
