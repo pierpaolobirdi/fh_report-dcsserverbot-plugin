@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.2.5"
+FH_REPORT_RELEASE = "14.2.6"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2685,6 +2685,7 @@ class Fh_Report(Plugin):
         self._base_interval = 300                     # update_interval of DEFAULT
         self._beat = 300                              # the loop's step: the shortest interval in the file
         self._beats_left: dict[str, int] = {}         # per server: beats to skip before its next update
+        self._last_status: dict[str, object] = {}     # per server: the status seen on the previous beat
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2703,6 +2704,7 @@ class Fh_Report(Plugin):
         self._base_interval = interval
         self._beat = self._compute_beat(interval)
         self._beats_left = {}
+        self._last_status = {}
         self.updater.change_interval(seconds=self._beat)
         utils.safe_start(self.updater)
 
@@ -2743,12 +2745,26 @@ class Fh_Report(Plugin):
         return n
 
     def _due_servers(self, servers: list) -> list:
-        """The servers to update on this beat. One that wants a longer interval than
-        the beat is updated every ceil(interval / beat) beats; a server seen for
-        the first time is updated at once."""
+        """The servers to update on this beat. Only a running mission changes
+        Foothold's files, so a server whose mission is paused, loading or stopped
+        is left alone; it is still updated once on the first beat after the plugin
+        loads and once each time its status changes (the last state when it
+        pauses or stops, the fresh one when it runs again). A running server that
+        wants a longer interval than the beat is updated every
+        ceil(interval / beat) beats; a server seen for the first time at once."""
         due = []
         for server in servers:
             key = _server_key(server)
+            status = server.status
+            previous = self._last_status.get(key)
+            self._last_status[key] = status
+            changed = previous is None or previous != status
+            if changed:
+                self._beats_left[key] = 0
+            if status != Status.RUNNING:
+                if changed:
+                    due.append(server)
+                continue
             left = self._beats_left.get(key, 0)
             if left > 0:
                 self._beats_left[key] = left - 1

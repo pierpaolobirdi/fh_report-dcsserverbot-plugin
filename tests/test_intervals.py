@@ -64,3 +64,35 @@ def test_a_server_that_shows_up_late_is_updated_at_once():
     a, b = _Srv("N", "DCS.a"), _Srv("N", "DCS.b")
     plugin._due_servers([a]); plugin._due_servers([a])
     assert b in plugin._due_servers([a, b])
+
+
+def _srv(status):
+    return _Srv("N", "DCS.a", status=status)
+
+
+def test_only_a_running_mission_is_updated_apart_from_the_changes_of_status():
+    S = commands.Status
+    srv = _srv(S.RUNNING)
+    plugin = _setup({"DCS.a": {"channel_id": 1}}, [srv])
+    seen = []
+    for status in (S.RUNNING, S.RUNNING, S.PAUSED, S.PAUSED, S.PAUSED, S.STOPPED, S.STOPPED, S.RUNNING):
+        srv.status = status
+        seen.append(bool(plugin._due_servers([srv])))
+    assert seen == [True, True, True, False, False, True, False, True]
+
+
+def test_a_server_found_paused_at_start_is_updated_once():
+    srv = _srv(commands.Status.PAUSED)
+    plugin = _setup({"DCS.a": {"channel_id": 1}}, [srv])
+    assert [bool(plugin._due_servers([srv])) for _ in range(3)] == [True, False, False]
+
+
+def test_resuming_updates_at_once_even_with_a_long_interval():
+    S = commands.Status
+    srv = _srv(S.RUNNING)
+    plugin = _setup({"DCS.a": {"channel_id": 1, "update_interval": 900}, "DCS.b": {"channel_id": 2}}, [srv])
+    assert plugin._due_servers([srv])                  # first beat
+    srv.status = S.PAUSED
+    assert plugin._due_servers([srv])                  # the update on entering the pause
+    srv.status = S.RUNNING
+    assert plugin._due_servers([srv])                  # back to running: updated at once

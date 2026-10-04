@@ -151,6 +151,9 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                          that one updates every 120). Use multiples of the shortest.
 #                          Foothold rewrites its save file about every 60 s, so a value
 #                          under 60 only repeats reads of unchanged data.
+#                          Only a RUNNING mission is refreshed: a paused, loading or stopped
+#                          server is skipped (its files do not change), apart from one
+#                          refresh each time its status changes.
 #   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
 #                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
 #                          number (4) still works and means 4:00. The counters are
