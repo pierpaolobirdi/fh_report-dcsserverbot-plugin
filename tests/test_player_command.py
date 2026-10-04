@@ -273,7 +273,7 @@ def test_career_stats_carry_the_all_time_bob_under_kills():
     e = commands._build_player_report_embed("P", {"credits": 100, "career": {10: 47, 21: 2}}, None, None,
                                             0, 0, {}, "ok", bnb=bnb)
     career = next(f.value for f in e.fields if "Career" in f.name).splitlines()
-    assert career[0] == "- **Kills:** 47" and career[1] == "- **Blue-on-Blue (BoB):** 19"
+    assert career[0] == "- **Kills:** 47" and career[1] == "- **Blue-on-Blue (BoB):** 19 (5 destroyed · 14 damaged)"
     assert career[2].startswith("- **Pilot Deaths")
     none = commands._build_player_report_embed("P", {"credits": 100, "career": {10: 47}}, None, None, 0, 0, {}, "ok", bnb=None)
     assert "Blue-on-Blue" not in next(f.value for f in none.fields if "Career" in f.name)
@@ -295,7 +295,7 @@ def test_show_bob_false_keeps_the_penalties_that_belong_to_show_punishment(saves
 def test_with_the_key_missing_the_player_report_shows_bob(saves_dir):
     _, sent = _invoke(saves_dir, A, admin=True)                        # no show_bob in the config
     text = " ".join(f.name + f.value for f in sent[0].fields)
-    assert "Blue-on-Blue (BoB)" in text and "- **Blue-on-Blue (BoB):** 5" in text    # section and career line
+    assert "Blue-on-Blue (BoB)" in text and "- **Blue-on-Blue (BoB):** 5 (2 destroyed · 3 damaged)" in text    # section and career line
 
 
 def test_the_embed_cards_need_show_bob_too():

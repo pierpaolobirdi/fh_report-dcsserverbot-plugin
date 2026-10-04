@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.43"
+FH_REPORT_RELEASE = "14.1.44"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1719,8 +1719,9 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Flight Hours (helo):** {_fmt_career_time(helo_s)}")
     if career.get(CAREER_KILLS, 0) > 0:
         career_lines.append(f"- **Kills:** {int(career[CAREER_KILLS])}")
-    if bnb and bnb.get("total"):    # the same all-time number as the rank card
-        career_lines.append(f"- **Blue-on-Blue (BoB):** {bnb['total']}")
+    if bnb and bnb.get("total"):    # the same all-time number as the rank card, with its detail
+        career_lines.append(f"- **Blue-on-Blue (BoB):** {bnb['total']} "
+                            f"({bnb['destroyed']} destroyed · {bnb['damaged']} damaged)")
     if career.get(CAREER_TRAPS, 0) > 0:
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
