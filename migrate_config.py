@@ -18,20 +18,25 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #   The plugin resolves the Foothold saves directory automatically, including in multi-node
 #   cluster setups where DCS instances run on remote agent nodes.
 #   If Foothold saves are in a non-standard location, override with saves_dir.
-#   On a cluster, instance names repeat from node to node (every node starts with
-#   DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
-#   plugin configs do:
-#     MyNode1:
-#       DCS.dcs_serverrelease:
-#         channel_id: 1234567890123456789
-#         campaign_name: "Server A"
-#     MyNode2:
-#       DCS.dcs_serverrelease:
-#         channel_id: 1234567890123456780
-#         campaign_name: "Server B"
-#   Both forms can share one file (a `<node>:` entry wins over the flat one). A flat block
-#   whose name is shared by instances of several nodes cannot say which one it is for:
-#   none of them gets a report (a warning in the bot log says so).
+#   Two forms are accepted, and they can be mixed in the same file:
+#     - FLAT (the classic form): the block is named after the instance. Fine while instance
+#       names are unique across your nodes:
+#         DCS.otra:
+#           channel_id: 1234567890123456781
+#     - BY NODE: on a cluster instance names repeat from node to node (every node starts with
+#       DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
+#       plugin configs do:
+#         MyNode1:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456789
+#             campaign_name: "Server A"
+#         MyNode2:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456780
+#             campaign_name: "Server B"
+#   A `<node>:` entry wins over the flat one with the same instance name. A flat block whose
+#   name is shared by instances of several nodes cannot say which one it is for: none of
+#   them gets a report (a warning in the bot log says so).
 #
 # REQUIRED per server:
 #   channel_id     - Discord channel ID where the embed will be posted. A

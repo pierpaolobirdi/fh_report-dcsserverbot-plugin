@@ -417,9 +417,13 @@ Nothing extra is needed on a cluster, but a few things are worth knowing:
     DCS.dcs_serverrelease:
       channel_id: 1234567890123456780
       campaign_name: "Server B"
+
+  # the flat form still works, mixed in the same file (instance name unique in the cluster)
+  DCS.otra:
+    channel_id: 1234567890123456781
   ```
 
-  The flat form (`DCS.dcs_serverrelease:` at the top level) still works and both can share one file; a `<node>:` entry wins over a flat one. A flat block whose name belongs to instances of **several nodes** cannot say which one it is for, so **none of them gets a report** and a warning in the bot log tells you to use the node form. Each server keeps its own Discord message.
+  The flat form (`DCS.otra:` at the top level) still works and both can share one file; a `<node>:` entry wins over a flat one. A flat block whose name belongs to instances of **several nodes** cannot say which one it is for, so **none of them gets a report** and a warning in the bot log tells you to use the node form. Each server keeps its own Discord message.
 - **Choose which instances get a report** with the blocks of `fh_report.yaml` and `enable_updates` (see [below](#enabling-or-disabling-per-instance-enable_updates)). An instance without a block is ignored; `enable_updates: false` keeps its block but silences it. With many groups on one cluster, `enable_updates: false` in `DEFAULT` and `true` only in the blocks you want is a clean way to opt servers in.
 - **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
 - **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.
