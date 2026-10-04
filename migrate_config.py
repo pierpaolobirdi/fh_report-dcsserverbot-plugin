@@ -18,6 +18,25 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #   The plugin resolves the Foothold saves directory automatically, including in multi-node
 #   cluster setups where DCS instances run on remote agent nodes.
 #   If Foothold saves are in a non-standard location, override with saves_dir.
+#   Two forms are accepted, and they can be mixed in the same file:
+#     - FLAT (the classic form): the block is named after the instance. Fine while instance
+#       names are unique across your nodes:
+#         DCS.otra:
+#           channel_id: 1234567890123456781
+#     - BY NODE: on a cluster instance names repeat from node to node (every node starts with
+#       DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
+#       plugin configs do:
+#         MyNode1:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456789
+#             campaign_name: "Server A"
+#         MyNode2:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456780
+#             campaign_name: "Server B"
+#   A `<node>:` entry wins over the flat one with the same instance name. A flat block whose
+#   name is shared by instances of several nodes cannot say which one it is for: none of
+#   them gets a report (a warning in the bot log says so).
 #
 # REQUIRED per server:
 #   channel_id     - Discord channel ID where the embed will be posted. A
@@ -123,6 +142,19 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
+#                          Not below 60: Foothold saves its file about every 60 s, so
+#                          shorter times gain nothing.
+#                          In DEFAULT it applies to every server. Written inside a server's
+#                          block it applies to that server alone and DEFAULT's is ignored
+#                          for it: a long interval saves reads on a remote node, a short
+#                          one keeps a local server fresher. The shortest interval in the
+#                          file sets the beat of the whole plugin; the others update every
+#                          whole number of beats, rounded up (beat 60 + a server with 100:
+#                          that one updates every 120). Use multiples of the shortest.
+#                          Only a RUNNING mission is refreshed: a paused, loading or stopped
+#                          server is skipped (its files do not change), apart from one
+#                          refresh each time its status changes and one when its daily
+#                          reset time passes (so the day closes on time).
 #   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
 #                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
 #                          number (4) still works and means 4:00. The counters are
@@ -318,8 +350,6 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                              actually post.
 #                              Can be set in DEFAULT (e.g. false) and turned on
 #                              only for the instances that should have it.
-#                      The old disable_updates: true still works the same as
-#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -376,7 +406,6 @@ KNOWN_VARS = {
     "show_bob",
     "excluded_ucids",
     "enable_updates",
-    "disable_updates",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
     "saves_dir",
@@ -423,7 +452,7 @@ COMMENTS = {
     "admin":            "# Comma-separated Discord role name(s) and/or username(s)",
     "report_layout":    "# Letters D/P/S/R, any order/subset — see header",
 
-    "update_interval":  "# Seconds between embed refreshes",
+    "update_interval":  "# Seconds between embed refreshes (not below 60: Foothold saves about every 60 s, shorter gains nothing)",
     "daily_reset_hour": "# HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)",
     "show_map":         "# false = hide  |  true = show the map on the title's second line",
     "bar_length":       "# Number of squares in the progress bar",
@@ -509,6 +538,53 @@ def _find_top_level_blocks(content: str) -> list[tuple[int, int]]:
     starts = [m.start() for m in top_level_re.finditer(content)]
     return [(s, (starts[i + 1] if i + 1 < len(starts) else len(content)))
             for i, s in enumerate(starts)]
+
+
+_HEAD_RE = re.compile(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$')
+
+
+def _child_headers(block_text: str):
+    """If every key directly under this top-level block is itself a mapping
+    (`name:` with nothing after it) the block is a NODE block — `<node>: <instance>: ...`
+    — and the instance headers are returned as (offset in block_text, name); else None
+    (a server block: its children are options such as channel_id)."""
+    lines = block_text.splitlines(keepends=True)[1:]
+    indent = next((len(l) - len(l.lstrip(" ")) for l in lines if l.strip() and not l.lstrip().startswith("#")), None)
+    if not indent:
+        return None
+    heads, offset = [], len(block_text.splitlines(keepends=True)[0])
+    for l in lines:
+        stripped = l.strip()
+        if stripped and not stripped.startswith("#") and len(l) - len(l.lstrip(" ")) == indent:
+            m = re.match(r"^\s*([^\s#:][^:#]*?)[ \t]*:[ \t]*(?:#.*)?$", l.rstrip("\n"))
+            if not m or m.group(1).strip('"') in KNOWN_VARS:
+                return None
+            heads.append((offset, m.group(1).strip('"')))
+        offset += len(l)
+    return heads or None
+
+
+def _config_blocks(content: str) -> list[tuple[int, int, str, bool]]:
+    """(start, end, label, is_default) of DEFAULT and of every server block,
+    flat (`name:`) or nested under a node (`node:` / `instance:`, labelled
+    `node/instance`). Comment lines at column 0 belong to the block they sit in."""
+    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE) if _HEAD_RE.match(m.group(0))]
+    out = []
+    for i, h in enumerate(heads):
+        start = h.start()
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(content)
+        name = h.group(0).split(":", 1)[0].strip().strip('"')
+        if name == "DEFAULT":
+            out.append((start, end, "DEFAULT", True))
+            continue
+        kids = _child_headers(content[start:end])
+        if kids:
+            for j, (offset, inst) in enumerate(kids):
+                stop = kids[j + 1][0] if j + 1 < len(kids) else end - start
+                out.append((start + offset, start + stop, f"{name}/{inst}", False))
+        else:
+            out.append((start, end, name, False))
+    return out
 
 
 def _find_kv_line(block_text: str, key: str):
@@ -715,13 +791,9 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
         content, n = _OLD_PILOT_TEMPLATES.subn("", content)
         return content, changes
 
-    # A block starts at a live top-level line and runs to the next one: comment lines
-    # at column 0 (the template's commented examples) belong to the block they sit in.
-    heads = [m for m in re.finditer(r'^[^\s#][^\n]*$', content, re.MULTILINE)
-             if re.match(r'^(?:DEFAULT|"[^"]+"|[^\s#:][^:#\n]*?)[ \t]*:[ \t]*(?:#.*)?$', m.group(0))]
-    blocks = [(h.start(), heads[i + 1].start() if i + 1 < len(heads) else len(content))
-              for i, h in enumerate(heads)]
+    blocks = [(a, b) for a, b, _label, _default in _config_blocks(content)]
     texts = {a: content[a:b] for a, b in blocks}
+    labels = {a: label for a, _b, label, _default in _config_blocks(content)}
 
     def live(text: str, key: str):
         m = _find_kv_line(text, key)
@@ -770,14 +842,16 @@ def migrate_pilot_limits(content: str) -> tuple[str, list[str]]:
             merged = [o if o is not None else d for o, d in zip(own, d_old)]
             needed = _old_pilot_caps(layout, *merged)
             differing = {t: c for t, c in needed.items() if c != eff_default(t)}
-            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines else "  ")
+            body = [l for l in text.splitlines()[1:] if l.strip() and not l.lstrip().startswith("#")]
+            indent = (re.match(r"[ \t]*", old_lines[0].group(0)).group(0) if old_lines
+                      else re.match(r"[ \t]*", body[0]).group(0) if body else "  ")
             lines = []
             if differing:
                 if not d_new and len({needed[t] for t in needed}) == 1:
                     lines = render(indent, next(iter(needed.values())) or 0, {}, before(text))
                 else:
                     lines = render(indent, None, differing, before(text))
-            label = text.split(":", 1)[0].strip().strip('"')
+            label = labels[start]
             if not old_lines and not lines:
                 continue
         if not old_lines and not lines:
@@ -817,6 +891,49 @@ def migrate_reset_times(content: str) -> tuple[str, list[str]]:
     fix("daily_reset_hour")
     fix(_DAYS)
     return content, changes
+
+
+def migrate_disable_updates(content: str) -> tuple[str, list[str]]:
+    """disable_updates (true = off) became enable_updates (false = off). A live
+    line is rewritten with the opposite value and the old one kept in a comment.
+    If the same block already sets enable_updates, that one rules (as before)
+    and the old line is simply dropped. Running it again does nothing."""
+    truthy, falsy = ("true", "1", "yes"), ("false", "0", "no")
+    lines = content.split("\n")
+    line_re = re.compile(r'^([ \t]+)disable_updates[ \t]*:[ \t]*["\']?([^\s"\'#]*)["\']?[ \t]*(#.*)?$')
+    out: list[str] = []
+    changes: list[str] = []
+
+    def region_has_enable(i: int, indent: int) -> bool:
+        def same_block(j):
+            t = lines[j]
+            if not t.strip() or t.lstrip().startswith("#"):
+                return True
+            return len(t) - len(t.lstrip()) >= indent
+        for rng in (range(i - 1, -1, -1), range(i + 1, len(lines))):
+            for j in rng:
+                if not same_block(j):
+                    break
+                m = re.match(r'^([ \t]+)enable_updates[ \t]*:', lines[j])
+                if m and len(m.group(1)) == indent:
+                    return True
+        return False
+
+    for i, line in enumerate(lines):
+        m = line_re.match(line)
+        val = m.group(2).lower() if m else None
+        if not m or val not in truthy + falsy:
+            out.append(line)
+            continue
+        indent = m.group(1)
+        old = f"disable_updates: {m.group(2)}"
+        if region_has_enable(i, len(indent)):
+            changes.append(f"{old} removed (enable_updates is already set in that block)")
+            continue
+        new = "false" if val in truthy else "true"
+        out.append(f"{indent}enable_updates: {new}  # before: {old}")
+        changes.append(f"{old} -> enable_updates: {new}")
+    return "\n".join(out), changes
 
 
 def main():
@@ -890,6 +1007,13 @@ def main():
     if time_changes:
         print("  Daily reset times are now HH:MM:")
         for item in time_changes:
+            print(f"    {item}")
+
+    # ── 1g. disable_updates -> enable_updates (opposite value).
+    content, upd_changes = migrate_disable_updates(content)
+    if upd_changes:
+        print("  disable_updates is now enable_updates:")
+        for item in upd_changes:
             print(f"    {item}")
 
     # ── 1d. Remove keys of features retired from Fh_Report ──────────────────
@@ -1106,18 +1230,19 @@ def main():
     content = content[:default_match.start()] + new_default_block + content[default_match.end():]
 
     # ── 6. Check server blocks for obsolete variables ──────────────────────────
-    # Find all non-DEFAULT top-level blocks
-    server_blocks = re.finditer(
-        r'^"[^"]+"\s*:\s*\n((?:[ \t]+[^\n]*\n)*)',
-        content, re.MULTILINE
-    )
-    for block_match in server_blocks:
-        block_content = block_match.group(1)
-        # Find all active (non-commented) variable keys in this block
-        for var_match in re.finditer(r"^\s+([a-zA-Z_]+)\s*:", block_content, re.MULTILINE):
-            var_name = var_match.group(1)
-            if var_name not in KNOWN_VARS and var_name not in obsolete:
-                obsolete.append(var_name)
+    # Every server block, flat or nested under a node: look only at the keys that sit
+    # directly in the block (not at the days of a daily_reset_schedule inside it).
+    for start, end, _label, is_default in _config_blocks(content):
+        if is_default:
+            continue
+        lines = content[start:end].splitlines()[1:]
+        indent = next((len(l) - len(l.lstrip(" ")) for l in lines if l.strip() and not l.lstrip().startswith("#")), None)
+        if not indent:
+            continue
+        for l in lines:
+            m = re.match(rf"^ {{{indent}}}([A-Za-z_]\w*)\s*:", l)
+            if m and m.group(1) not in KNOWN_VARS and m.group(1) not in obsolete:
+                obsolete.append(m.group(1))
 
     # ── 3. Update header comments ─────────────────────────────────────────────
     default_idx = content.find("\nDEFAULT:")

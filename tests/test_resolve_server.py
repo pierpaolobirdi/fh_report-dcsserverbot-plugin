@@ -47,11 +47,10 @@ def test_the_option_still_rejects_a_server_without_a_block():
     assert name is None and "isn't configured" in err
 
 
-def test_nothing_registered_yet_falls_back_to_the_config_as_before():
-    one = _plugin(["Only"], {})
-    assert one._resolve_server(_interaction(), None) == ("Only", None)
-    two = _plugin(["A", "B"], {})
-    assert "More than one server" in two._resolve_server(_interaction(), None)[1]
+def test_blocks_for_servers_that_are_not_there_yet_say_the_server_is_still_registering():
+    for names in (["Only"], ["A", "B"]):
+        err = _plugin(names, {})._resolve_server(_interaction(), None)[1]
+        assert "isn't currently available" in err
 
 
 def test_no_blocks_at_all():

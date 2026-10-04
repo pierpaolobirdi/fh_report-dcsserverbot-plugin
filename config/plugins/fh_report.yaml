@@ -6,6 +6,25 @@
 #   The plugin resolves the Foothold saves directory automatically, including in multi-node
 #   cluster setups where DCS instances run on remote agent nodes.
 #   If Foothold saves are in a non-standard location, override with saves_dir.
+#   Two forms are accepted, and they can be mixed in the same file:
+#     - FLAT (the classic form): the block is named after the instance. Fine while instance
+#       names are unique across your nodes:
+#         DCS.otra:
+#           channel_id: 1234567890123456781
+#     - BY NODE: on a cluster instance names repeat from node to node (every node starts with
+#       DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
+#       plugin configs do:
+#         MyNode1:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456789
+#             campaign_name: "Server A"
+#         MyNode2:
+#           DCS.dcs_serverrelease:
+#             channel_id: 1234567890123456780
+#             campaign_name: "Server B"
+#   A `<node>:` entry wins over the flat one with the same instance name. A flat block whose
+#   name is shared by instances of several nodes cannot say which one it is for: none of
+#   them gets a report (a warning in the bot log says so).
 #
 # REQUIRED per server:
 #   channel_id     - Discord channel ID where the embed will be posted. A
@@ -111,6 +130,19 @@
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
+#                          Not below 60: Foothold saves its file about every 60 s, so
+#                          shorter times gain nothing.
+#                          In DEFAULT it applies to every server. Written inside a server's
+#                          block it applies to that server alone and DEFAULT's is ignored
+#                          for it: a long interval saves reads on a remote node, a short
+#                          one keeps a local server fresher. The shortest interval in the
+#                          file sets the beat of the whole plugin; the others update every
+#                          whole number of beats, rounded up (beat 60 + a server with 100:
+#                          that one updates every 120). Use multiples of the shortest.
+#                          Only a RUNNING mission is refreshed: a paused, loading or stopped
+#                          server is skipped (its files do not change), apart from one
+#                          refresh each time its status changes and one when its daily
+#                          reset time passes (so the day closes on time).
 #   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
 #                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
 #                          number (4) still works and means 4:00. The counters are
@@ -306,8 +338,6 @@
 #                              actually post.
 #                              Can be set in DEFAULT (e.g. false) and turned on
 #                              only for the instances that should have it.
-#                      The old disable_updates: true still works the same as
-#                      enable_updates: false (enable_updates wins if both set).
 #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
 #                      footer                                        (default: true)
 #                      false = disabled
@@ -329,7 +359,7 @@
 DEFAULT:
   admin: Admin  # Comma-separated Discord role name(s) and/or username(s)
   report_layout: R  # Letters D/P/S/R, any order/subset — see header
-  update_interval: 300  # Seconds between embed refreshes
+  update_interval: 300  # Seconds between embed refreshes (not below 60: Foothold saves about every 60 s, shorter gains nothing)
   daily_reset_hour: 0:00  # HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)
 #  daily_reset_schedule:
 #    sat: 7:00
@@ -374,7 +404,7 @@ DCS_Server:                             # instance name from nodes.yaml
 #    - 1234567890123456780
 #  report_layout: R
 #  points_detail_R: SRD
-#  update_interval: 300
+#  update_interval: 300                # this server only; DEFAULT's is ignored for it
 #  daily_reset_hour: 0:00
 #  daily_reset_schedule:
 #    sat: 7:00
@@ -422,7 +452,7 @@ DCS_Server:                             # instance name from nodes.yaml
 #    - 1234567890123456780
 #  report_layout: R
 #  points_detail_R: SRD
-#  update_interval: 300
+#  update_interval: 300                # this server only; DEFAULT's is ignored for it
 #  daily_reset_hour: 0:00
 #  daily_reset_schedule:
 #    sat: 7:00

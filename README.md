@@ -34,7 +34,7 @@ Multiple server instances are supported — each can have its own channel, campa
 1. Download the zip and extract it
 2. Run `install.cmd` — it auto-detects your DCSServerBot installation
 3. Edit `config/plugins/fh_report.yaml`:
-   - Set each server block key to the **instance name** defined in your `nodes.yaml`
+   - Set each server block key to the **instance name** defined in your `nodes.yaml` (on a cluster, under its **node name**: see [Multi-node](#multi-node-master--agents))
    - Set `channel_id` and `campaign_name` for each server
 4. Restart DCSServerBot
 
@@ -60,7 +60,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
-| `update_interval` | `300` | Seconds between embed refreshes |
+| `update_interval` | `300` | Seconds between embed refreshes. Not below `60`: Foothold saves about every 60 s, so shorter times gain nothing. Can also be set inside a server's block for that server alone — see [Update interval per server](#update-interval-per-server-update_interval) |
 | `daily_reset_hour` | `0:00` | Time (`HH:MM`, 24 h, e.g. `8:30`) when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time](#daily-reset-time) |
 | `daily_reset_schedule` | — | Per-day reset time override (`HH:MM`, e.g. a different time on weekends) |
 | `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
@@ -397,32 +397,117 @@ Requires the DCSServerBot Punishment plugin. If not present, the option is silen
 
 ---
 
-## Enabling or disabling per instance (`enable_updates`)
+## Multi-node (Master + Agents)
 
-Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (the key is the instance name from `nodes.yaml`). `enable_updates` lets you switch any of them on or off without deleting its settings.
+### What runs where
 
-- `enable_updates: true` (default) — normal operation.
-- `enable_updates: false` — that instance never reads files, posts or edits anything, as if it weren't in the config at all. Its settings stay in the file, so you can turn it back on later.
+Fh_Report runs **only on the Master**. It reads and writes each instance's Foothold files (the `Saves` folder, including `.fhc`) through DCSServerBot's node API, wherever the instance runs. Nothing is installed on the agent nodes and no shared drive is needed. If you set `saves_dir` by hand, it is a path **on the node that hosts the instance**; left empty it is found automatically.
 
-Because `DEFAULT` is merged into every block, you can also work the other way round: switch everything off by default and enable only the instances you want.
+### How a server is identified
+
+A server is identified by its **node name** plus its **instance name**, not by the instance name alone. The node name is the one from `nodes.yaml`, the same you use in DCSServerBot's other plugin configs. Instance names only have to be unique inside one node, and DCSServerBot's default (`DCS.dcs_serverrelease`) appears on every node of a cluster, so the instance name alone cannot say which server you mean.
+
+### Writing the config
+
+Two forms are accepted, and **they can be mixed in the same file**.
+
+**By node (recommended on a cluster):** each block goes under its node.
 
 ```yaml
 DEFAULT:
-  enable_updates: false      # off unless an instance says otherwise
+  report_layout: R
 
-DCS.foothold1:
-  enable_updates: true       # Fh_Report active here
-  channel_id: 1458145804685541508
-  campaign_name: "Operation A"
+MyNode1:
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456789
+    campaign_name: "Server A"
 
-DCS.foothold2:               # inherits false: stays silent
-  channel_id: 1458145804685541509
-  campaign_name: "Operation B"
+MyNode2:
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456780
+    campaign_name: "Server B"
+
+# the flat form still works, mixed in the same file (instance name unique in the cluster)
+DCS.otra:
+  channel_id: 1234567890123456781
 ```
+
+**Flat (the classic form):** the block is named after the instance (`DCS.otra:` above). It is fine whenever that name is unique in your cluster. With a single node nothing changes: your existing config keeps working untouched.
+
+For each server the plugin looks, in this order, for: (1) a block under its **node** (`<node>:` then `<instance>:`), (2) a **flat** block named after the instance, (3) otherwise the server has no block and is ignored. So a `<node>:` entry wins over a flat block with the same instance name. `DEFAULT` applies to every server, whichever form it uses, and each block overrides it as usual.
+
+### When a flat block is ambiguous
+
+If a flat block's name matches instances on **several nodes**, the plugin cannot know which one you meant. **None of those servers gets a report** (it never guesses or posts to the wrong channel) and a **warning is written once to the bot log** listing the nodes involved. Fix it by moving the block under the node it belongs to; if the same settings are meant for several nodes, repeat the block under each one.
+
+The bot log also tells you about entries that match nothing: a `<node>:` name no node has, a node without that instance, or a flat block whose instance does not exist.
+
+### Discord messages and commands
+
+- Each server keeps its **own** report message in its own channel. Message ids saved by older versions are moved automatically to the right server when the instance name is unique; if it is ambiguous the old id is dropped and the plugin finds its message again by looking in the channel, so nothing is duplicated.
+- The `server` option of `/fh_report player` and the other commands lists the servers of every node that DCSServerBot has registered and that have a block. With only one available it is used automatically; with several and `server` left empty, the server **of the channel where you run the command** is used; if that channel belongs to no server, the available ones are listed.
+
+### Choosing which servers get a report
+
+A server without a block is ignored, so to have reports on only some servers, write only their blocks. `enable_updates: false` (see [below](#enabling-or-disabling-per-instance-enable_updates)) pauses a server's report while keeping its block; the `/fh_report player` command keeps working for it.
+
+- **Set the update rate per server** with `update_interval` inside its block (see [Update interval per server](#update-interval-per-server-update_interval)): a long one for remote nodes saves reads, a short one for servers on the Master.
+- **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
+- **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.
+
+---
+
+## Update interval per server (`update_interval`)
+
+`update_interval` is the number of seconds between refreshes of a report. Each refresh reads the server's Foothold files, so on a cluster it is also the main cost in I/O operations: on a server of the Master it is cheap, on one of a remote node every read crosses the network. You can therefore choose the rate per server.
+
+- In `DEFAULT` it applies to every server (default `300`).
+- Written **inside a server's block** (flat or under its node) it applies to that server alone, and `DEFAULT`'s value is ignored for it.
+
+```yaml
+DEFAULT:
+  update_interval: 300
+
+MyNode1:                       # the Master: reads are cheap
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456789
+    update_interval: 60
+
+MyNode2:                       # a remote node: fewer reads
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456780
+    update_interval: 600
+
+DCS.otra:                      # no value of its own: uses DEFAULT's 300
+  channel_id: 1234567890123456781
+```
+
+**How the intervals combine.** The plugin keeps one loop, and the **shortest interval in the file sets its beat** (60 s above). Every other server updates every whole number of beats, **rounded up**: the 300 s server every 5 beats, the 600 s one every 10. A server whose interval is not a multiple is rounded up, so with a beat of 60 s a server set to 100 s updates every 120 s. Use multiples of the shortest interval and you get exactly what you write. A server that appears later (a node registering after the bot starts) is updated at once.
+
+Things to know:
+- **Don't go below 60.** Foothold rewrites its save file about every 60 seconds (every 30 during the first moments after the mission starts), so a shorter interval only repeats reads of data that has not changed.
+- **Only a running mission is refreshed.** Foothold writes its files only while the mission runs, so a server whose mission is paused, loading or stopped is skipped, with no reads at all, on the Master or on a remote node. Each server is still refreshed once on the first cycle after the plugin loads and once every time its status changes: the last state when it pauses or stops, and a fresh one as soon as it runs again. A skipped server is also refreshed once when its daily reset time passes (the `daily_reset_hour` / `daily_reset_schedule` of its block, in its Scheduler time zone), so the day is closed and the new one starts on time even with nobody playing. While it is skipped, its message keeps the time of that last refresh. A server that pauses when empty (the Scheduler's pause-when-empty option) therefore costs nothing while nobody is on it.
+- The shortest interval is the freshness limit of the whole file; no server updates faster than it.
+- The rotation of `report_layout` compositions and the daily reset follow each server's own rate: a server on 600 s can take up to ten minutes to show a reset.
+- An invalid value (`soon`, `0`, a negative number) in a block falls back to `DEFAULT`'s, with a warning once in the bot log.
+- It is read when the plugin loads, so reload the plugin (or restart the bot) after changing it.
+
+**Planned.** To cut the I/O further on large clusters, a small optional extension for the nodes is being considered. It would tell the Master when a server's Foothold file has changed, so the Master reads only then instead of on a timer. Since Foothold rewrites that file at most about once a minute, the extension would notify at most once a minute per server; the saving is mostly on servers whose mission is stopped (nothing changes, so nothing is read), and on those running with long intervals it would also bring fresher data. The plugin would stay on the Master and this per-server interval would remain the simple default; the extension would be an alternative the administrator chooses depending on the installation. It is not implemented yet.
+
+---
+
+## Enabling or disabling per instance (`enable_updates`)
+
+Fh_Report works per DCS instance: it only acts on the instances that have a block in `fh_report.yaml` (see [Multi-node](#multi-node-master--agents) for how a block is matched to a server). `enable_updates` lets you pause any of them without deleting its settings.
+
+- `enable_updates: true` (default) — normal operation.
+- `enable_updates: false` — that instance's report is paused: nothing is read, posted or edited for it. Its settings stay in the file, so you can turn it back on later. The `/fh_report player` and `podium` commands keep working for it (removing the block would remove them too).
+
+It applies to a server already matched to a block; it does not fix an ambiguous flat block (see [Multi-node](#multi-node-master--agents)).
 
 Changes are picked up when the plugin is reloaded (or the bot restarts).
 
-The older `disable_updates: true` still works exactly like `enable_updates: false`; if both are set, `enable_updates` wins.
+`disable_updates` (older versions) no longer exists: the installer's migration turns it into `enable_updates` with the opposite value. If you update by copying files without running it, rename it yourself, or that server will report again.
 
 ### Duplicate installs
 
