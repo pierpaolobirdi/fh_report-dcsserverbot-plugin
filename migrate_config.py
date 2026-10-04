@@ -142,6 +142,13 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
+#                          In DEFAULT it applies to every server. Written inside a server's
+#                          block it applies to that server alone and DEFAULT's is ignored
+#                          for it: a long interval saves reads on a remote node, a short
+#                          one keeps a local server fresher. The shortest interval in the
+#                          file sets the beat of the whole plugin; the others update every
+#                          whole number of beats, rounded up (beat 60 + a server with 100:
+#                          that one updates every 120). Use multiples of the shortest.
 #   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
 #                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
 #                          number (4) still works and means 4:00. The counters are

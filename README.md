@@ -60,7 +60,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
-| `update_interval` | `300` | Seconds between embed refreshes |
+| `update_interval` | `300` | Seconds between embed refreshes. Can also be set inside a server's block for that server alone — see [Update interval per server](#update-interval-per-server-update_interval) |
 | `daily_reset_hour` | `0:00` | Time (`HH:MM`, 24 h, e.g. `8:30`) when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time](#daily-reset-time) |
 | `daily_reset_schedule` | — | Per-day reset time override (`HH:MM`, e.g. a different time on weekends) |
 | `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |
@@ -451,8 +451,46 @@ The bot log also tells you about entries that match nothing: a `<node>:` name no
 
 A server without a block is ignored, so to have reports on only some servers, write only their blocks. `enable_updates: false` (see [below](#enabling-or-disabling-per-instance-enable_updates)) pauses a server's report while keeping its block; the `/fh_report player` command keeps working for it.
 
+- **Set the update rate per server** with `update_interval` inside its block (see [Update interval per server](#update-interval-per-server-update_interval)): a long one for remote nodes saves reads, a short one for servers on the Master.
 - **Keep groups apart** with the per-server options: its own `channel_id`, `admin` roles and `commands_channel_id` (see [Multiple servers](#multiple-servers-server--commands_channel_id)), so a command typed in one group's channel cannot query another group's server.
 - **The daily reset follows each server's own time zone**: the `timezone` of that instance in the Scheduler plugin (see [Daily reset time](#daily-reset-time)), so nodes in different regions can reset at their local time.
+
+---
+
+## Update interval per server (`update_interval`)
+
+`update_interval` is the number of seconds between refreshes of a report. Each refresh reads the server's Foothold files, so on a cluster it is also the main cost in I/O operations: on a server of the Master it is cheap, on one of a remote node every read crosses the network. You can therefore choose the rate per server.
+
+- In `DEFAULT` it applies to every server (default `300`).
+- Written **inside a server's block** (flat or under its node) it applies to that server alone, and `DEFAULT`'s value is ignored for it.
+
+```yaml
+DEFAULT:
+  update_interval: 300
+
+MyNode1:                       # the Master: reads are cheap
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456789
+    update_interval: 60
+
+MyNode2:                       # a remote node: fewer reads
+  DCS.dcs_serverrelease:
+    channel_id: 1234567890123456780
+    update_interval: 600
+
+DCS.otra:                      # no value of its own: uses DEFAULT's 300
+  channel_id: 1234567890123456781
+```
+
+**How the intervals combine.** The plugin keeps one loop, and the **shortest interval in the file sets its beat** (60 s above). Every other server updates every whole number of beats, **rounded up**: the 300 s server every 5 beats, the 600 s one every 10. A server whose interval is not a multiple is rounded up, so with a beat of 60 s a server set to 100 s updates every 120 s. Use multiples of the shortest interval and you get exactly what you write. A server that appears later (a node registering after the bot starts) is updated at once.
+
+Things to know:
+- The shortest interval is the freshness limit of the whole file; no server updates faster than it.
+- The rotation of `report_layout` compositions and the daily reset follow each server's own rate: a server on 600 s can take up to ten minutes to show a reset.
+- An invalid value (`soon`, `0`, a negative number) in a block falls back to `DEFAULT`'s, with a warning once in the bot log.
+- It is read when the plugin loads, so reload the plugin (or restart the bot) after changing it.
+
+**Planned.** To cut the I/O further on large clusters, a small optional extension for the nodes is being considered. It would tell the Master when a server's Foothold file has changed, so the Master reads only then instead of on a timer. The plugin would stay on the Master and this per-server interval would remain the simple default; the extension would be an alternative the administrator chooses depending on the installation. It is not implemented yet.
 
 ---
 

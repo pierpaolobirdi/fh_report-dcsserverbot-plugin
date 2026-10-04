@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.2.3"
+FH_REPORT_RELEASE = "14.2.4"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -230,6 +230,18 @@ def _validated_update_interval(raw: dict, default: int = 300) -> tuple[int, str 
             f"zero — falling back to the default of {default}s."
         )
     return interval, None
+
+
+def _parse_interval(value) -> int | None:
+    """A usable update_interval (a whole number of seconds > 0), else None."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+_interval_warned: set[str] = set()
 
 
 def _server_stagger_seconds(interval: float, server_count: int) -> float:
@@ -2670,6 +2682,9 @@ class Fh_Report(Plugin):
         )
         self._last_maps: dict[str, str] = {}          # last known map per instance
         self._map_probed: set[str] = set()            # instances whose mission file was already tried
+        self._base_interval = 300                     # update_interval of DEFAULT
+        self._beat = 300                              # the loop's step: the shortest interval in the file
+        self._beats_left: dict[str, int] = {}         # per server: beats to skip before its next update
 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -2685,12 +2700,62 @@ class Fh_Report(Plugin):
         interval, interval_warning = _validated_update_interval(raw)
         if interval_warning:
             self.log.warning(interval_warning)
-        self.updater.change_interval(seconds=interval)
+        self._base_interval = interval
+        self._beat = self._compute_beat(interval)
+        self._beats_left = {}
+        self.updater.change_interval(seconds=self._beat)
         utils.safe_start(self.updater)
 
     async def cog_unload(self) -> None:
         await utils.safe_cancel(self.updater)
         await super().cog_unload()
+
+    # ── Update intervals: the shortest one sets the beat ───────────────────
+
+    def _compute_beat(self, base: int) -> int:
+        """The loop's step: the shortest valid update_interval found in the file
+        (DEFAULT's, or any server block's, flat or under a node)."""
+        beat = base
+        for key, val in (self.locals or {}).items():
+            if key == "DEFAULT" or not isinstance(val, dict):
+                continue
+            for block in [val] + [c for c in val.values() if isinstance(c, dict)]:
+                n = _parse_interval(block.get("update_interval"))
+                if n:
+                    beat = min(beat, n)
+        return beat
+
+    def _interval_for(self, server) -> int:
+        """The server's own update_interval if its block sets one (DEFAULT's is then
+        ignored for it), else DEFAULT's. An invalid own value falls back to DEFAULT's."""
+        block = self._block_for(server)[0] or {}
+        if block.get("update_interval") is None:
+            return self._base_interval
+        n = _parse_interval(block["update_interval"])
+        if n is None:
+            key = _server_key(server)
+            if key not in _interval_warned:
+                _interval_warned.add(key)
+                self.log.warning(
+                    f"Fh_Report [{key}]: update_interval ({block['update_interval']!r}) is not a whole number "
+                    f"of seconds above zero - using the DEFAULT's ({self._base_interval}s).")
+            return self._base_interval
+        return n
+
+    def _due_servers(self, servers: list) -> list:
+        """The servers to update on this beat. One that wants a longer interval than
+        the beat is updated every ceil(interval / beat) beats; a server seen for
+        the first time is updated at once."""
+        due = []
+        for server in servers:
+            key = _server_key(server)
+            left = self._beats_left.get(key, 0)
+            if left > 0:
+                self._beats_left[key] = left - 1
+                continue
+            due.append(server)
+            self._beats_left[key] = max(1, -(-self._interval_for(server) // max(1, self._beat))) - 1
+        return due
 
     # ── Message IDs persistence (JSON file, no DB) ─────────────────────────
 
@@ -2758,7 +2823,7 @@ class Fh_Report(Plugin):
         self._migrate_message_ids()
         self._warn_config_mismatches(raw)
 
-        servers = self._configured_servers()
+        servers = self._due_servers(self._configured_servers())
         stagger_seconds = _server_stagger_seconds(interval, len(servers))
         processed_server_count = 0
         for server in servers:
