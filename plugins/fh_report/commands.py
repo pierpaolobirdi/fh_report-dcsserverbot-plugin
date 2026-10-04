@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.37"
+FH_REPORT_RELEASE = "14.1.38"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1697,6 +1697,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         career_lines.append(f"- **Flight Hours (helo):** {_fmt_career_time(helo_s)}")
     if career.get(CAREER_KILLS, 0) > 0:
         career_lines.append(f"- **Kills:** {int(career[CAREER_KILLS])}")
+    if bnb and bnb.get("total"):    # the same all-time number as the rank card
+        career_lines.append(f"- **Blue-on-Blue (BoB):** {bnb['total']}")
     if career.get(CAREER_TRAPS, 0) > 0:
         career_lines.append(f"- **Carrier Traps:** {int(career[CAREER_TRAPS])}")
     if career.get(CAREER_FUEL_LBS, 0) > 0:
@@ -2139,6 +2141,12 @@ def _version_text() -> str:
 def _show_map(cfg: dict) -> bool:
     """show_map: on unless explicitly disabled (also when the key is absent)."""
     raw = cfg.get("show_map")
+    return True if raw is None else _bool_cfg(raw)
+
+
+def _show_bob(cfg: dict) -> bool:
+    """show_bob: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_bob")
     return True if raw is None else _bool_cfg(raw)
 
 
@@ -3186,7 +3194,7 @@ class Fh_Report(Plugin):
             return {}
 
     async def _fetch_bnb_detail(self, server, cfg: dict, session: datetime | None, ucid: str,
-                                with_penalties: bool = False) -> tuple[dict | None, dict | None]:
+                                with_penalties: bool = False, with_bnb: bool = True) -> tuple[dict | None, dict | None]:
         """One player's detail for /fh_report player: (bnb, penalties).
         bnb: totals split into destroyed / damaged, today and this session on
         this server, plus the latest incidents. penalties (only when asked):
@@ -3201,6 +3209,8 @@ class Fh_Report(Plugin):
                     params = {"ucids": [ucid], "server": server.name, "day": day_from,
                               "session": session or datetime.max}
                     try:
+                        if not with_bnb:
+                            raise LookupError("BoB switched off")
                         await cur.execute(_BNB_INCIDENTS_SQL + """
                             SELECT kind, COUNT(*),
                                    COUNT(*) FILTER (WHERE server_name = %(server)s AND time >= %(day)s),
@@ -3226,6 +3236,8 @@ class Fh_Report(Plugin):
                                 "more":      len(rows) > BNB_RECENT,
                                 "session_known": session is not None,
                             }
+                    except LookupError:
+                        pass
                     except Exception as e:
                         self.log.debug(f"Fh_Report: BoB detail not available: {e}")
                     if with_penalties:
@@ -3379,7 +3391,7 @@ class Fh_Report(Plugin):
             server, saves_dir, node, source_node, persistence_file, campaign_by_id,
             {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()}, cfg)
         bnb = {}
-        if any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
+        if _show_bob(cfg) and any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
             bnb = await self._fetch_bnb(
                 server, cfg, session,
                 [d["ucid"] for d in players.values() if d.get("ucid")])
@@ -3871,7 +3883,7 @@ class Fh_Report(Plugin):
         sess = await _read_fhr_json(node, saves_dir, "session.json")
         bnb, penalties = (await self._fetch_bnb_detail(
             srv, cfg, _session_start_for(sess, cfg, tz), ucid,
-            with_penalties=_bool_cfg(cfg.get("show_punishment")))
+            with_penalties=_bool_cfg(cfg.get("show_punishment")), with_bnb=_show_bob(cfg))
             if ucid else (None, None))
         embed = _build_player_report_embed(
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,

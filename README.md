@@ -84,6 +84,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
+| `show_bob` | `true` | `false` = hide every Blue on Blue (`BoB`) count, taken from DCSServerBot's Mission Statistics plugin — see [Blue-on-blue](#blue-on-blue-bob) |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
 | `enable_updates` | `true` | `false` = this instance never reads, posts, or edits anything for this server — see [Enabling or disabling per instance](#enabling-or-disabling-per-instance-enable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
@@ -260,6 +261,8 @@ Stats shown:
 
 ### Blue-on-blue (`BoB`)
 
+`show_bob` (default `true`; a config without the line counts as `true`) switches all of this on or off. `false` hides every `BoB` below and skips its database queries; the penalties in force of `/fh_report player` stay under `show_punishment`.
+
 `BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
 
 - *Destroyed*: every kill of a friendly unit.
@@ -279,6 +282,7 @@ Stats shown:
 The start is dated at the mission start DCSServerBot recorded since the campaign was last seen intact (Foothold reloads the mission right after a reset), or at the moment it was noticed when there is none or the gap is over an hour. A campaign already running when Fh_Report first looks at it has no known start, so it counts from the daily reset before that first look: the session always includes the day, until the next reset is noticed. Each noticed reset is written to the bot log (`new campaign session … from …`). The state, with a small baseline of pilots so a bot restart does not lose track, is kept in `.fhc/fhr_session.json`.
 
 `/fh_report player` adds, before Career Stats:
+- **Career Stats** gets a `Blue-on-Blue (BoB)` line under `Kills`, with the same all-time number as the rank card;
 - the **Session Stats / Daily** table gets a `BoB` row (session and daily counts side by side, second-to-last, before Deaths; left out when both are zero);
 - **Blue-on-Blue (BoB)**: this session's and today's counts (no all-time total, so it matches the stats; the section is left out when both are zero), and the incidents of the **current session on this server** (up to the latest 10, with a note when there are more), with date and victim (the player's name, or `AI unit (type)`).
 - **Penalties in force** (only with `show_punishment: true`, from the **Punishment** plugin): the level, name and hammers the player currently holds, as in the main embed, plus what sustains it by event (`Team kill ×1 (10.8 p.p.) · Friendly fire ×2 (4.8 p.p.)`). These are the points left **after Punishment's decay**: they drop level by level and the section disappears once they reach zero, while the BoB history stays. Punishment counts everything it sanctions (not only BoB) and cannot be tied to one specific BoB incident.

@@ -284,6 +284,16 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
 #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
 #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
+#   show_bob         - Show the Blue on Blue (BoB) friendly-fire counts  (default: true)
+#                      Taken from the Mission Statistics plugin of DCSServerBot (never from
+#                      Foothold): friendly units destroyed + damaged. Without that plugin
+#                      nothing is shown and nothing breaks.
+#                      false = hidden everywhere
+#                      true  = shown: "BoB: n" in the stats card (it also needs show_pilot_card,
+#                              show_session_card and/or show_daily_card), and in /fh_report
+#                              player the BoB row of the stats table, the Blue-on-Blue section
+#                              and a line in Career Stats.
+#                      A config without this line counts as true.
 #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
 #   enable_updates   - Switch Fh_Report on/off for this instance   (default: true)
 #                      true  = normal operation
@@ -353,6 +363,7 @@ KNOWN_VARS = {
     "podium_combined_top",
     "podium_combined_min3_latest_day",
     "show_punishment",
+    "show_bob",
     "excluded_ucids",
     "enable_updates",
     "disable_updates",
@@ -393,6 +404,7 @@ DEFAULTS = {
     "podium_combined_top":       1,
     "podium_combined_min3_latest_day": False,
     "show_punishment":  False,
+    "show_bob":         True,
     "show_player_cmd_hint":  True,
     "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
 }
@@ -424,6 +436,7 @@ COMMENTS = {
     "podium_combined_top":       "# Same as podium_top, but when \"P\" is combined with other letters",
     "podium_combined_min3_latest_day": "# false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
+    "show_bob":         "# false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
 }
@@ -682,7 +695,7 @@ def main():
     # ── 1. Convert legacy 0/1 values to true/false for bool variables ──────────
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
-    "show_all_pilots", "show_punishment", "show_pilot_card", "compact_points",
+    "show_all_pilots", "show_punishment", "show_bob", "show_pilot_card", "compact_points",
     "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day",
                  "show_map"}
     bool_converted = []

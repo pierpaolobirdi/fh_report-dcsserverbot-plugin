@@ -145,3 +145,26 @@ def test_migration_adds_a_missing_reset_time_as_0_00(tmp_path):
 def test_the_commented_examples_in_the_template_use_the_new_format():
     text = open(YAML, encoding="utf-8").read()
     assert not re.search(r"^#?\s*(sat|sun|thu): \d{1,2}\s*$", text, re.M)
+
+
+def test_show_bob_sits_next_to_show_punishment_in_header_and_default_block():
+    assert "show_bob" in mc.DEFAULTS and mc.DEFAULTS["show_bob"] is True
+    order = list(mc.DEFAULTS)
+    assert order.index("show_bob") == order.index("show_punishment") + 1
+    keys = _default_block(open(YAML, encoding="utf-8").read())
+    assert keys.index("show_bob") == keys.index("show_punishment") + 1
+    header = mc.HEADER_COMMENT
+    assert header.index("#   show_punishment") < header.index("#   show_bob") < header.index("#   excluded_ucids")
+    assert "Mission Statistics plugin of DCSServerBot" in header
+
+
+def test_migration_adds_show_bob_as_true_and_keeps_a_user_choice(tmp_path):
+    base = open(YAML, encoding="utf-8").read()
+    old = re.sub(r"^  show_bob: .*\n", "", base, flags=re.M)
+    assert not re.search(r"^  show_bob:", old, re.M)
+    migrated, out = _migrate(tmp_path, old)
+    assert re.search(r"^  show_bob: true  # ", migrated, re.M) and "+ show_bob: True" in out
+    for written, expected in (("false", "false"), ("0", "false"), ("1", "true")):
+        text = base.replace("  show_bob: true  #", f"  show_bob: {written}  #")
+        again, _ = _migrate(tmp_path, text)
+        assert re.search(rf"^  show_bob: {expected}  # ", again, re.M), written

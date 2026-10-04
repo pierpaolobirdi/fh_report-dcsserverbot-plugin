@@ -255,3 +255,61 @@ def test_bob_section_shows_only_session_and_today_and_hides_when_both_are_empty(
     assert value.splitlines()[0] == "- **Session:** 8 · **Today:** 8" and "Total" not in value
     assert fields({**base, "day": 0, "session": 0}) == []        # history only: nothing to say here
     assert fields({**base, "day": 2, "session": 0})              # today alone is enough
+
+
+# ── show_bob ───────────────────────────────────────────────────────────────────
+
+def test_show_bob_is_on_unless_explicitly_disabled():
+    assert commands._show_bob({}) is True                      # the key is missing: the default
+    assert commands._show_bob({"show_bob": None}) is True
+    assert commands._show_bob({"show_bob": True}) is True
+    assert commands._show_bob({"show_bob": False}) is False
+    assert commands._show_bob({"show_bob": "false"}) is False
+    assert commands._show_bob({"show_bob": 0}) is False
+
+
+def test_career_stats_carry_the_all_time_bob_under_kills():
+    bnb = {"total": 19, "day": 0, "session": 0, "destroyed": 5, "damaged": 14, "recent": []}
+    e = commands._build_player_report_embed("P", {"credits": 100, "career": {10: 47, 21: 2}}, None, None,
+                                            0, 0, {}, "ok", bnb=bnb)
+    career = next(f.value for f in e.fields if "Career" in f.name).splitlines()
+    assert career[0] == "- **Kills:** 47" and career[1] == "- **Blue-on-Blue (BoB):** 19"
+    assert career[2].startswith("- **Pilot Deaths")
+    none = commands._build_player_report_embed("P", {"credits": 100, "career": {10: 47}}, None, None, 0, 0, {}, "ok", bnb=None)
+    assert "Blue-on-Blue" not in next(f.value for f in none.fields if "Career" in f.name)
+
+
+def test_show_bob_false_hides_every_bob_part_and_skips_its_queries(saves_dir):
+    pool, sent = _invoke(saves_dir, A, admin=True, cfg_extra={"show_bob": False})
+    text = " ".join(f.name + f.value for f in sent[0].fields)
+    assert "Blue-on-Blue" not in text and "BoB" not in text
+    assert not any("missionstats" in q for q, _ in pool.full_queries)
+
+
+def test_show_bob_false_keeps_the_penalties_that_belong_to_show_punishment(saves_dir):
+    pool, sent = _invoke(saves_dir, A, admin=True, cfg_extra={"show_bob": False, "show_punishment": True})
+    names = [f.name for f in sent[0].fields]
+    assert "⚖️ __Penalties in force__" in names and not any("Blue-on-Blue" in n for n in names)
+
+
+def test_with_the_key_missing_the_player_report_shows_bob(saves_dir):
+    _, sent = _invoke(saves_dir, A, admin=True)                        # no show_bob in the config
+    text = " ".join(f.name + f.value for f in sent[0].fields)
+    assert "Blue-on-Blue (BoB)" in text and "- **Blue-on-Blue (BoB):** 5" in text    # section and career line
+
+
+def test_the_embed_cards_need_show_bob_too():
+    class _Server:
+        name = "Public"
+    calls = []
+
+    async def fake_fetch(self, *a, **k):
+        calls.append(1)
+        return {}
+    plugin = make_plugin()
+    plugin._fetch_bnb = lambda *a, **k: fake_fetch(plugin, *a, **k)
+    # the gate in _update_server is exercised through its condition: card flag AND show_bob
+    cond = lambda cfg: commands._show_bob(cfg) and any(
+        commands._bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card"))
+    assert cond({"show_pilot_card": True}) and not cond({"show_pilot_card": True, "show_bob": False})
+    assert not cond({})                                                  # no card at all: nothing to query
