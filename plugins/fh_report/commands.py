@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.44"
+FH_REPORT_RELEASE = "14.1.45"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -3556,6 +3556,13 @@ class Fh_Report(Plugin):
             out.append(name)
         return out
 
+    def _channel_server(self, interaction: discord.Interaction):
+        """The server DCSServerBot assigns to the channel of the command, or None."""
+        try:
+            return self.bot.get_server(interaction)
+        except Exception:
+            return None
+
     def _get_server_by_instance(self, instance_name: str):
         """Find the DCSSB Server object matching a configured instance name."""
         for server in self.bot.servers.values():
@@ -3603,8 +3610,9 @@ class Fh_Report(Plugin):
         (autocomplete namespace) or None.
         - Instance: with one available (registered in DCSServerBot, so listed in
           the `server` option) it's always that one; with several the `server`
-          option is required (the channel is never used to guess). Blocks of
-          servers that are not registered don't count: they can't be picked.
+          option is required, except in the channel DCSServerBot assigns to one
+          of them (the server the option's list pre-selects). Blocks of servers
+          that are not registered don't count: they can't be picked.
         - Channel: unrestricted unless commands_channel_id is set; then only the
           instance's channel_id or one listed in commands_channel_id.
         """
@@ -3618,10 +3626,18 @@ class Fh_Report(Plugin):
             server_name = available[0]
         else:
             if not server_param:
-                return None, (
-                    "❌ More than one server is configured — please choose one "
-                    "from the `server` option list."
-                )
+                # The `server` list pre-selects the server of the channel the command is
+                # run in (DCSServerBot's own rule) and lists only that one; leaving the
+                # option empty must mean exactly that server, not an error.
+                srv = self._channel_server(interaction)
+                if srv is not None and srv.instance.name in available:
+                    server_param = srv
+                else:
+                    names = ", ".join(f"**{getattr(self._get_server_by_instance(n), 'name', n)}**" for n in available)
+                    return None, (
+                        f"❌ More than one server is available ({names}) — please choose one "
+                        f"from the `server` option list."
+                    )
             if isinstance(server_param, str):
                 srv = self.bot.servers.get(server_param)
                 if srv is None:

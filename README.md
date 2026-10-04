@@ -358,7 +358,7 @@ Disable with `show_player_cmd_hint: false`, or customize the wording with `playe
 This applies to both `/fh_report player` and `/fh_report podium`.
 
 - **One server available** (configured and registered in DCSServerBot — the ones the `server` option lists): nothing to do — both commands work from any channel, and there's nothing to specify. A block of a server that is off or not registered does not count as a second one.
-- **More than one server available**: a `server` option (with autocomplete) appears on both commands, and you must fill it in — the channel is never used to guess which server you mean, since two servers could otherwise end up sharing a channel by mistake. This is required regardless of which channel you're running the command from, even the report channel itself.
+- **More than one server available**: a `server` option (with autocomplete) appears on both commands. Leave it empty only in the channel DCSServerBot assigns to one of your servers (the option's list then shows just that server, and that is the one used); anywhere else you must pick one from the list. The list shows every server when you run the command outside those channels.
 
 By default, both commands can be run from **any channel**, for any number of servers. To restrict that, set `commands_channel_id` per server — a list of extra channels (besides that server's own report channel) where its commands are allowed:
 

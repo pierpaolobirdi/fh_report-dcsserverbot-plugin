@@ -65,3 +65,43 @@ def test_a_server_managed_by_another_role_is_not_counted_for_an_admin_command(mo
     assert plugin._resolve_server(_interaction(), None) == ("Mine", None)
     monkeypatch.setattr(commands._FHServerTransformer, "is_admin", staticmethod(lambda i: False))
     assert "More than one server" in plugin._resolve_server(_interaction(), None)[1]
+
+
+def _with_channel_server(plugin, server):
+    plugin.bot.get_server = lambda interaction: server
+    return plugin
+
+
+def test_with_several_servers_an_empty_option_means_the_server_of_the_channel():
+    """DCSServerBot's list shows only the channel's server; pressing Enter must use it."""
+    plugin = _plugin(["A", "B"], {"A": _Srv("A"), "B": _Srv("B")})
+    _with_channel_server(plugin, plugin.bot.servers["B"])
+    assert plugin._resolve_server(_interaction(), None) == ("B", None)
+
+
+def test_an_explicit_choice_beats_the_channel():
+    plugin = _plugin(["A", "B"], {"A": _Srv("A"), "B": _Srv("B")})
+    _with_channel_server(plugin, plugin.bot.servers["B"])
+    assert plugin._resolve_server(_interaction(), plugin.bot.servers["A"]) == ("A", None)
+
+
+def test_a_channel_without_one_of_the_available_servers_still_asks_and_names_them():
+    plugin = _plugin(["A", "B"], {"A": _Srv("A"), "B": _Srv("B"), "C": _Srv("C")})
+    for channel_server in (None, plugin.bot.servers["C"]):          # no server there / a server without a block
+        _with_channel_server(plugin, channel_server)
+        name, err = plugin._resolve_server(_interaction(), None)
+        assert name is None and "More than one server is available (**A**, **B**)" in err
+
+
+def test_the_channel_lookup_failing_does_not_break_the_command():
+    plugin = _plugin(["A", "B"], {"A": _Srv("A"), "B": _Srv("B")})
+    plugin.bot.get_server = lambda interaction: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert "More than one server" in plugin._resolve_server(_interaction(), None)[1]
+
+
+def test_the_channel_server_still_goes_through_the_commands_channel_check():
+    plugin = _plugin(["A", "B"], {"A": _Srv("A"), "B": _Srv("B")})
+    plugin.locals["B"]["commands_channel_id"] = "999"
+    _with_channel_server(plugin, plugin.bot.servers["B"])
+    name, err = plugin._resolve_server(_interaction(), None)
+    assert name is None and "can't be used in this channel" in err
