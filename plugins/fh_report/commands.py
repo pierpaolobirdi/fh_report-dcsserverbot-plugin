@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.2.8"
+FH_REPORT_RELEASE = "14.2.9"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -3373,8 +3373,14 @@ class Fh_Report(Plugin):
 
     async def _update_server(self, server, cfg: dict):
         """Read one instance's Foothold files (through server.node, so remote
-        agent nodes work) and post or edit its Discord embed.
+        agent nodes work) and post or edit its Discord embed. One update of a
+        server at a time: the loop and /fh_report update never overlap.
         """
+        locks = self.__dict__.setdefault("_update_locks", {})
+        async with locks.setdefault(_server_key(server), asyncio.Lock()):
+            await self._update_server_locked(server, cfg)
+
+    async def _update_server_locked(self, server, cfg: dict):
 
         instance_name = _server_key(server)     # node/instance: unique across the cluster
         hook_name = server.instance.name         # what the optional private hook has always received
@@ -4148,6 +4154,51 @@ class Fh_Report(Plugin):
             bnb=bnb, penalties=penalties,
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+
+    @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
+    @app_commands.describe(_server="Which server — only needed if more than one is configured.")
+    @app_commands.rename(_server="server")
+    async def update(self, interaction: discord.Interaction,
+                     _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        # See player()'s comment on why this is `_server` + rename.
+        await interaction.response.defer(ephemeral=True)
+        key, err = self._resolve_server(interaction, _server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        srv = self._server_by_key(key)
+        if srv is None:
+            await interaction.followup.send(
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                ephemeral=True)
+            return
+        if not self._is_admin(interaction, key):
+            await interaction.followup.send("❌ Only admins can refresh the report.", ephemeral=True)
+            return
+        cfg = self._merged_cfg(key)
+        name = self._public_server_name(key)
+        if not _updates_enabled(cfg):
+            await interaction.followup.send(
+                f"❌ The report of **{name}** is switched off (`enable_updates: false`).", ephemeral=True)
+            return
+        channel_id = _single_channel_id(cfg.get("channel_id"))
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else None
+        if channel is None:
+            await interaction.followup.send(
+                f"❌ **{name}** has no usable report channel (`channel_id` missing or not found).", ephemeral=True)
+            return
+        self._cycle_punishment = None        # fresh penalties, not the last cycle's
+        try:
+            await self._update_server(srv, cfg)
+        except Exception as e:
+            self.log.error(f"Fh_Report [{key}]: manual update failed: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ The update failed:\n```{e}```", ephemeral=True)
+            return
+        finally:
+            self._cycle_punishment = None
+        mid = self._message_ids.get(key)
+        link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
+        await interaction.followup.send(f"✅ Report of **{name}** updated.{link}", ephemeral=True)
 
     @fh_report.command(name="podium", description="Show who held a given daily-history position between two dates.")
     @app_commands.describe(
