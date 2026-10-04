@@ -485,12 +485,13 @@ DCS.otra:                      # no value of its own: uses DEFAULT's 300
 **How the intervals combine.** The plugin keeps one loop, and the **shortest interval in the file sets its beat** (60 s above). Every other server updates every whole number of beats, **rounded up**: the 300 s server every 5 beats, the 600 s one every 10. A server whose interval is not a multiple is rounded up, so with a beat of 60 s a server set to 100 s updates every 120 s. Use multiples of the shortest interval and you get exactly what you write. A server that appears later (a node registering after the bot starts) is updated at once.
 
 Things to know:
+- **Don't go below 60.** Foothold rewrites its save file about every 60 seconds (every 30 during the first moments after the mission starts), so a shorter interval only repeats reads of data that has not changed.
 - The shortest interval is the freshness limit of the whole file; no server updates faster than it.
 - The rotation of `report_layout` compositions and the daily reset follow each server's own rate: a server on 600 s can take up to ten minutes to show a reset.
 - An invalid value (`soon`, `0`, a negative number) in a block falls back to `DEFAULT`'s, with a warning once in the bot log.
 - It is read when the plugin loads, so reload the plugin (or restart the bot) after changing it.
 
-**Planned.** To cut the I/O further on large clusters, a small optional extension for the nodes is being considered. It would tell the Master when a server's Foothold file has changed, so the Master reads only then instead of on a timer. The plugin would stay on the Master and this per-server interval would remain the simple default; the extension would be an alternative the administrator chooses depending on the installation. It is not implemented yet.
+**Planned.** To cut the I/O further on large clusters, a small optional extension for the nodes is being considered. It would tell the Master when a server's Foothold file has changed, so the Master reads only then instead of on a timer. Since Foothold rewrites that file at most about once a minute, the extension would notify at most once a minute per server; the saving is mostly on servers whose mission is stopped (nothing changes, so nothing is read), and on those running with long intervals it would also bring fresher data. The plugin would stay on the Master and this per-server interval would remain the simple default; the extension would be an alternative the administrator chooses depending on the installation. It is not implemented yet.
 
 ---
 
