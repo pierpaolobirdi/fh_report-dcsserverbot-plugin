@@ -60,7 +60,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `admin` | `Admin` | Comma-separated Discord role name(s) and/or username(s) allowed to view other players' stats with `/fh_report player` |
 | `report_layout` | `R` | Which leaderboard tables to show, in what order, optionally rotating — see [Leaderboard](#leaderboard) |
 | `points_detail_D` / `points_detail_S` / `points_detail_R` | none | Extra data each table shows beyond its own value — see [Leaderboard](#leaderboard) |
-| `update_interval` | `300` | Seconds between embed refreshes. Can also be set inside a server's block for that server alone — see [Update interval per server](#update-interval-per-server-update_interval) |
+| `update_interval` | `300` | Seconds between embed refreshes. Not below `60`: Foothold saves about every 60 s, so shorter times gain nothing. Can also be set inside a server's block for that server alone — see [Update interval per server](#update-interval-per-server-update_interval) |
 | `daily_reset_hour` | `0:00` | Time (`HH:MM`, 24 h, e.g. `8:30`) when daily points reset, in the time zone of the server's Scheduler `timezone` (UTC without one) — see [Daily reset time](#daily-reset-time) |
 | `daily_reset_schedule` | — | Per-day reset time override (`HH:MM`, e.g. a different time on weekends) |
 | `show_map` | `true` | `false` = hide the mission's map on the second line of the embed title — see [Map in the title](#map-in-the-title-show_map) |

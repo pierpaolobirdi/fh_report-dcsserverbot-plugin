@@ -130,6 +130,8 @@
 #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
 #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
 #   update_interval  - Seconds between embed refreshes              (default: 300)
+#                          Not below 60: Foothold saves its file about every 60 s, so
+#                          shorter times gain nothing.
 #                          In DEFAULT it applies to every server. Written inside a server's
 #                          block it applies to that server alone and DEFAULT's is ignored
 #                          for it: a long interval saves reads on a remote node, a short
@@ -137,8 +139,6 @@
 #                          file sets the beat of the whole plugin; the others update every
 #                          whole number of beats, rounded up (beat 60 + a server with 100:
 #                          that one updates every 120). Use multiples of the shortest.
-#                          Foothold rewrites its save file about every 60 s, so a value
-#                          under 60 only repeats reads of unchanged data.
 #                          Only a RUNNING mission is refreshed: a paused, loading or stopped
 #                          server is skipped (its files do not change), apart from one
 #                          refresh each time its status changes and one when its daily
@@ -359,7 +359,7 @@
 DEFAULT:
   admin: Admin  # Comma-separated Discord role name(s) and/or username(s)
   report_layout: R  # Letters D/P/S/R, any order/subset — see header
-  update_interval: 300  # Seconds between embed refreshes
+  update_interval: 300  # Seconds between embed refreshes (not below 60: Foothold saves about every 60 s, shorter gains nothing)
   daily_reset_hour: 0:00  # HH:MM when daily points reset, in the server's Scheduler time zone (UTC without one)
 #  daily_reset_schedule:
 #    sat: 7:00
