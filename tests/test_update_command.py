@@ -89,3 +89,42 @@ def test_the_same_server_is_never_updated_twice_at_once():
         await asyncio.gather(plugin._update_server(srv, {}), plugin._update_server(srv, {}))
     asyncio.run(both())
     assert order == ["start", "end", "start", "end"]
+
+
+def _reply_delays(monkeypatch, ok, delete_fails=False):
+    """Seconds the reply waits before deleting itself, and whether it was deleted."""
+    waits, deleted = [], []
+
+    class Msg:
+        async def delete(self):
+            if delete_fails:
+                raise RuntimeError("gone")
+            deleted.append(True)
+
+    class FU:
+        async def send(self, text, ephemeral=None):
+            return Msg()
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+    monkeypatch.setattr(commands.asyncio, "sleep", fake_sleep)
+    plugin = make_plugin()
+    interaction = type("I", (), {"followup": FU()})()
+
+    async def go():
+        await plugin._reply_temporarily(interaction, "x", ok=ok)
+        await asyncio.gather(*plugin._temp_replies)
+    asyncio.run(go())
+    return waits, deleted
+
+
+def test_a_success_reply_removes_itself_after_5_seconds(monkeypatch):
+    assert _reply_delays(monkeypatch, ok=True) == ([5], [True])
+
+
+def test_any_other_reply_removes_itself_after_30_seconds(monkeypatch):
+    assert _reply_delays(monkeypatch, ok=False) == ([30], [True])
+
+
+def test_a_reply_that_cannot_be_deleted_is_not_an_error(monkeypatch):
+    assert _reply_delays(monkeypatch, ok=True, delete_fails=True) == ([5], [])

@@ -313,6 +313,7 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 - A server with `enable_updates: false` is not refreshed: the command says so.
 - If the `report_layout` rotates between compositions, a manual refresh advances it one step, like any other refresh.
 - It never runs at the same time as the automatic refresh of the same server.
+- The reply is private and removes itself: after 5 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
 
 ## `/fh_report player` — personal stats command
 

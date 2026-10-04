@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.2.9"
+FH_REPORT_RELEASE = "14.2.10"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4155,6 +4155,24 @@ class Fh_Report(Plugin):
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
+    async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False) -> None:
+        """Private reply that removes itself: after 5 s when it reports success,
+        after 30 s for anything else (errors, refusals), so the channel stays clean."""
+        message = await interaction.followup.send(text, ephemeral=True)
+        if message is None or not hasattr(message, "delete"):
+            return
+
+        async def remove():
+            await asyncio.sleep(5 if ok else 30)
+            try:
+                await message.delete()
+            except Exception:
+                pass            # already dismissed, or the interaction token expired
+        task = asyncio.get_running_loop().create_task(remove())
+        tasks = self.__dict__.setdefault("_temp_replies", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
     @app_commands.describe(_server="Which server — only needed if more than one is configured.")
     @app_commands.rename(_server="server")
@@ -4164,41 +4182,40 @@ class Fh_Report(Plugin):
         await interaction.response.defer(ephemeral=True)
         key, err = self._resolve_server(interaction, _server)
         if err:
-            await interaction.followup.send(err, ephemeral=True)
+            await self._reply_temporarily(interaction, err)
             return
         srv = self._server_by_key(key)
         if srv is None:
-            await interaction.followup.send(
-                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
-                ephemeral=True)
+            await self._reply_temporarily(interaction, 
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.")
             return
         if not self._is_admin(interaction, key):
-            await interaction.followup.send("❌ Only admins can refresh the report.", ephemeral=True)
+            await self._reply_temporarily(interaction, "❌ Only admins can refresh the report.")
             return
         cfg = self._merged_cfg(key)
         name = self._public_server_name(key)
         if not _updates_enabled(cfg):
-            await interaction.followup.send(
-                f"❌ The report of **{name}** is switched off (`enable_updates: false`).", ephemeral=True)
+            await self._reply_temporarily(interaction, 
+                f"❌ The report of **{name}** is switched off (`enable_updates: false`).")
             return
         channel_id = _single_channel_id(cfg.get("channel_id"))
         channel = self.bot.get_channel(int(channel_id)) if channel_id else None
         if channel is None:
-            await interaction.followup.send(
-                f"❌ **{name}** has no usable report channel (`channel_id` missing or not found).", ephemeral=True)
+            await self._reply_temporarily(interaction, 
+                f"❌ **{name}** has no usable report channel (`channel_id` missing or not found).")
             return
         self._cycle_punishment = None        # fresh penalties, not the last cycle's
         try:
             await self._update_server(srv, cfg)
         except Exception as e:
             self.log.error(f"Fh_Report [{key}]: manual update failed: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ The update failed:\n```{e}```", ephemeral=True)
+            await self._reply_temporarily(interaction, f"❌ The update failed:\n```{e}```")
             return
         finally:
             self._cycle_punishment = None
         mid = self._message_ids.get(key)
         link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
-        await interaction.followup.send(f"✅ Report of **{name}** updated.{link}", ephemeral=True)
+        await self._reply_temporarily(interaction, f"✅ Report of **{name}** updated.{link}", ok=True)
 
     @fh_report.command(name="podium", description="Show who held a given daily-history position between two dates.")
     @app_commands.describe(
