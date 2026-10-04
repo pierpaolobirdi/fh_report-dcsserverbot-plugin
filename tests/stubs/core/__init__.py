@@ -33,7 +33,13 @@ class Group:
 
 class utils:
     class ServerTransformer:
-        pass
+        @staticmethod
+        def is_admin(interaction):          # DCSServerBot: does the command require the DCS Admin role?
+            return False
+
+    @staticmethod
+    def check_roles(roles, member):
+        return False
 
     @staticmethod
     def print_ruler(ruler_length=34):

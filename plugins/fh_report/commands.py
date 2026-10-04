@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.1.38"
+FH_REPORT_RELEASE = "14.1.39"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -3531,6 +3531,23 @@ class Fh_Report(Plugin):
         raw = self.locals or {}
         return [k for k in raw.keys() if k != "DEFAULT"]
 
+    def _eligible_instances(self, interaction: discord.Interaction) -> list[str]:
+        """Configured instances the user can actually pick: the ones DCSServerBot
+        has registered (and shows to this user), which is what the `server`
+        option lists. A leftover or offline block in fh_report.yaml must not count
+        as a second server the user can't see."""
+        is_admin = _FHServerTransformer.is_admin(interaction)
+        out = []
+        for name in self._configured_instances():
+            srv = self._get_server_by_instance(name)
+            if srv is None or srv.status == Status.UNREGISTERED:
+                continue
+            if (is_admin and srv.locals.get("managed_by") and
+                    not utils.check_roles(srv.locals.get("managed_by"), interaction.user)):
+                continue
+            out.append(name)
+        return out
+
     def _get_server_by_instance(self, instance_name: str):
         """Find the DCSSB Server object matching a configured instance name."""
         for server in self.bot.servers.values():
@@ -3576,8 +3593,10 @@ class Fh_Report(Plugin):
         check. Returns (instance_name, error_message), exactly one None.
         server_param may be a Server (transformer), a public server name
         (autocomplete namespace) or None.
-        - Instance: with one configured it's always that one; with several the
-          `server` option is required (the channel is never used to guess).
+        - Instance: with one available (registered in DCSServerBot, so listed in
+          the `server` option) it's always that one; with several the `server`
+          option is required (the channel is never used to guess). Blocks of
+          servers that are not registered don't count: they can't be picked.
         - Channel: unrestricted unless commands_channel_id is set; then only the
           instance's channel_id or one listed in commands_channel_id.
         """
@@ -3585,8 +3604,10 @@ class Fh_Report(Plugin):
         if not configured:
             return None, "❌ Fh_Report has no servers configured."
 
-        if len(configured) == 1:
-            server_name = configured[0]
+        # Nothing registered yet (still starting up): fall back to the whole config.
+        available = self._eligible_instances(interaction) or configured
+        if len(available) == 1:
+            server_name = available[0]
         else:
             if not server_param:
                 return None, (

@@ -30,12 +30,16 @@
 #                                                 one of these
 #                           - WHETHER you must specify `server` on the
 #                             command — only needed if you have MORE THAN
-#                             ONE server configured at all (the channel is
+#                             ONE server available (configured here AND
+#                             registered in DCSServerBot, i.e. the ones the
+#                             `server` option lists; the channel is
 #                             never used to guess between several, since two
 #                             servers could end up sharing a
 #                             commands_channel_id by mistake). With exactly
-#                             one server configured, there's nothing to
-#                             guess and `server` is never asked for.
+#                             one server available, there's nothing to
+#                             guess and `server` is never asked for — a
+#                             leftover block of a server that is off or not
+#                             registered does not count.
 #                         Example:
 #                           commands_channel_id:
 #                             - 1234567890123456789
