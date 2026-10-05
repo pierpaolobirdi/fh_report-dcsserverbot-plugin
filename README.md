@@ -303,6 +303,18 @@ The daily card uses the same daily reset mechanism as daily leaderboard points (
 
 ---
 
+## `/fh_report update` — refresh the report now (admins)
+
+`/fh_report update` refreshes a server's report embed immediately, without waiting for the next cycle. It is for admins only (the roles or names in the `admin` option of that server's block) and it replies privately.
+
+It is most useful for a server whose mission is **paused or stopped**: the plugin does not refresh those on its own (see [Update interval per server](#update-interval-per-server-update_interval)), and this command reads the Foothold files as they are and updates the embed **without unpausing or starting anything**.
+
+- With several servers, use the `server` option; left empty it uses the server of the channel where you run it, like the other commands. `commands_channel_id` applies as usual.
+- A server with `enable_updates: false` is not refreshed: the command says so.
+- If the `report_layout` rotates between compositions, a manual refresh advances it one step, like any other refresh.
+- It never runs at the same time as the automatic refresh of the same server.
+- The reply is private and removes itself: after 5 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
+
 ## `/fh_report player` — personal stats command
 
 A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.
