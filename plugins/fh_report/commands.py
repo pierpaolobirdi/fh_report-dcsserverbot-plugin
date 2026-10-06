@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.3.0"
+FH_REPORT_RELEASE = "14.3.1"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1651,7 +1651,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                mission_status: str,
                                daily_stats: dict | None = None,
                                bnb: dict | None = None,
-                               penalties: dict | None = None) -> discord.Embed:
+                               penalties: dict | None = None,
+                               where: str | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
     No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
@@ -1770,7 +1771,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     embed.add_field(name="🖥️ __Mission__", value=mission_status, inline=False)
 
-    embed.set_footer(text=f"{_version_text()} · Read-only player report")
+    embed.set_footer(text=f"{_version_text(where)} · Read-only player report")
     return embed
 
 
@@ -1786,7 +1787,7 @@ _ROLE_TITLES = {
     "R": "🏆 __Pilot Leaderboard · by Rank__",
 }
 _ROLE_ICONS = {"D": "📅", "S": "📊", "R": "🏆"}
-_TABLE_MEDALS = ["🥇", "🥈", "🥉"] + ["🎖️"] * 50
+_TABLE_MEDALS = ["🥇", "🥈", "🥉"]          # the rest of the table all get 🎖️
 
 
 def _emit_table_field(embed: discord.Embed, title: str, icon: str,
@@ -1928,7 +1929,7 @@ def _render_layout_tables(
             display = strip_callsign(name) if strip_callsign_flag else name
             short_src = display if len(display) <= 22 else display[:20] + '..'
             short   = _safe_code_span(short_src)
-            medal   = data.get("custom_medal") or (_TABLE_MEDALS[i] if i < len(_TABLE_MEDALS) else "•")
+            medal   = data.get("custom_medal") or (_TABLE_MEDALS[i] if i < len(_TABLE_MEDALS) else "🎖️")
 
             s_pts        = data.get("session_points", 0)
             d_pts        = dp.get(name, 0)
@@ -2042,7 +2043,8 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 waypoint_map: dict | None = None,
                 name_to_ucid: dict | None = None,
                 map_name: str | None = None,
-                bnb: dict | None = None) -> discord.Embed:
+                bnb: dict | None = None,
+                where: str | None = None) -> discord.Embed:
     """Build the Discord embed from parsed Foothold data. `bnb` is
     {ucid: {"total", "day", "session"}} blue-on-blue counts from DCSSB. Display options
     are read from `cfg` (merged DEFAULT + instance block of fh_report.yaml)."""
@@ -2143,10 +2145,10 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
         punishment_points, daily_history, name_to_ucid,
     )
 
-    return _finish_embed(embed, cfg)
+    return _finish_embed(embed, cfg, where)
 
 
-def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
+def _finish_embed(embed: discord.Embed, cfg: dict, where: str | None = None) -> discord.Embed:
     """Closing ruler, footer and timestamp, then Discord's size limits."""
     campaign_name = cfg.get("campaign_name", "Foothold Campaign")
     # Footer reminder of /fh_report player — on unless explicitly disabled.
@@ -2164,7 +2166,7 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     except Exception:
         _ruler_name = "─" * 34
     embed.add_field(name="\u200b", value=_ruler_name, inline=False)
-    footer_lines = [_version_text()]
+    footer_lines = [_version_text(where)]
     if player_cmd_hint:
         footer_lines.append(player_cmd_hint)
     footer_lines.append(f"{campaign_name} • Updated automatically")
@@ -2173,9 +2175,10 @@ def _finish_embed(embed: discord.Embed, cfg: dict) -> discord.Embed:
     return _trim_embed(embed)
 
 
-def _version_text() -> str:
-    """How the version is written everywhere it shows (embed footers, log)."""
-    return f"Fh_Report Ver. {FH_REPORT_RELEASE}"
+def _version_text(where: str | None = None) -> str:
+    """How the version is written in the embed footers; `where` (M = the server runs
+    on the Master, N = on a remote node) is added only on a cluster of several nodes."""
+    return f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
 
 
 def _show_map(cfg: dict) -> bool:
@@ -2202,7 +2205,8 @@ def _embed_title(campaign_name: str, map_name: str | None) -> str:
 
 def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points_detail: dict,
                             punishment_points: dict | None = None,
-                            map_name: str | None = None) -> discord.Embed:
+                            map_name: str | None = None,
+                            where: str | None = None) -> discord.Embed:
     """Embed for an instance whose Foothold mission hasn't created its save
     file yet (new server, or campaign not started). Same title as the real
     report, so that message simply becomes the report once the save appears.
@@ -2218,7 +2222,7 @@ def build_not_started_embed(players: dict, cfg: dict, report_layout: str, points
     if players and "R" in (report_layout or "").upper():
         _render_layout_tables(embed, cfg, "R", points_detail, players, {}, False,
                               punishment_points, None)
-    return _finish_embed(embed, cfg)
+    return _finish_embed(embed, cfg, where)
 
 
 # ── Per-player identity (UCID-first) ──────────────────────────────────────────
@@ -3380,6 +3384,16 @@ class Fh_Report(Plugin):
         async with locks.setdefault(_server_key(server), asyncio.Lock()):
             await self._update_server_locked(server, cfg)
 
+    def _where_tag(self, server) -> str | None:
+        """M when the server runs on the Master's own node, N when on a remote node;
+        None unless the cluster has more than one node (a single node needs no tag)."""
+        try:
+            if len(self.bot.node.all_nodes) <= 1:
+                return None
+        except Exception:
+            return None
+        return "N" if getattr(server, "is_remote", False) else "M"
+
     async def _update_server_locked(self, server, cfg: dict):
 
         instance_name = _server_key(server)     # node/instance: unique across the cluster
@@ -3551,6 +3565,7 @@ class Fh_Report(Plugin):
             name_to_ucid      = name_to_ucid if "P" in current_layout else None,
             map_name          = map_name,
             bnb               = bnb,
+            where             = self._where_tag(server),
         )
 
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
@@ -3586,7 +3601,8 @@ class Fh_Report(Plugin):
                 self._cycle_punishment = await self._fetch_punishment_points()
             punishment_points = self._cycle_punishment
         layout, detail = self._resolve_report_layout(instance_name, cfg)
-        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points, map_name)
+        embed = build_not_started_embed(players, cfg, layout, detail, punishment_points, map_name,
+                                           where=self._where_tag(server))
         await self._publish_embed(instance_name, channel, channel_id, cfg, embed)
 
     async def _publish_embed(self, instance_name: str, channel, channel_id, cfg: dict,
@@ -4151,7 +4167,7 @@ class Fh_Report(Plugin):
             player_name=match, data=data, ucid=ucid, last_seen=last_seen,
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
             mission_status=mission_status, daily_stats=d_stats,
-            bnb=bnb, penalties=penalties,
+            bnb=bnb, penalties=penalties, where=self._where_tag(srv),
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
@@ -4295,7 +4311,7 @@ class Fh_Report(Plugin):
             color=0xF1C40F, timestamp=datetime.now(timezone.utc)
         )
         _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"{_version_text()} · Read-only historical report")
+        embed.set_footer(text=f"{_version_text(self._where_tag(srv))} · Read-only historical report")
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 

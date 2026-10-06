@@ -182,3 +182,37 @@ def test_pilot_limit_resolution_order():
     assert commands._pilot_cap(cfg, "S") == 3             # its own
     assert commands._pilot_cap(cfg, "D") is None          # its own 0 = no limit, ignoring max_pilots
     assert commands._pilot_cap({"max_pilots_R": "x", "max_pilots": 5}, "R") is None   # a bad own value is not papered over
+
+
+def _tag(nodes, remote):
+    from conftest import make_plugin
+    srv = type("S", (), {"is_remote": remote})()
+    node = type("N", (), {"all_nodes": {f"n{i}": None for i in range(nodes)}})()
+    return make_plugin(bot=type("B", (), {"node": node})())._where_tag(srv)
+
+
+def test_footer_says_where_the_server_runs_only_on_a_cluster():
+    assert _tag(1, False) is None and _tag(1, True) is None            # a single node needs no tag
+    assert _tag(2, False) == "M" and _tag(3, True) == "N"
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+
+
+def test_footer_tag_reaches_every_embed():
+    cfg, zones = {"campaign_name": "C"}, {"blue": [], "red": [], "neutral": 0}
+    assert commands.build_not_started_embed({}, cfg, "R", {}, where="N").footer.text.splitlines()[0].endswith("• N")
+    assert commands.build_embed(zones, {}, cfg, where="M").footer.text.splitlines()[0].endswith("• M")
+    assert "•" not in commands.build_embed(zones, {}, cfg).footer.text.splitlines()[0]
+    player = commands._build_player_report_embed("P", {"credits": 1}, None, None, 0, 0, {}, "ok", where="N")
+    assert player.footer.text.startswith(commands._version_text("N") + " · ")
+
+
+def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
+    import discord
+    players = {f"P{i:03d}": {"credits": 100000 - i, "ucid": f"u{i}"} for i in range(70)}
+    embed = discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"max_pilots": 0, "show_all_pilots": True}, "R", {}, players, {}, False, None, None, None)
+    lines = [l for f in embed.fields for l in f.value.splitlines()
+             if l.startswith(("🥇", "🥈", "🥉", "🎖", "•"))]
+    assert len(lines) == 70 and not any(l.startswith("•") for l in lines)       # past the 53rd too
+    assert [l[0] for l in lines[:3]] == ["🥇", "🥈", "🥉"] and all(l.startswith("🎖") for l in lines[3:])

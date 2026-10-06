@@ -303,6 +303,10 @@ The daily card uses the same daily reset mechanism as daily leaderboard points (
 
 ---
 
+## Where a server runs (footer tag)
+
+On a cluster of **more than one node**, the footer of every embed (the report, `/fh_report player` and `/fh_report podium`) adds a letter after the version, so you can see where each server works: `Fh_Report Ver. 14.3.1 • M` means the server runs on the **Master**, `• N` that it runs on a remote **node**. With a single node there is no tag.
+
 ## `/fh_report update` — refresh the report now (admins)
 
 `/fh_report update` refreshes a server's report embed immediately, without waiting for the next cycle. It is for admins only (the roles or names in the `admin` option of that server's block) and it replies privately.
