@@ -191,8 +191,7 @@ def _tag(nodes, remote):
     return make_plugin(bot=type("B", (), {"node": node})())._where_tag(srv)
 
 
-def test_footer_says_where_the_server_runs_only_on_a_cluster(monkeypatch):
-    monkeypatch.setattr(commands, "WHERE_TAG_ALWAYS", False)
+def test_footer_says_where_the_server_runs_only_on_a_cluster():
     assert _tag(1, False) is None and _tag(1, True) is None            # a single node needs no tag
     assert _tag(2, False) == "M" and _tag(3, True) == "N"
     assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
@@ -217,11 +216,3 @@ def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
              if l.startswith(("🥇", "🥈", "🥉", "🎖", "•"))]
     assert len(lines) == 70 and not any(l.startswith("•") for l in lines)       # past the 53rd too
     assert [l[0] for l in lines[:3]] == ["🥇", "🥈", "🥉"] and all(l.startswith("🎖") for l in lines[3:])
-
-
-def test_while_the_test_switch_is_on_the_tag_shows_on_any_setup(monkeypatch):
-    from conftest import make_plugin
-    monkeypatch.setattr(commands, "WHERE_TAG_ALWAYS", True)
-    plugin = make_plugin(bot=type("B", (), {})())            # no node information at all
-    assert plugin._where_tag(type("S", (), {"is_remote": False})()) == "M"
-    assert plugin._where_tag(type("S", (), {"is_remote": True})()) == "N"

@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.3.2"
+FH_REPORT_RELEASE = "14.3.3"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2175,11 +2175,6 @@ def _finish_embed(embed: discord.Embed, cfg: dict, where: str | None = None) -> 
     return _trim_embed(embed)
 
 
-# TEST SWITCH: True shows the M / N footer tag on any setup; set it to False to show it
-# only on a cluster of more than one node (the intended behaviour).
-WHERE_TAG_ALWAYS = True
-
-
 def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
     on the Master, N = on a remote node) is added only on a cluster of several nodes."""
@@ -3392,12 +3387,11 @@ class Fh_Report(Plugin):
     def _where_tag(self, server) -> str | None:
         """M when the server runs on the Master's own node, N when on a remote node;
         None unless the cluster has more than one node (a single node needs no tag)."""
-        if not WHERE_TAG_ALWAYS:
-            try:
-                if len(self.bot.node.all_nodes) <= 1:
-                    return None
-            except Exception:
+        try:
+            if len(self.bot.node.all_nodes) <= 1:
                 return None
+        except Exception:
+            return None
         return "N" if getattr(server, "is_remote", False) else "M"
 
     async def _update_server_locked(self, server, cfg: dict):
