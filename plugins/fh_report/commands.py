@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.1"
+FH_REPORT_RELEASE = "14.4.2"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1125,8 +1125,8 @@ def _safe_code_span(text: str) -> str:
 def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 78) -> str:
     """Shorten `rank` from the tail (adding '..') just enough to keep the
     visible line (prefix + rank + suffix, Markdown excluded) under
-    `threshold` characters on Discord desktop. Works for hook-supplied
-    custom ranks too, which a fixed abbreviation table couldn't.
+    `threshold` characters on Discord desktop. Works for custom ranks
+    too, which a fixed abbreviation table couldn't.
     """
     other_len = len(prefix) + len(suffix)
     full_len  = other_len + len(rank)
@@ -1235,8 +1235,8 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     p_name = players_by_base.get(strip_callsign(name))
                     if p_name is not None:
                         current_name, player_data = p_name, players[p_name]
-                # Older days show the player's own medal when the hook gives one;
-                # the latest day keeps the default medals and never looks at it.
+                # Older days show the player's own medal when it has one; the
+                # latest day always keeps the default medals.
                 if not is_latest_day and player_data and player_data.get("custom_medal"):
                     marker = player_data["custom_medal"]
                 # Current name if the player could be identified; otherwise
@@ -2118,8 +2118,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     drs  = daily_stats_raw or {}
 
     # Attach session points / raw session stats / raw daily stats to each
-    # player (hook-provided values take priority). Exact name first, then
-    # the first callsign-stripped match.
+    # player. Exact name first, then the first callsign-stripped match.
     cs_idx, srs_idx, drs_idx = _stripped_index(cs), _stripped_index(srs), _stripped_index(drs)
     for name, data in players.items():
         base = strip_callsign(name)
@@ -2494,7 +2493,6 @@ class _FHServerTransformer(utils.ServerTransformer):
         return out
 
 
-# ── Optional private hook ─────────────────────────────────────────────────────
 def _load_hook():
     hook_path = os.path.join(os.path.dirname(__file__), "fh_hook.py")
     if not os.path.exists(hook_path):
@@ -3401,7 +3399,7 @@ class Fh_Report(Plugin):
     async def _update_server_locked(self, server, cfg: dict):
 
         instance_name = _server_key(server)     # node/instance: unique across the cluster
-        hook_name = server.instance.name         # what the optional private hook has always received
+        hook_name = server.instance.name
 
         if not _updates_enabled(cfg):
             # Switched-off instance (or a duplicate install elsewhere in the
@@ -3465,7 +3463,6 @@ class Fh_Report(Plugin):
             self.log.error(f"Fh_Report [{instance_name}]: error parsing data: {e}")
             return
 
-        # Optional private hook — post-processes players dict
         if _HAS_HOOK:
             try:
                 players = _fh_hook.post_process(players, cfg, hook_name, campaign_stats)

@@ -218,7 +218,7 @@ def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
     assert [l[0] for l in lines[:3]] == ["🥇", "🥈", "🥉"] and all(l.startswith("🎖") for l in lines[3:])
 
 
-def test_older_podium_days_use_the_hook_medal_but_the_latest_day_never_does():
+def test_older_podium_days_use_the_players_own_medal_but_the_latest_day_never_does():
     players = {"Ann": {"credits": 1000, "ucid": "ua", "custom_medal": "🦅"},
                "Bob": {"credits": 900, "ucid": "ub"}}
     history = {"2026-08-02": [{"top": [{"name": "Ann", "points": 50, "ucid": "ua"},
@@ -228,6 +228,6 @@ def test_older_podium_days_use_the_hook_medal_but_the_latest_day_never_does():
                                        {"name": "Ghost", "points": 10}]}]}
     text = commands._build_podium_table(history, players, days=0, top=3)
     latest, older = text.split("\n")[:3], text.split("\n")[3:]
-    assert latest[1].startswith("🥇") and latest[2].startswith("🥈")        # latest day: defaults, hook ignored
-    assert older[1].startswith("🦅")                                       # 1st place of an older day: hook medal
-    assert older[2].startswith("🥈") and older[3].startswith("🥉")          # no hook medal / unknown player: defaults
+    assert latest[1].startswith("🥇") and latest[2].startswith("🥈")
+    assert older[1].startswith("🦅")
+    assert older[2].startswith("🥈") and older[3].startswith("🥉")
