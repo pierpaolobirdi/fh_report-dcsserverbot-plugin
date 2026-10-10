@@ -7,10 +7,13 @@ with front-line status and pilot leaderboard. No database required.
 from __future__ import annotations
 
 import asyncio
+import base64
 import calendar
 import functools
 import importlib.util
 import glob
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -39,7 +42,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.6"
+FH_REPORT_RELEASE = "14.4.7"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2676,6 +2679,11 @@ UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
 UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
                  "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
 UPGRADE_MAX_BYTES = 25 * 1024 * 1024
+# Updating from the development branch asks for a password. Only its scrypt hash is kept here:
+# "scrypt$<n>$<r>$<p>$<salt base64>$<hash base64>". Empty = the development option is off.
+UPGRADE_DEV_PASSWORD_HASH = ""
+UPGRADE_DEV_MAX_FAILS = 3
+UPGRADE_DEV_LOCK_SECONDS = 600
 
 
 class UpgradeError(Exception):
@@ -2707,7 +2715,24 @@ def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
     return best
 
 
-def _read_release_zip(data: bytes, version_text: str) -> dict[str, bytes]:
+def _dev_password_ok(password: str, stored: str) -> bool:
+    """True if `password` matches the stored scrypt hash (constant-time comparison)."""
+    try:
+        scheme, n, r, p, salt, expected = stored.split("$")
+        want = base64.b64decode(expected)
+        got = hashlib.scrypt(password.encode(), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
+                             maxmem=128 * 1024 * 1024, dklen=len(want))
+        return scheme == "scrypt" and hmac.compare_digest(got, want)
+    except Exception:
+        return False
+
+
+def _zip_version(files: dict[str, bytes]) -> str | None:
+    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
+    return m.group(1).decode() if m else None
+
+
+def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str, bytes]:
     """The plugin's files out of GitHub's zip of a tag (everything sits under one folder named
     after the repository and commit). Only the expected files are taken, the rest of the
     repository is ignored; every .py must compile and commands.py must announce the tag's version."""
@@ -2731,8 +2756,8 @@ def _read_release_zip(data: bytes, version_text: str) -> dict[str, bytes]:
                 compile(content, name, "exec")
             except SyntaxError as e:
                 raise UpgradeError(f"{name} does not compile ({e.msg}, line {e.lineno}).")
-    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
-    if not m or m.group(1).decode() != version_text:
+    found = _zip_version(files)
+    if not found or (version_text is not None and found != version_text):
         raise UpgradeError("The version inside the release does not match its tag.")
     return files
 
@@ -2775,38 +2800,53 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
     return backup
 
 
-def _upgrade_embed(current_text: str, release: dict) -> discord.Embed:
-    embed = discord.Embed(title="⬆️ Fh_Report — new release available",
-                          description=(release["notes"].strip()[:900] or "(no release notes)"),
-                          color=0xF39C12 if release["prerelease"] else 0x2ECC71)
+def _upgrade_embed(current_text: str, release: dict | None, dev: dict | None, notes: list[str]) -> discord.Embed:
+    embed = discord.Embed(title="⬆️ Fh_Report — update",
+                          description=((release or {}).get("notes", "").strip()[:900] or None),
+                          color=0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71)
     embed.add_field(name="Installed", value=f"Ver. {current_text}", inline=True)
-    embed.add_field(name="Available", value=f"Ver. {release['text']}", inline=True)
-    if release["prerelease"]:
+    if release:
+        embed.add_field(name="Release", value=f"Ver. {release['text']}" + (" ⚠️ pre-release" if release["prerelease"] else ""),
+                        inline=True)
+    if dev:
+        embed.add_field(name="Development branch", value=f"Ver. {dev['text']} ⚠️", inline=True)
+    if release and release["prerelease"]:
         embed.add_field(name="⚠️ PRE-RELEASE",
-                        value="This is a pre-release: it may be unstable. Update only if you want to test it.",
+                        value="This release is a pre-release: it may be unstable. Update only if you want to test it.",
                         inline=False)
+    if dev:
+        embed.add_field(name="⚠️ DEVELOPMENT BRANCH",
+                        value="Work in progress: it may be unstable. Updating to it asks for a password.", inline=False)
+    for note in notes:
+        embed.add_field(name="ℹ️", value=note[:500], inline=False)
     embed.add_field(name="What happens",
-                    value="The files are replaced (a copy of the old ones is kept), the configuration is "
-                          "migrated and DCSServerBot **restarts**.", inline=False)
+                    value="The files are replaced (a copy of the old ones is kept) and the configuration is "
+                          "migrated. Afterwards you choose whether to restart DCSServerBot.", inline=False)
     return embed
 
 
 class _UpgradeView(discord.ui.View):
-    """Update / Cancel buttons; only the admin who ran the command can press them."""
+    """Update to release / Update to development / Cancel; only the admin who ran the command can press."""
 
-    def __init__(self, plugin, user_id: int, release: dict):
-        super().__init__(timeout=60)
-        self.plugin, self.user_id, self.release = plugin, user_id, release
+    def __init__(self, plugin, user_id: int, release: dict | None, dev: dict | None):
+        super().__init__(timeout=120)
+        self.plugin, self.user_id, self.release, self.dev = plugin, user_id, release, dev
         self.interaction = None          # the /fh_report upgrade interaction, set once the offer is sent
+        self.update_release.disabled = release is None
+        self.update_dev.disabled = dev is None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return getattr(interaction.user, "id", None) == self.user_id
 
-    @discord.ui.button(label="Update and restart", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button):
+    @discord.ui.button(label="Update to release", style=discord.ButtonStyle.success)
+    async def update_release(self, interaction: discord.Interaction, button):
         self.stop()
         await interaction.response.edit_message(view=None)
         await self.plugin._upgrade_run(interaction, self.release)
+
+    @discord.ui.button(label="Update to development branch", style=discord.ButtonStyle.danger)
+    async def update_dev(self, interaction: discord.Interaction, button):
+        await interaction.response.send_modal(_DevPasswordModal(self.plugin, self))
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button):
@@ -2819,6 +2859,56 @@ class _UpgradeView(discord.ui.View):
         except Exception:
             pass
 
+
+class _DevPasswordModal(discord.ui.Modal, title="Development branch"):
+    """Asks for the password before installing from the development branch."""
+    password = discord.ui.TextInput(label="Password", style=discord.TextStyle.short, max_length=200)
+
+    def __init__(self, plugin, view: _UpgradeView):
+        super().__init__()
+        self.plugin, self.view = plugin, view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        ok, message = self.plugin._dev_password_check(interaction.user.id, str(self.password))
+        if not ok:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        self.view.stop()
+        await interaction.response.edit_message(view=None)
+        await self.plugin._upgrade_run(interaction, self.view.dev)
+
+
+class _RestartView(discord.ui.View):
+    """After a successful update: restart DCSServerBot now, or later."""
+
+    def __init__(self, plugin, user_id: int, text: str):
+        super().__init__(timeout=600)
+        self.plugin, self.user_id, self.text = plugin, user_id, text
+        self.interaction = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Restart now", style=discord.ButtonStyle.danger)
+    async def restart_now(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="🔄 Restarting DCSServerBot now...", view=None)
+        await asyncio.sleep(1)
+        await self.plugin.bot.node.restart()
+
+    @discord.ui.button(label="Later", style=discord.ButtonStyle.secondary)
+    async def later(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.", view=None)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(
+                content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.",
+                view=None)
+        except Exception:
+            pass
 
 
 class Fh_Report(Plugin):
@@ -4356,6 +4446,35 @@ class Fh_Report(Plugin):
                                         as_json=True)
         return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
 
+    async def _upgrade_lookup_dev(self) -> dict | None:
+        """The development branch, if its version is above the installed one (None if not). The zip is
+        downloaded and checked now, so what is offered is exactly what would be installed."""
+        data = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/zipball/dev")
+        text = _zip_version(_read_release_zip(data))
+        version = _release_version(text)
+        if not version or version <= (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+            return None
+        return {"channel": "dev", "version": version, "text": text, "tag": "dev", "prerelease": True,
+                "notes": "", "data": data}
+
+    def _dev_password_check(self, user_id: int, password: str, now: float | None = None) -> tuple[bool, str]:
+        """(ok, message for the user). Three wrong passwords lock that user for ten minutes."""
+        now = time.time() if now is None else now
+        fails = self.__dict__.setdefault("_dev_fails", {})
+        count, locked_until = fails.get(user_id, (0, 0.0))
+        if locked_until > now:
+            return False, f"❌ Too many wrong passwords. Try again in {int((locked_until - now) // 60) + 1} minute(s)."
+        if UPGRADE_DEV_PASSWORD_HASH and _dev_password_ok(password, UPGRADE_DEV_PASSWORD_HASH):
+            fails.pop(user_id, None)
+            return True, ""
+        count += 1
+        self.log.warning(f"Fh_Report: wrong development-branch password from user {user_id} ({count}).")
+        if count >= UPGRADE_DEV_MAX_FAILS:
+            fails[user_id] = (0, now + UPGRADE_DEV_LOCK_SECONDS)
+            return False, f"❌ Wrong password. Locked for {UPGRADE_DEV_LOCK_SECONDS // 60} minutes."
+        fails[user_id] = (count, 0.0)
+        return False, f"❌ Wrong password. {UPGRADE_DEV_MAX_FAILS - count} attempt(s) left."
+
     def _run_migration(self, migrate_source: bytes) -> str:
         """Run the release's migrate_config.py on this installation's fh_report.yaml.
         Returns "" when fine, else a short note (the config is left as it was)."""
@@ -4374,17 +4493,21 @@ class Fh_Report(Plugin):
         return "" if res.returncode == 0 else "configuration migration reported an error (your file is unchanged)"
 
     async def _upgrade_run(self, interaction: discord.Interaction, release: dict) -> None:
-        """Download, verify, install, migrate and restart, telling the admin each step."""
+        """Download (or take the checked dev zip), install and migrate, telling the admin each step,
+        then ask whether to restart."""
         if self.__dict__.get("_upgrading"):
             await interaction.followup.send("An update is already running.", ephemeral=True)
             return
         self.__dict__["_upgrading"] = True
 
-        async def say(text: str) -> None:
-            await interaction.edit_original_response(content=text, embed=None, view=None)
+        async def say(text: str, view=None) -> None:
+            await interaction.edit_original_response(content=text, embed=None, view=view)
         try:
-            await say("⏳ Downloading the release...")
-            data = await self._http_get(release["zip_url"])
+            if release.get("data") is None:
+                await say("⏳ Downloading the release...")
+                data = await self._http_get(release["zip_url"])
+            else:
+                data = release["data"]
             await say("🔎 Checking the files...")
             files = _read_release_zip(data, release["text"])
             await say("📦 Installing...")
@@ -4400,11 +4523,12 @@ class Fh_Report(Plugin):
             self.log.error(f"Fh_Report: update failed: {e}", exc_info=True)
             await say(f"❌ Update failed, the previous version is still in place: {e}")
             return
-        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']}, restarting DCSServerBot.")
+        self.__dict__["_upgrading"] = False
+        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']} (restart pending).")
+        view = _RestartView(self, interaction.user.id, release["text"])
+        view.interaction = interaction
         await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
-                  + " Restarting DCSServerBot now...")
-        await asyncio.sleep(1)
-        await self.bot.node.restart()
+                  + "\nDo you want to restart DCSServerBot now so the update takes effect?", view=view)
 
     async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False) -> None:
         """Private reply that removes itself: after 5 s when it reports success,
@@ -4424,26 +4548,31 @@ class Fh_Report(Plugin):
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
-    @fh_report.command(name="upgrade", description="Admin only: update the plugin to the newest GitHub release and restart the bot.")
+    @fh_report.command(name="upgrade", description="Admin only: update the plugin from GitHub (release or development branch).")
     @utils.app_has_role("Admin")
     async def upgrade(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        release, dev, notes = None, None, []
         try:
             release = await self._upgrade_lookup()
-        except UpgradeError as e:
-            await interaction.followup.send(f"❌ Could not check for updates: {e}", ephemeral=True)
-            return
         except Exception as e:
-            self.log.error(f"Fh_Report: update check failed: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ Could not check for updates: {e}", ephemeral=True)
+            self.log.error(f"Fh_Report: release check failed: {e}", exc_info=not isinstance(e, UpgradeError))
+            notes.append(f"Could not check the releases: {e}")
+        if UPGRADE_DEV_PASSWORD_HASH:
+            try:
+                dev = await self._upgrade_lookup_dev()
+            except Exception as e:
+                self.log.error(f"Fh_Report: development-branch check failed: {e}", exc_info=not isinstance(e, UpgradeError))
+                notes.append(f"Could not check the development branch: {e}")
+        if release is None and dev is None:
+            text = (f"❌ {' '.join(notes)}" if notes else
+                    f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
+            await interaction.followup.send(text, ephemeral=True)
             return
-        if release is None:
-            await interaction.followup.send(f"✅ You already have the newest release (Ver. {FH_REPORT_RELEASE}).",
-                                            ephemeral=True)
-            return
-        view = _UpgradeView(self, interaction.user.id, release)
+        view = _UpgradeView(self, interaction.user.id, release, dev)
         view.interaction = interaction
-        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release), view=view, ephemeral=True)
+        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release, dev, notes),
+                                        view=view, ephemeral=True)
 
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
     @app_commands.describe(_server="Which server — only needed if more than one is configured.")

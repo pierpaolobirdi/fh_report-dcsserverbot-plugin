@@ -58,10 +58,10 @@ def test_drafts_and_releases_without_a_zip_are_skipped():
 def test_a_prerelease_is_offered_and_flagged():
     got = commands._pick_release([_rel("v.14.9.0", pre=True), _rel("v.14.8.0")], (14, 4, 3))
     assert got["text"] == "14.9.0" and got["prerelease"] is True
-    embed = commands._upgrade_embed("14.4.3", got)
+    embed = commands._upgrade_embed("14.4.3", got, None, [])
     assert any("PRE-RELEASE" in f.name for f in embed.fields)
     stable = commands._pick_release([_rel("v.14.8.0")], (14, 4, 3))
-    assert not any("PRE-RELEASE" in f.name for f in commands._upgrade_embed("14.4.3", stable).fields)
+    assert not any("PRE-RELEASE" in f.name for f in commands._upgrade_embed("14.4.3", stable, None, []).fields)
 
 
 # ── the zip ──────────────────────────────────────────────────────────────────────
@@ -134,21 +134,46 @@ class _Followup:
         self.sent.append((content, embed, view))
 
 
-class _Interaction:
-    def __init__(self):
-        self.followup, self.edits = _Followup(), []
-        self.user = type("U", (), {"id": 7})()
-        self.response = type("R", (), {"defer": staticmethod(self._defer)})()
+class _Response:
+    def __init__(self, log):
+        self.log = log
 
-    async def _defer(self, ephemeral=None):
+    async def defer(self, ephemeral=None):
         pass
 
+    async def edit_message(self, content=None, embed=None, view=None):
+        self.log.append(("edit_message", content))
+
+    async def send_message(self, content=None, ephemeral=None):
+        self.log.append(("send_message", content))
+
+    async def send_modal(self, modal):
+        self.log.append(("send_modal", modal))
+
+
+class _Interaction:
+    def __init__(self, user_id=7):
+        self.followup, self.edits, self.log = _Followup(), [], []
+        self.user = type("U", (), {"id": user_id})()
+        self.response = _Response(self.log)
+
     async def edit_original_response(self, content=None, embed=None, view=None):
-        self.edits.append(content)
+        self.edits.append((content, view))
 
 
-def _plugin(releases, blobs, tmp_path, monkeypatch):
+PASSWORD = "correct horse battery staple"
+
+
+def _hash(password, salt=b"0123456789abcdef", n=1024):
+    import base64
+    import hashlib
+    h = hashlib.scrypt(password.encode(), salt=salt, n=n, r=8, p=1, maxmem=128 * 1024 * 1024, dklen=32)
+    return f"scrypt${n}$8$1${base64.b64encode(salt).decode()}${base64.b64encode(h).decode()}"
+
+
+def _plugin(releases, blobs, tmp_path, monkeypatch, dev_zip=None, with_password=True):
     monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "14.4.3")
+    monkeypatch.setattr(commands, "UPGRADE_DEV_PASSWORD_HASH", _hash(PASSWORD) if with_password else "")
     plugin = make_plugin(node=type("N", (), {"config_dir": str(tmp_path / "config")})())
     restarted = []
 
@@ -159,6 +184,10 @@ def _plugin(releases, blobs, tmp_path, monkeypatch):
     async def http(url, as_json=False):
         if as_json:
             return releases
+        if url.endswith("/zipball/dev"):
+            if dev_zip is None:
+                raise commands.UpgradeError("GitHub answered 404.")
+            return dev_zip
         return blobs[url]
     plugin._http_get = http
     return plugin, restarted
@@ -171,46 +200,147 @@ def _run_command(plugin):
 
 
 def test_up_to_date_says_so(tmp_path, monkeypatch):
-    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch)
-    assert "newest release" in _run_command(plugin).followup.sent[0][0]
+    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.4.3"))
+    assert "newest version" in _run_command(plugin).followup.sent[0][0]
 
 
-def test_a_new_release_is_offered_with_buttons_for_the_admin_only(tmp_path, monkeypatch):
-    plugin, _ = _plugin([_rel("v.14.9.0", pre=True)], {}, tmp_path, monkeypatch)
+def test_a_newer_release_and_a_newer_dev_give_two_buttons_for_the_admin_only(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
     content, embed, view = _run_command(plugin).followup.sent[0]
-    assert content is None and any("14.9.0" in f.value for f in embed.fields)
-    assert asyncio.run(view.interaction_check(type("I", (), {"user": type("U", (), {"id": 7})()})())) is True
-    assert asyncio.run(view.interaction_check(type("I", (), {"user": type("U", (), {"id": 8})()})())) is False
+    assert content is None and view.update_release.disabled is False and view.update_dev.disabled is False
+    names = {f.name: f.value for f in embed.fields}
+    assert "14.9.0" in names["Release"] and "14.9.5" in names["Development branch"] and "⚠️ DEVELOPMENT BRANCH" in names
+    ok = type("I", (), {"user": type("U", (), {"id": 7})()})()
+    other = type("I", (), {"user": type("U", (), {"id": 8})()})()
+    assert asyncio.run(view.interaction_check(ok)) is True and asyncio.run(view.interaction_check(other)) is False
 
 
-def _confirm(plugin, release):
-    interaction = _Interaction()
+def test_only_what_is_newer_gets_an_enabled_button(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
+    view = _run_command(plugin).followup.sent[0][2]
+    assert view.update_release.disabled is True and view.update_dev.disabled is False
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.4.3"))
+    view = _run_command(plugin).followup.sent[0][2]
+    assert view.update_release.disabled is False and view.update_dev.disabled is True
+
+
+def test_without_a_dev_password_the_dev_branch_is_not_even_checked(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"), with_password=False)
+    _, embed, view = _run_command(plugin).followup.sent[0]
+    assert view.update_dev.disabled is True and not any(f.name == "Development branch" for f in embed.fields)
+
+
+def test_a_broken_dev_branch_is_reported_but_the_release_stays_available(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=None)
+    _, embed, view = _run_command(plugin).followup.sent[0]
+    assert view.update_release.disabled is False and view.update_dev.disabled is True
+    assert any("development branch" in f.value for f in embed.fields)
+
+
+# ── the dev password ──────────────────────────────────────────────────────────────
+
+def test_the_stored_hash_accepts_only_the_right_password():
+    stored = _hash(PASSWORD)
+    assert commands._dev_password_ok(PASSWORD, stored) and PASSWORD not in stored
+    assert not commands._dev_password_ok("wrong", stored) and not commands._dev_password_ok("", stored)
+    assert not commands._dev_password_ok(PASSWORD, "") and not commands._dev_password_ok(PASSWORD, "garbage")
+
+
+def test_three_wrong_passwords_lock_the_user_for_ten_minutes(tmp_path, monkeypatch):
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    check = lambda pw, now: plugin._dev_password_check(7, pw, now)           # noqa: E731
+    assert check("a", 1000) == (False, "❌ Wrong password. 2 attempt(s) left.")
+    assert check("b", 1001) == (False, "❌ Wrong password. 1 attempt(s) left.")
+    assert "Locked for 10 minutes" in check("c", 1002)[1]
+    ok, msg = check(PASSWORD, 1100)                                           # right password, but locked
+    assert not ok and "Too many" in msg
+    assert check(PASSWORD, 1002 + 601) == (True, "")                          # lock over
+    assert check("a", 5000)[1].endswith("2 attempt(s) left.")                 # and the counter started again
+    assert plugin._dev_password_check(8, "x", 1000)[1].endswith("2 attempt(s) left.")   # other users unaffected
+
+
+def test_a_failed_password_never_reaches_the_log(tmp_path, monkeypatch, caplog):
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    with caplog.at_level("WARNING", logger="fh_report.tests"):
+        plugin._dev_password_check(7, "super-secret-guess", 1000)
+    assert caplog.records and "super-secret-guess" not in caplog.text
+
+
+# ── installing and restarting ──────────────────────────────────────────────────────
+
+def _confirm(plugin, release, user_id=7):
+    interaction = _Interaction(user_id)
     asyncio.run(plugin._upgrade_run(interaction, release))
     return interaction
 
 
-def test_confirming_installs_migrates_and_restarts(tmp_path, monkeypatch):
+def test_a_release_update_installs_migrates_and_then_asks_about_the_restart(tmp_path, monkeypatch):
     d = _folder(tmp_path)
     monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
-    data = _zip()
     rel = commands._pick_release([_rel("v.14.9.0")], (14, 4, 3))
-    plugin, restarted = _plugin([], {rel["zip_url"]: data}, tmp_path, monkeypatch)
+    plugin, restarted = _plugin([], {rel["zip_url"]: _zip()}, tmp_path, monkeypatch)
     plugin._run_migration = lambda src: ""
     interaction = _confirm(plugin, rel)
-    assert "14.9.0" in (d / "commands.py").read_text() and restarted == [True]
-    assert any("Restarting" in (e or "") for e in interaction.edits)
+    text, view = interaction.edits[-1]
+    assert "14.9.0" in (d / "commands.py").read_text()
+    assert "Updated to Ver. 14.9.0" in text and "restart" in text and restarted == []     # asked, not restarted
+    assert isinstance(view, commands._RestartView)
 
 
-def test_a_broken_release_installs_nothing_and_does_not_restart(tmp_path, monkeypatch):
+def test_restart_now_restarts_and_later_does_not(tmp_path, monkeypatch):
+    plugin, restarted = _plugin([], {}, tmp_path, monkeypatch)
+
+    async def noop(_):
+        pass
+    monkeypatch.setattr(commands.asyncio, "sleep", noop)
+    later = _Interaction()
+    asyncio.run(commands._RestartView(plugin, 7, "14.9.0").later(later, None))
+    assert restarted == [] and "next time DCSServerBot restarts" in later.log[0][1]
+    now = _Interaction()
+    asyncio.run(commands._RestartView(plugin, 7, "14.9.0").restart_now(now, None))
+    assert restarted == [True] and "Restarting" in now.log[0][1]
+
+
+def test_the_dev_update_installs_the_zip_that_was_offered(tmp_path, monkeypatch):
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, restarted = _plugin([], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
+    plugin._run_migration = lambda src: ""
+    dev = asyncio.run(plugin._upgrade_lookup_dev())
+    assert dev["text"] == "14.9.5" and dev["prerelease"] is True
+    _confirm(plugin, dev)
+    assert "14.9.5" in (d / "commands.py").read_text() and restarted == []
+
+
+def test_the_password_dialog_gates_the_dev_update(tmp_path, monkeypatch):
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
+    plugin._run_migration = lambda src: ""
+    view = _run_command(plugin).followup.sent[0][2]
+    press = _Interaction()
+    asyncio.run(view.update_dev(press, None))
+    modal = press.log[0][1]
+    assert press.log[0][0] == "send_modal"
+    modal.password = "wrong"
+    bad = _Interaction()
+    asyncio.run(modal.on_submit(bad))
+    assert bad.log[0][0] == "send_message" and "Wrong password" in bad.log[0][1]
+    assert (d / "commands.py").read_text() == "old commands.py"               # nothing installed
+    modal.password = PASSWORD
+    good = _Interaction()
+    asyncio.run(modal.on_submit(good))
+    assert "14.9.5" in (d / "commands.py").read_text()
+
+
+def test_a_broken_release_installs_nothing_and_says_so(tmp_path, monkeypatch):
     d = _folder(tmp_path)
     monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
     rel = commands._pick_release([_rel("v.14.9.0")], (14, 4, 3))
     plugin, restarted = _plugin([], {rel["zip_url"]: _zip(version="14.8.0")}, tmp_path, monkeypatch)   # tag says 14.9.0
     interaction = _confirm(plugin, rel)
     assert (d / "commands.py").read_text() == "old commands.py" and restarted == []
-    assert "does not match its tag" in interaction.edits[-1]
-
-
+    assert "does not match its tag" in interaction.edits[-1][0]
 
 
 # ── the download itself (aiohttp replaced by a fake that hands the body over in pieces) ──

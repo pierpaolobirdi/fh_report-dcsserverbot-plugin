@@ -47,20 +47,53 @@ class NotFound(HTTPException):
 
 
 class ButtonStyle:
-    danger, secondary = "danger", "secondary"
+    danger, secondary, success = "danger", "secondary", "success"
+
+
+class TextStyle:
+    short = "short"
+
+
+class _Btn:
+    """What discord.py makes of a @ui.button method: an item with .disabled that runs the callback."""
+    def __init__(self, callback):
+        self.callback, self.disabled = callback, False
+
+    def __call__(self, *a, **kw):
+        return self.callback(*a, **kw)
 
 
 class ui:
     class View:
         def __init__(self, timeout=None):
             self.timeout, self.stopped = timeout, False
+            for name in dir(type(self)):
+                if getattr(getattr(type(self), name, None), "_is_button", False):
+                    setattr(self, name, _Btn(getattr(self, name)))
 
         def stop(self):
             self.stopped = True
 
     @staticmethod
     def button(**_):
-        return lambda f: f
+        def deco(f):
+            f._is_button = True
+            return f
+        return deco
+
+    class Modal:
+        def __init_subclass__(cls, title=None, **kw):
+            super().__init_subclass__(**kw)
+
+        def __init__(self, *a, **kw):
+            pass
+
+    class TextInput:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def __str__(self):
+            return getattr(self, "value", "")
 
 
 class _Passthrough:

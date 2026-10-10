@@ -321,17 +321,19 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 
 ## `/fh_report upgrade` — update from Discord (admins)
 
-`/fh_report upgrade` checks the GitHub releases of this plugin and, if a newer one exists, offers to install it and restart DCSServerBot. It needs the `Admin` role of DCSServerBot, replies privately, and only the admin who ran it can press the buttons.
+`/fh_report upgrade` checks GitHub for a newer version of this plugin and offers to install it. It needs the `Admin` role of DCSServerBot, replies privately, and only the admin who ran it can press the buttons.
 
-1. The reply shows the installed version, the new one and the release notes. A **pre-release** is marked with a clear warning.
-2. **Update and restart** downloads the release, installs it and restarts the bot. **Cancel** (or letting it expire after a minute) changes nothing. Running the command and cancelling is the way to just check.
-3. Safety:
-   - It downloads only from this plugin's GitHub repository, over HTTPS, and installs the zip GitHub itself builds for the release tag.
-   - Only the plugin's own files are taken from that zip; each one is checked (it must compile, and the version inside must match the release tag) before anything is replaced.
-   - The previous files are kept in `plugins/fh_report/.backup`, and if anything fails halfway they are put back and the bot is **not** restarted.
-   - Your `fh_report.yaml` is migrated with the release's migration script, the same one `install.cmd` runs.
+1. The reply shows the installed version and what is newer, with the release notes: the latest **release**, and the **development branch** when its version is higher. A **pre-release** is marked with a clear warning.
+2. Buttons: **Update to release**, **Update to development branch**, **Cancel** (or let it expire after two minutes). Running the command and cancelling is the way to just check. A button is disabled when there is nothing newer on that side.
+3. The development branch is work in progress and may be unstable, so **it asks for a password**. After three wrong attempts that user is locked out for ten minutes. The plugin holds only a hash of the password, never the password itself.
+4. When the update finishes you are told it worked and asked whether to **restart DCSServerBot now** or **later**. The new version only takes effect after a restart: choosing *Later* leaves it installed and active at the next restart.
+5. Safety:
+   - It downloads only from this plugin's GitHub repository, over HTTPS (a release's zip, or the development branch's).
+   - Only the plugin's own files are taken from that zip; each one is checked (it must compile, and the version inside must be what was announced) before anything is replaced.
+   - The previous files are kept in `plugins/fh_report/.backup`, and if anything fails halfway they are put back and nothing restarts.
+   - Your `fh_report.yaml` is migrated with the downloaded migration script, the same one `install.cmd` runs.
    - Other files you keep in the plugin folder are not touched.
-4. The restart relies on how you start DCSServerBot: launched with `run.cmd` (or a service that restarts it) it comes back by itself; launched any other way it would only stop.
+6. The restart is the same one as DCSServerBot's own `/node restart` on the master node. It relies on how you start the bot: launched with `run.cmd` (or `run.sh`, or a service that starts it again) it comes back by itself; launched any other way it would only stop.
 
 It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
 
