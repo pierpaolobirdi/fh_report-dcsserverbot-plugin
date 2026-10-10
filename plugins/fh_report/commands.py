@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.9"
+FH_REPORT_RELEASE = "14.4.10"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2852,10 +2852,12 @@ class _UpgradeView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button):
         self.stop()
         await interaction.response.edit_message(content="Update cancelled.", embed=None, view=None)
+        self.plugin._later(5, interaction.delete_original_response)
 
     async def on_timeout(self) -> None:
         try:
             await self.interaction.edit_original_response(content="Update offer expired.", embed=None, view=None)
+            self.plugin._later(10, self.interaction.delete_original_response)
         except Exception:
             pass
 
@@ -2872,6 +2874,7 @@ class _DevPasswordModal(discord.ui.Modal, title="Development branch"):
         ok, message = self.plugin._dev_password_check(interaction.user.id, str(self.password))
         if not ok:
             await interaction.response.send_message(message, ephemeral=True)
+            self.plugin._later(5, interaction.delete_original_response)
             return
         self.view.stop()
         await interaction.response.edit_message(view=None)
@@ -2892,7 +2895,9 @@ class _RestartView(discord.ui.View):
     @discord.ui.button(label="Restart now", style=discord.ButtonStyle.danger)
     async def restart_now(self, interaction: discord.Interaction, button):
         self.stop()
-        await interaction.response.edit_message(content="🔄 Restarting DCSServerBot now...", view=None)
+        await interaction.response.edit_message(
+            content="🔄 Restarting DCSServerBot now... this message updates when it is back.", view=None)
+        self.plugin._save_restart_notice(interaction, self.text)
         await asyncio.sleep(1)
         await self.plugin.bot.node.restart()
 
@@ -3127,6 +3132,7 @@ class Fh_Report(Plugin):
     @updater.before_loop
     async def before_updater(self):
         await self.bot.wait_until_ready()
+        await self._finish_restart_notice()
 
     def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
         """(report_layout, points_detail) from config. report_layout may be a
@@ -4517,11 +4523,13 @@ class Fh_Report(Plugin):
         except UpgradeError as e:
             self.__dict__["_upgrading"] = False
             await say(f"❌ Update stopped: {e}")
+            self._later(30, interaction.delete_original_response)
             return
         except Exception as e:
             self.__dict__["_upgrading"] = False
             self.log.error(f"Fh_Report: update failed: {e}", exc_info=True)
             await say(f"❌ Update failed, the previous version is still in place: {e}")
+            self._later(30, interaction.delete_original_response)
             return
         self.__dict__["_upgrading"] = False
         self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']} (restart pending).")
@@ -4530,23 +4538,77 @@ class Fh_Report(Plugin):
         await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
                   + "\nDo you want to restart DCSServerBot now so the update takes effect?", view=view)
 
-    async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False) -> None:
-        """Private reply that removes itself: after 5 s when it reports success,
-        after 30 s for anything else (errors, refusals), so the channel stays clean."""
-        message = await interaction.followup.send(text, ephemeral=True)
-        if message is None or not hasattr(message, "delete"):
-            return
-
-        async def remove():
-            await asyncio.sleep(5 if ok else 30)
+    def _later(self, delay: float, action) -> None:
+        """Run the async `action` once, `delay` seconds from now (errors ignored: the message may
+        already be gone or its interaction token expired)."""
+        async def run():
+            await asyncio.sleep(delay)
             try:
-                await message.delete()
+                await action()
             except Exception:
-                pass            # already dismissed, or the interaction token expired
-        task = asyncio.get_running_loop().create_task(remove())
+                pass
+        task = asyncio.get_running_loop().create_task(run())
         tasks = self.__dict__.setdefault("_temp_replies", set())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False,
+                                 delay: float | None = None) -> None:
+        """Private reply that removes itself: after 5 s when it reports success, after 30 s for
+        anything else (errors, refusals) unless `delay` says otherwise, so the channel stays clean."""
+        message = await interaction.followup.send(text, ephemeral=True)
+        if message is None or not hasattr(message, "delete"):
+            return
+        self._later(delay if delay is not None else (5 if ok else 30), message.delete)
+
+    # ── The notice that closes a restart (the new process finishes what the old one started) ──
+
+    @staticmethod
+    def _restart_notice_file() -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".restart_notice.json")
+
+    def _save_restart_notice(self, interaction: discord.Interaction, expected: str) -> None:
+        try:
+            with open(self._restart_notice_file(), "w", encoding="utf-8") as f:
+                json.dump({"app_id": interaction.application_id, "token": interaction.token,
+                           "message_id": interaction.message.id, "expected": expected,
+                           "created": time.time()}, f)
+        except Exception as e:
+            self.log.debug(f"Fh_Report: could not save the restart notice: {e!r}")
+
+    def _notice_webhook(self, app_id, token):
+        return discord.Webhook.partial(app_id, token, client=self.bot)
+
+    async def _finish_restart_notice(self) -> None:
+        """After a restart asked from /fh_report upgrade: say whether DCSServerBot is back and which
+        version runs, then remove the message. The file is always deleted: used, stale or unreadable."""
+        path = self._restart_notice_file()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        try:
+            if not isinstance(data, dict) or time.time() - float(data["created"]) > 14 * 60:
+                return                                   # too old: Discord no longer accepts its token
+            expected = str(data["expected"])
+            if expected == FH_REPORT_RELEASE:
+                text = f"✅ DCSServerBot is back. Fh_Report Ver. {FH_REPORT_RELEASE} is running."
+            else:
+                text = (f"⚠️ DCSServerBot is back, but Fh_Report Ver. {FH_REPORT_RELEASE} is running "
+                        f"(Ver. {expected} was expected).")
+            hook = self._notice_webhook(data["app_id"], data["token"])
+            message_id = int(data["message_id"])
+            await hook.edit_message(message_id, content=text, embeds=[], view=None)
+            self._later(10, lambda: hook.delete_message(message_id))
+        except Exception as e:
+            self.log.debug(f"Fh_Report: could not finish the restart notice: {e!r}")
 
     @fh_report.command(name="upgrade", description="Admin only: update the plugin from GitHub (release or development branch).")
     @utils.app_has_role("Admin")
@@ -4569,7 +4631,7 @@ class Fh_Report(Plugin):
         if release is None and dev is None:
             text = (f"❌ {' '.join(notes)}" if notes else
                     f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
-            await interaction.followup.send(text, ephemeral=True)
+            await self._reply_temporarily(interaction, text, delay=30 if notes else 10)
             return
         view = _UpgradeView(self, interaction.user.id, release, dev)
         view.interaction = interaction

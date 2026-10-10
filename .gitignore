@@ -1,3 +1,4 @@
 __pycache__/
 .pytest_cache/
 plugins/fh_report/.backup/
+plugins/fh_report/.restart_notice.json

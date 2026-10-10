@@ -132,6 +132,14 @@ class _Followup:
 
     async def send(self, content=None, embed=None, view=None, ephemeral=None):
         self.sent.append((content, embed, view))
+        msg = type("Msg", (), {})()
+        msg.deleted = []
+
+        async def delete():
+            msg.deleted.append(True)
+        msg.delete = delete
+        self.last = msg
+        return msg
 
 
 class _Response:
@@ -153,12 +161,16 @@ class _Response:
 
 class _Interaction:
     def __init__(self, user_id=7):
-        self.followup, self.edits, self.log = _Followup(), [], []
+        self.followup, self.edits, self.log, self.deleted = _Followup(), [], [], []
         self.user = type("U", (), {"id": user_id})()
         self.response = _Response(self.log)
+        self.application_id, self.token, self.message = 555, "tok-secret", type("M", (), {"id": 999})()
 
     async def edit_original_response(self, content=None, embed=None, view=None):
         self.edits.append((content, view))
+
+    async def delete_original_response(self):
+        self.deleted.append(True)
 
 
 PASSWORD = "correct horse battery staple"
@@ -424,3 +436,138 @@ def test_the_stored_dev_hash_is_well_formed_and_not_a_plain_password():
     assert parts[0] == "scrypt" and int(parts[1]) >= 16384 and len(base64.b64decode(parts[4])) >= 16
     assert len(base64.b64decode(parts[5])) == 32
     assert not commands._dev_password_ok("", commands.UPGRADE_DEV_PASSWORD_HASH)
+
+
+# ── messages that clean themselves up, and the notice that closes a restart ───────
+
+def _timed(monkeypatch, plugin, scenario):
+    """Run `scenario()` (async) and return the sleeps requested by scheduled clean-ups, having let them finish."""
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+    monkeypatch.setattr(commands.asyncio, "sleep", fake_sleep)
+
+    async def go():
+        await scenario()
+        await asyncio.gather(*list(plugin.__dict__.get("_temp_replies", ())))
+    asyncio.run(go())
+    return waits
+
+
+def test_a_wrong_password_message_is_removed_after_5_seconds(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
+    view = _run_command(plugin).followup.sent[0][2]
+    press, bad = _Interaction(), _Interaction()
+    asyncio.run(view.update_dev(press, None))
+    modal = press.log[0][1]
+    modal.password = "wrong"
+    waits = _timed(monkeypatch, plugin, lambda: modal.on_submit(bad))
+    assert waits == [5] and bad.deleted == [True]
+
+
+def test_the_newest_version_message_goes_after_10_seconds_and_errors_after_30(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.4.3"))
+    interaction = _Interaction()
+    waits = _timed(monkeypatch, plugin, lambda: commands.Fh_Report.upgrade(plugin, interaction))
+    assert waits == [10] and interaction.followup.last.deleted == [True]
+
+    async def broken(url, as_json=False):
+        raise commands.UpgradeError("GitHub answered 500.")
+    plugin._http_get = broken
+    interaction = _Interaction()
+    waits = _timed(monkeypatch, plugin, lambda: commands.Fh_Report.upgrade(plugin, interaction))
+    assert waits == [30] and "500" in interaction.followup.sent[0][0]
+
+
+def test_cancel_goes_after_5_seconds_and_an_expired_offer_after_10(tmp_path, monkeypatch):
+    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.4.3"))
+    view = _run_command(plugin).followup.sent[0][2]
+    cancel = _Interaction()
+    assert _timed(monkeypatch, plugin, lambda: view.cancel(cancel, None)) == [5] and cancel.deleted == [True]
+    view = _run_command(plugin).followup.sent[0][2]
+    view.interaction = expired = _Interaction()
+    assert _timed(monkeypatch, plugin, view.on_timeout) == [10] and expired.deleted == [True]
+
+
+def test_a_failed_update_message_goes_after_30_seconds(tmp_path, monkeypatch):
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    rel = commands._pick_release([_rel("v.14.9.0")], (14, 4, 3))
+    plugin, _ = _plugin([], {rel["zip_url"]: _zip(version="14.8.0")}, tmp_path, monkeypatch)
+    interaction = _Interaction()
+    waits = _timed(monkeypatch, plugin, lambda: plugin._upgrade_run(interaction, rel))
+    assert waits == [30] and interaction.deleted == [True]
+
+
+class _Hook:
+    def __init__(self):
+        self.edits, self.deleted = [], []
+
+    async def edit_message(self, message_id, **kw):
+        self.edits.append((message_id, kw["content"]))
+
+    async def delete_message(self, message_id):
+        self.deleted.append(message_id)
+
+
+def test_restart_now_leaves_a_notice_for_the_new_process(tmp_path, monkeypatch):
+    import json
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, restarted = _plugin([], {}, tmp_path, monkeypatch)
+    _timed(monkeypatch, plugin, lambda: commands._RestartView(plugin, 7, "14.9.0").restart_now(_Interaction(), None))
+    data = json.loads((d / ".restart_notice.json").read_text())
+    assert restarted == [True] and data["expected"] == "14.9.0" and data["message_id"] == 999 and data["token"] == "tok-secret"
+
+
+def _notice(tmp_path, monkeypatch, expected, age=0, raw=None):
+    import json
+    import time
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    hook = _Hook()
+    plugin._notice_webhook = lambda app_id, token: hook
+    path = d / ".restart_notice.json"
+    path.write_text(raw if raw is not None else json.dumps(
+        {"app_id": 555, "token": "t", "message_id": 999, "expected": expected, "created": time.time() - age}))
+    waits = _timed(monkeypatch, plugin, plugin._finish_restart_notice)
+    return hook, waits, path
+
+
+def test_the_restart_notice_reports_ok_or_a_mismatch(tmp_path, monkeypatch):
+    import json
+    import time
+    for expected, current, mark in (("14.9.0", "14.9.0", "✅"), ("14.9.0", "14.4.3", "⚠️")):
+        d = tmp_path / expected.replace(".", "") / mark.strip("️")
+        d.mkdir(parents=True)
+        folder = _folder(d)
+        monkeypatch.setattr(commands, "__file__", str(folder / "commands.py"))
+        plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+        monkeypatch.setattr(commands, "FH_REPORT_RELEASE", current)
+        hook = _Hook()
+        plugin._notice_webhook = lambda app_id, token, hook=hook: hook
+        (folder / ".restart_notice.json").write_text(json.dumps(
+            {"app_id": 1, "token": "t", "message_id": 42, "expected": expected, "created": time.time()}))
+        waits = _timed(monkeypatch, plugin, plugin._finish_restart_notice)
+        assert hook.edits[0][0] == 42 and hook.edits[0][1].startswith(mark)
+        assert waits == [10] and hook.deleted == [42]
+        assert not (folder / ".restart_notice.json").exists()
+
+
+def test_an_old_or_unreadable_notice_is_deleted_without_touching_discord(tmp_path, monkeypatch):
+    (tmp_path / "old").mkdir()
+    (tmp_path / "broken").mkdir()
+    hook, waits, path = _notice(tmp_path / "old", monkeypatch, expected="14.4.3", age=15 * 60)
+    assert hook.edits == [] and waits == [] and not path.exists()
+    hook, waits, path = _notice(tmp_path / "broken", monkeypatch, expected="x", raw="{not json")
+    assert hook.edits == [] and waits == [] and not path.exists()
+
+
+def test_no_notice_file_means_nothing_happens(tmp_path, monkeypatch):
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    plugin._notice_webhook = lambda *a: (_ for _ in ()).throw(AssertionError("must not be used"))
+    asyncio.run(plugin._finish_restart_notice())
