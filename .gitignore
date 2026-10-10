@@ -1,4 +1,3 @@
 __pycache__/
 .pytest_cache/
-dist/
 plugins/fh_report/.backup/

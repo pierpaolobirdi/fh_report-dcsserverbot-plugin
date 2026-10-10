@@ -326,8 +326,8 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 1. The reply shows the installed version, the new one and the release notes. A **pre-release** is marked with a clear warning.
 2. **Update and restart** downloads the release, installs it and restarts the bot. **Cancel** (or letting it expire after a minute) changes nothing. Running the command and cancelling is the way to just check.
 3. Safety:
-   - Only releases **signed by the plugin's author** are installed: the release zip must carry a valid signature that matches the key built into the plugin. A release without a valid signature is refused and nothing changes.
-   - The zip may only contain the plugin's own files; each one is checked before anything is replaced.
+   - It downloads only from this plugin's GitHub repository, over HTTPS, and installs the zip GitHub itself builds for the release tag.
+   - Only the plugin's own files are taken from that zip; each one is checked (it must compile, and the version inside must match the release tag) before anything is replaced.
    - The previous files are kept in `plugins/fh_report/.backup`, and if anything fails halfway they are put back and the bot is **not** restarted.
    - Your `fh_report.yaml` is migrated with the release's migration script, the same one `install.cmd` runs.
    - Other files you keep in the plugin folder are not touched.

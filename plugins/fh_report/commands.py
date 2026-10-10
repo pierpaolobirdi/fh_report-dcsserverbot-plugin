@@ -7,7 +7,6 @@ with front-line status and pilot leaderboard. No database required.
 from __future__ import annotations
 
 import asyncio
-import base64
 import calendar
 import functools
 import importlib.util
@@ -40,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.4"
+FH_REPORT_RELEASE = "14.4.5"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2674,12 +2673,9 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 
 # ── Upgrade from GitHub releases (/fh_report upgrade) ─────────────────────────
 UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
-# Base64 Ed25519 public key that releases must be signed with (see tools/release_tool.py).
-# Empty would mean the upgrade command is not set up and refuses to install anything.
-UPGRADE_PUBLIC_KEY = "ItKn3IIVuNEJn0uBUTLQQ0mOZ1a0DvFmK+Il0hSPJBI="
 UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
                  "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
-UPGRADE_MAX_BYTES = 5 * 1024 * 1024
+UPGRADE_MAX_BYTES = 25 * 1024 * 1024
 
 
 class UpgradeError(Exception):
@@ -2693,7 +2689,7 @@ def _release_version(text) -> tuple[int, int, int] | None:
 
 
 def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
-    """The newest published release above `current` that carries a zip and its signature.
+    """The newest published release above `current`; its code is GitHub's own zip of the tag.
     Drafts are ignored; a pre-release is returned with prerelease=True."""
     best = None
     for rel in releases or []:
@@ -2702,42 +2698,33 @@ def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
         version = _release_version(rel.get("tag_name"))
         if not version or version <= current:
             continue
-        assets = {a.get("name", ""): a.get("browser_download_url") for a in rel.get("assets") or []}
-        zips = [n for n in assets if n.endswith(".zip")]
-        if not zips or f"{zips[0]}.sig" not in assets:
+        if not rel.get("zipball_url"):
             continue
         if best is None or version > best["version"]:
             best = {"version": version, "text": ".".join(map(str, version)), "tag": rel.get("tag_name", ""),
                     "prerelease": bool(rel.get("prerelease")), "notes": rel.get("body") or "",
-                    "published": rel.get("published_at") or "", "zip_url": assets[zips[0]],
-                    "sig_url": assets[f"{zips[0]}.sig"]}
+                    "published": rel.get("published_at") or "", "zip_url": rel["zipball_url"]}
     return best
 
 
-def _signature_ok(data: bytes, sig_text: str, public_key_b64: str) -> bool:
-    """True only if `sig_text` (base64) is a valid Ed25519 signature of `data` for that key."""
-    if not public_key_b64:
-        return False
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64)).verify(
-            base64.b64decode(sig_text.strip()), data)
-        return True
-    except Exception:
-        return False
-
-
 def _read_release_zip(data: bytes, version_text: str) -> dict[str, bytes]:
-    """The files of a release zip, after checking that it holds exactly the expected ones, that
-    every .py compiles and that commands.py announces the version the release claims."""
+    """The plugin's files out of GitHub's zip of a tag (everything sits under one folder named
+    after the repository and commit). Only the expected files are taken, the rest of the
+    repository is ignored; every .py must compile and commands.py must announce the tag's version."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
-        names = [i.filename for i in zf.infolist() if not i.is_dir()]
+        entries = [i.filename for i in zf.infolist() if not i.is_dir()]
     except zipfile.BadZipFile:
         raise UpgradeError("The downloaded file is not a valid zip.")
-    if sorted(names) != sorted(UPGRADE_FILES):
-        raise UpgradeError("The release does not contain exactly the expected files.")
-    files = {name: zf.read(name) for name in names}
+    tops = {n.split("/", 1)[0] for n in entries if "/" in n}
+    if len(tops) != 1:
+        raise UpgradeError("The downloaded zip does not have the expected layout.")
+    top = tops.pop() + "/"
+    files = {}
+    for name in UPGRADE_FILES:
+        if top + name not in entries:
+            raise UpgradeError(f"The release does not contain {name}.")
+        files[name] = zf.read(top + name)
     for name, content in files.items():
         if name.endswith(".py"):
             try:
@@ -4352,6 +4339,8 @@ class Fh_Report(Plugin):
             async with session.get(url) as resp:
                 if resp.status != 200:
                     raise UpgradeError(f"GitHub answered {resp.status}.")
+                if resp.url.scheme != "https":
+                    raise UpgradeError("Refusing a download that left HTTPS.")
                 data = await resp.content.read(UPGRADE_MAX_BYTES + 1)
         if len(data) > UPGRADE_MAX_BYTES:
             raise UpgradeError("The download is larger than expected.")
@@ -4392,10 +4381,7 @@ class Fh_Report(Plugin):
         try:
             await say("⏳ Downloading the release...")
             data = await self._http_get(release["zip_url"])
-            sig = (await self._http_get(release["sig_url"])).decode("ascii", "ignore")
-            await say("🔐 Verifying the signature...")
-            if not _signature_ok(data, sig, UPGRADE_PUBLIC_KEY):
-                raise UpgradeError("The signature is not valid: nothing was installed.")
+            await say("🔎 Checking the files...")
             files = _read_release_zip(data, release["text"])
             await say("📦 Installing...")
             plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4438,10 +4424,6 @@ class Fh_Report(Plugin):
     @utils.app_has_role("Admin")
     async def upgrade(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        if not UPGRADE_PUBLIC_KEY:
-            await interaction.followup.send(
-                "❌ Updating from Discord is not set up in this version (no release-signing key).", ephemeral=True)
-            return
         try:
             release = await self._upgrade_lookup()
         except UpgradeError as e:
