@@ -64,9 +64,17 @@ def load_private(path: str) -> Ed25519PrivateKey:
         return Ed25519PrivateKey.from_private_bytes(base64.b64decode(f.read().strip()))
 
 
+def _inside(path: str, folder: str) -> bool:
+    """Is `path` inside `folder`? Paths on different drives (Windows) are never inside."""
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(folder)]) == os.path.normcase(folder)
+    except ValueError:
+        return False
+
+
 def cmd_keygen(args) -> None:
     path = os.path.abspath(args.private)
-    if os.path.commonpath([path, ROOT]) == ROOT:
+    if _inside(path, ROOT):
         sys.exit("Refusing to write the private key inside the repository: choose a folder outside it.")
     if os.path.exists(path):
         sys.exit(f"{path} already exists: not overwriting it.")

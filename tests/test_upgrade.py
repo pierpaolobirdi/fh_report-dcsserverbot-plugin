@@ -255,3 +255,14 @@ def test_release_tool_keygen_build_verify_roundtrip(tmp_path):
     assert set(commands._read_release_zip(data, tool.release_version())) == set(commands.UPGRADE_FILES)
     assert tool.build_zip() == tool.build_zip()                                # same files, same zip
     tool.main(["verify", str(zip_path), "--public", pub])
+
+
+def test_release_tool_copes_with_a_key_on_another_drive(monkeypatch):
+    spec = importlib.util.spec_from_file_location("release_tool", os.path.join(ROOT, "tools", "release_tool.py"))
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    def other_drive(paths):                          # what Windows does for D:\... vs L:\...
+        raise ValueError("Paths don't have the same drive")
+    monkeypatch.setattr(tool.os.path, "commonpath", other_drive)
+    assert tool._inside("L:\\keys\\k.key", "D:\\repo") is False
