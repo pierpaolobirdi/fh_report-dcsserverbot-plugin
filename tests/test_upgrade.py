@@ -406,3 +406,11 @@ def test_the_download_is_refused_when_too_big_not_https_or_not_200(monkeypatch):
         asyncio.run(make_plugin()._http_get("https://h/x"))
     with pytest.raises(commands.UpgradeError, match="non-HTTPS"):
         asyncio.run(make_plugin()._http_get("http://h/x"))
+
+
+def test_the_stored_dev_hash_is_well_formed_and_not_a_plain_password():
+    import base64
+    parts = commands.UPGRADE_DEV_PASSWORD_HASH.split("$")
+    assert parts[0] == "scrypt" and int(parts[1]) >= 16384 and len(base64.b64decode(parts[4])) >= 16
+    assert len(base64.b64decode(parts[5])) == 32
+    assert not commands._dev_password_ok("", commands.UPGRADE_DEV_PASSWORD_HASH)

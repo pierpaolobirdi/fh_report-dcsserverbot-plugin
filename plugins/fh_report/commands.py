@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.7"
+FH_REPORT_RELEASE = "14.4.8"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2680,8 +2680,8 @@ UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py
                  "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
 UPGRADE_MAX_BYTES = 25 * 1024 * 1024
 # Updating from the development branch asks for a password. Only its scrypt hash is kept here:
-# "scrypt$<n>$<r>$<p>$<salt base64>$<hash base64>". Empty = the development option is off.
-UPGRADE_DEV_PASSWORD_HASH = ""
+# "scrypt$<n>$<r>$<p>$<salt base64>$<hash base64>". Empty would turn the development option off.
+UPGRADE_DEV_PASSWORD_HASH = "scrypt$16384$8$1$/F+T4WaOlYJVkfDsPMli6A==$IbzUS0JkNm9bJRD9AL0c5Po1wrxddu/NaBm3PnkfbtA="
 UPGRADE_DEV_MAX_FAILS = 3
 UPGRADE_DEV_LOCK_SECONDS = 600
 
