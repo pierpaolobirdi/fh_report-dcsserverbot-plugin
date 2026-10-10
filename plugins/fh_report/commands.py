@@ -7,13 +7,10 @@ with front-line status and pilot leaderboard. No database required.
 from __future__ import annotations
 
 import asyncio
-import base64
 import calendar
 import functools
 import importlib.util
 import glob
-import hashlib
-import hmac
 import io
 import json
 import logging
@@ -42,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.10"
+FH_REPORT_RELEASE = "14.4.11"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2679,11 +2676,6 @@ UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
 UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
                  "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
 UPGRADE_MAX_BYTES = 25 * 1024 * 1024
-# Updating from the development branch asks for a password. Only its scrypt hash is kept here:
-# "scrypt$<n>$<r>$<p>$<salt base64>$<hash base64>". Empty would turn the development option off.
-UPGRADE_DEV_PASSWORD_HASH = "scrypt$16384$8$1$/F+T4WaOlYJVkfDsPMli6A==$IbzUS0JkNm9bJRD9AL0c5Po1wrxddu/NaBm3PnkfbtA="
-UPGRADE_DEV_MAX_FAILS = 3
-UPGRADE_DEV_LOCK_SECONDS = 600
 
 
 class UpgradeError(Exception):
@@ -2713,18 +2705,6 @@ def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
                     "prerelease": bool(rel.get("prerelease")), "notes": rel.get("body") or "",
                     "published": rel.get("published_at") or "", "zip_url": rel["zipball_url"]}
     return best
-
-
-def _dev_password_ok(password: str, stored: str) -> bool:
-    """True if `password` matches the stored scrypt hash (constant-time comparison)."""
-    try:
-        scheme, n, r, p, salt, expected = stored.split("$")
-        want = base64.b64decode(expected)
-        got = hashlib.scrypt(password.encode(), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
-                             maxmem=128 * 1024 * 1024, dklen=len(want))
-        return scheme == "scrypt" and hmac.compare_digest(got, want)
-    except Exception:
-        return False
 
 
 def _zip_version(files: dict[str, bytes]) -> str | None:
@@ -2816,7 +2796,7 @@ def _upgrade_embed(current_text: str, release: dict | None, dev: dict | None, no
                         inline=False)
     if dev:
         embed.add_field(name="⚠️ DEVELOPMENT BRANCH",
-                        value="Work in progress: it may be unstable. Updating to it asks for a password.", inline=False)
+                        value="Work in progress: it may contain errors. Updating to it asks you to accept that risk first.", inline=False)
     for note in notes:
         embed.add_field(name="ℹ️", value=note[:500], inline=False)
     embed.add_field(name="What happens",
@@ -2846,7 +2826,10 @@ class _UpgradeView(discord.ui.View):
 
     @discord.ui.button(label="Update to development branch", style=discord.ButtonStyle.danger)
     async def update_dev(self, interaction: discord.Interaction, button):
-        await interaction.response.send_modal(_DevPasswordModal(self.plugin, self))
+        self.stop()
+        view = _DevWarningView(self.plugin, self.user_id, self.dev)
+        view.interaction = interaction
+        await interaction.response.edit_message(embed=_dev_warning_embed(self.dev), view=view)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button):
@@ -2862,23 +2845,50 @@ class _UpgradeView(discord.ui.View):
             pass
 
 
-class _DevPasswordModal(discord.ui.Modal, title="Development branch"):
-    """Asks for the password before installing from the development branch."""
-    password = discord.ui.TextInput(label="Password", style=discord.TextStyle.short, max_length=200)
+def _dev_warning_embed(dev: dict) -> discord.Embed:
+    embed = discord.Embed(title="⚠️ Development branch", color=0xE74C3C,
+                          description=f"You are about to install **Ver. {dev['text']}** from the development branch.")
+    embed.add_field(name="The risk",
+                    value="This is code that is still being developed. It can contain errors, change how the "
+                          "report looks or behaves, or stop working. It has not gone through a release.",
+                    inline=False)
+    embed.add_field(name="If something goes wrong",
+                    value="A copy of the current files is kept in `plugins/fh_report/.backup`, and a release can "
+                          "always be installed again with `install.cmd`.", inline=False)
+    embed.add_field(name="To continue", value="Press **Accept the risk and update** to confirm you understand this.",
+                    inline=False)
+    return embed
 
-    def __init__(self, plugin, view: _UpgradeView):
-        super().__init__()
-        self.plugin, self.view = plugin, view
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        ok, message = self.plugin._dev_password_check(interaction.user.id, str(self.password))
-        if not ok:
-            await interaction.response.send_message(message, ephemeral=True)
-            self.plugin._later(5, interaction.delete_original_response)
-            return
-        self.view.stop()
+class _DevWarningView(discord.ui.View):
+    """The step before a development-branch update: accept the risk, or cancel."""
+
+    def __init__(self, plugin, user_id: int, dev: dict):
+        super().__init__(timeout=120)
+        self.plugin, self.user_id, self.dev = plugin, user_id, dev
+        self.interaction = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Accept the risk and update", style=discord.ButtonStyle.danger)
+    async def accept(self, interaction: discord.Interaction, button):
+        self.stop()
         await interaction.response.edit_message(view=None)
-        await self.plugin._upgrade_run(interaction, self.view.dev)
+        await self.plugin._upgrade_run(interaction, self.dev)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Update cancelled.", embed=None, view=None)
+        self.plugin._later(5, interaction.delete_original_response)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(content="Update offer expired.", embed=None, view=None)
+            self.plugin._later(10, self.interaction.delete_original_response)
+        except Exception:
+            pass
 
 
 class _RestartView(discord.ui.View):
@@ -2906,12 +2916,14 @@ class _RestartView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(
             content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.", view=None)
+        self.plugin._later(30, interaction.delete_original_response)
 
     async def on_timeout(self) -> None:
         try:
             await self.interaction.edit_original_response(
                 content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.",
                 view=None)
+            self.plugin._later(30, self.interaction.delete_original_response)
         except Exception:
             pass
 
@@ -4463,24 +4475,6 @@ class Fh_Report(Plugin):
         return {"channel": "dev", "version": version, "text": text, "tag": "dev", "prerelease": True,
                 "notes": "", "data": data}
 
-    def _dev_password_check(self, user_id: int, password: str, now: float | None = None) -> tuple[bool, str]:
-        """(ok, message for the user). Three wrong passwords lock that user for ten minutes."""
-        now = time.time() if now is None else now
-        fails = self.__dict__.setdefault("_dev_fails", {})
-        count, locked_until = fails.get(user_id, (0, 0.0))
-        if locked_until > now:
-            return False, f"❌ Too many wrong passwords. Try again in {int((locked_until - now) // 60) + 1} minute(s)."
-        if UPGRADE_DEV_PASSWORD_HASH and _dev_password_ok(password, UPGRADE_DEV_PASSWORD_HASH):
-            fails.pop(user_id, None)
-            return True, ""
-        count += 1
-        self.log.warning(f"Fh_Report: wrong development-branch password from user {user_id} ({count}).")
-        if count >= UPGRADE_DEV_MAX_FAILS:
-            fails[user_id] = (0, now + UPGRADE_DEV_LOCK_SECONDS)
-            return False, f"❌ Wrong password. Locked for {UPGRADE_DEV_LOCK_SECONDS // 60} minutes."
-        fails[user_id] = (count, 0.0)
-        return False, f"❌ Wrong password. {UPGRADE_DEV_MAX_FAILS - count} attempt(s) left."
-
     def _run_migration(self, migrate_source: bytes) -> str:
         """Run the release's migrate_config.py on this installation's fh_report.yaml.
         Returns "" when fine, else a short note (the config is left as it was)."""
@@ -4545,8 +4539,8 @@ class Fh_Report(Plugin):
             await asyncio.sleep(delay)
             try:
                 await action()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log.debug(f"Fh_Report: clean-up of a message failed: {e!r}")
         task = asyncio.get_running_loop().create_task(run())
         tasks = self.__dict__.setdefault("_temp_replies", set())
         tasks.add(task)
@@ -4620,12 +4614,11 @@ class Fh_Report(Plugin):
         except Exception as e:
             self.log.error(f"Fh_Report: release check failed: {e}", exc_info=not isinstance(e, UpgradeError))
             notes.append(f"Could not check the releases: {e}")
-        if UPGRADE_DEV_PASSWORD_HASH:
-            try:
-                dev = await self._upgrade_lookup_dev()
-            except Exception as e:
-                self.log.error(f"Fh_Report: development-branch check failed: {e}", exc_info=not isinstance(e, UpgradeError))
-                notes.append(f"Could not check the development branch: {e}")
+        try:
+            dev = await self._upgrade_lookup_dev()
+        except Exception as e:
+            self.log.error(f"Fh_Report: development-branch check failed: {e}", exc_info=not isinstance(e, UpgradeError))
+            notes.append(f"Could not check the development branch: {e}")
         if release and dev and dev["version"] <= release["version"]:
             dev = None                  # the release is as new (or newer) and more stable: no point in offering dev
         if release is None and dev is None:

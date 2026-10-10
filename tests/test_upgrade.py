@@ -173,19 +173,8 @@ class _Interaction:
         self.deleted.append(True)
 
 
-PASSWORD = "correct horse battery staple"
-
-
-def _hash(password, salt=b"0123456789abcdef", n=1024):
-    import base64
-    import hashlib
-    h = hashlib.scrypt(password.encode(), salt=salt, n=n, r=8, p=1, maxmem=128 * 1024 * 1024, dklen=32)
-    return f"scrypt${n}$8$1${base64.b64encode(salt).decode()}${base64.b64encode(h).decode()}"
-
-
-def _plugin(releases, blobs, tmp_path, monkeypatch, dev_zip=None, with_password=True):
+def _plugin(releases, blobs, tmp_path, monkeypatch, dev_zip=None):
     monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "14.4.3")
-    monkeypatch.setattr(commands, "UPGRADE_DEV_PASSWORD_HASH", _hash(PASSWORD) if with_password else "")
     plugin = make_plugin(node=type("N", (), {"config_dir": str(tmp_path / "config")})())
     restarted = []
 
@@ -246,46 +235,11 @@ def test_dev_is_offered_only_when_it_is_above_the_release_too(tmp_path, monkeypa
     assert buttons("v.14.9.0", "14.9.1") == (True, True)         # dev ahead of the release: both
 
 
-def test_without_a_dev_password_the_dev_branch_is_not_even_checked(tmp_path, monkeypatch):
-    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"), with_password=False)
-    _, embed, view = _run_command(plugin).followup.sent[0]
-    assert view.update_dev.disabled is True and not any(f.name == "Development branch" for f in embed.fields)
-
-
 def test_a_broken_dev_branch_is_reported_but_the_release_stays_available(tmp_path, monkeypatch):
     plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=None)
     _, embed, view = _run_command(plugin).followup.sent[0]
     assert view.update_release.disabled is False and view.update_dev.disabled is True
     assert any("development branch" in f.value for f in embed.fields)
-
-
-# ── the dev password ──────────────────────────────────────────────────────────────
-
-def test_the_stored_hash_accepts_only_the_right_password():
-    stored = _hash(PASSWORD)
-    assert commands._dev_password_ok(PASSWORD, stored) and PASSWORD not in stored
-    assert not commands._dev_password_ok("wrong", stored) and not commands._dev_password_ok("", stored)
-    assert not commands._dev_password_ok(PASSWORD, "") and not commands._dev_password_ok(PASSWORD, "garbage")
-
-
-def test_three_wrong_passwords_lock_the_user_for_ten_minutes(tmp_path, monkeypatch):
-    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
-    check = lambda pw, now: plugin._dev_password_check(7, pw, now)           # noqa: E731
-    assert check("a", 1000) == (False, "❌ Wrong password. 2 attempt(s) left.")
-    assert check("b", 1001) == (False, "❌ Wrong password. 1 attempt(s) left.")
-    assert "Locked for 10 minutes" in check("c", 1002)[1]
-    ok, msg = check(PASSWORD, 1100)                                           # right password, but locked
-    assert not ok and "Too many" in msg
-    assert check(PASSWORD, 1002 + 601) == (True, "")                          # lock over
-    assert check("a", 5000)[1].endswith("2 attempt(s) left.")                 # and the counter started again
-    assert plugin._dev_password_check(8, "x", 1000)[1].endswith("2 attempt(s) left.")   # other users unaffected
-
-
-def test_a_failed_password_never_reaches_the_log(tmp_path, monkeypatch, caplog):
-    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
-    with caplog.at_level("WARNING", logger="fh_report.tests"):
-        plugin._dev_password_check(7, "super-secret-guess", 1000)
-    assert caplog.records and "super-secret-guess" not in caplog.text
 
 
 # ── installing and restarting ──────────────────────────────────────────────────────
@@ -332,27 +286,6 @@ def test_the_dev_update_installs_the_zip_that_was_offered(tmp_path, monkeypatch)
     assert dev["text"] == "14.9.5" and dev["prerelease"] is True
     _confirm(plugin, dev)
     assert "14.9.5" in (d / "commands.py").read_text() and restarted == []
-
-
-def test_the_password_dialog_gates_the_dev_update(tmp_path, monkeypatch):
-    d = _folder(tmp_path)
-    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
-    plugin, _ = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
-    plugin._run_migration = lambda src: ""
-    view = _run_command(plugin).followup.sent[0][2]
-    press = _Interaction()
-    asyncio.run(view.update_dev(press, None))
-    modal = press.log[0][1]
-    assert press.log[0][0] == "send_modal"
-    modal.password = "wrong"
-    bad = _Interaction()
-    asyncio.run(modal.on_submit(bad))
-    assert bad.log[0][0] == "send_message" and "Wrong password" in bad.log[0][1]
-    assert (d / "commands.py").read_text() == "old commands.py"               # nothing installed
-    modal.password = PASSWORD
-    good = _Interaction()
-    asyncio.run(modal.on_submit(good))
-    assert "14.9.5" in (d / "commands.py").read_text()
 
 
 def test_a_broken_release_installs_nothing_and_says_so(tmp_path, monkeypatch):
@@ -430,14 +363,6 @@ def test_the_download_is_refused_when_too_big_not_https_or_not_200(monkeypatch):
         asyncio.run(make_plugin()._http_get("http://h/x"))
 
 
-def test_the_stored_dev_hash_is_well_formed_and_not_a_plain_password():
-    import base64
-    parts = commands.UPGRADE_DEV_PASSWORD_HASH.split("$")
-    assert parts[0] == "scrypt" and int(parts[1]) >= 16384 and len(base64.b64decode(parts[4])) >= 16
-    assert len(base64.b64decode(parts[5])) == 32
-    assert not commands._dev_password_ok("", commands.UPGRADE_DEV_PASSWORD_HASH)
-
-
 # ── messages that clean themselves up, and the notice that closes a restart ───────
 
 def _timed(monkeypatch, plugin, scenario):
@@ -453,17 +378,6 @@ def _timed(monkeypatch, plugin, scenario):
         await asyncio.gather(*list(plugin.__dict__.get("_temp_replies", ())))
     asyncio.run(go())
     return waits
-
-
-def test_a_wrong_password_message_is_removed_after_5_seconds(tmp_path, monkeypatch):
-    plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
-    view = _run_command(plugin).followup.sent[0][2]
-    press, bad = _Interaction(), _Interaction()
-    asyncio.run(view.update_dev(press, None))
-    modal = press.log[0][1]
-    modal.password = "wrong"
-    waits = _timed(monkeypatch, plugin, lambda: modal.on_submit(bad))
-    assert waits == [5] and bad.deleted == [True]
 
 
 def test_the_newest_version_message_goes_after_10_seconds_and_errors_after_30(tmp_path, monkeypatch):
@@ -571,3 +485,43 @@ def test_no_notice_file_means_nothing_happens(tmp_path, monkeypatch):
     plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
     plugin._notice_webhook = lambda *a: (_ for _ in ()).throw(AssertionError("must not be used"))
     asyncio.run(plugin._finish_restart_notice())
+
+
+# ── the development branch asks to accept the risk, not for a password ─────────────
+
+def test_the_dev_button_shows_a_risk_warning_and_installs_only_after_accepting(tmp_path, monkeypatch):
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    plugin, restarted = _plugin([_rel("v.14.4.3")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"))
+    plugin._run_migration = lambda src: ""
+    view = _run_command(plugin).followup.sent[0][2]
+    press = _Interaction()
+    asyncio.run(view.update_dev(press, None))
+    kind, content = press.log[0]
+    assert kind == "edit_message" and (d / "commands.py").read_text() == "old commands.py"      # warned, nothing installed
+    warning = commands._dev_warning_embed({"text": "14.9.5"})
+    assert "errors" in " ".join(f.value for f in warning.fields) and "14.9.5" in warning.description
+    warn_view = commands._DevWarningView(plugin, 7, {"text": "14.9.5", "data": _zip(version="14.9.5")})
+    assert asyncio.run(warn_view.interaction_check(type("I", (), {"user": type("U", (), {"id": 8})()})())) is False
+    asyncio.run(warn_view.accept(_Interaction(), None))
+    assert "14.9.5" in (d / "commands.py").read_text() and restarted == []
+
+
+def test_cancel_and_expiry_of_the_risk_warning_clean_up(tmp_path, monkeypatch):
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    cancel = _Interaction()
+    view = commands._DevWarningView(plugin, 7, {"text": "14.9.5"})
+    assert _timed(monkeypatch, plugin, lambda: view.cancel(cancel, None)) == [5] and cancel.deleted == [True]
+    view.interaction = expired = _Interaction()
+    assert _timed(monkeypatch, plugin, view.on_timeout) == [10] and expired.deleted == [True]
+
+
+def test_later_and_an_unanswered_restart_question_clean_up_after_30_seconds(tmp_path, monkeypatch):
+    plugin, restarted = _plugin([], {}, tmp_path, monkeypatch)
+    later = _Interaction()
+    view = commands._RestartView(plugin, 7, "14.9.0")
+    assert _timed(monkeypatch, plugin, lambda: view.later(later, None)) == [30] and later.deleted == [True]
+    view = commands._RestartView(plugin, 7, "14.9.0")
+    view.interaction = unanswered = _Interaction()
+    assert _timed(monkeypatch, plugin, view.on_timeout) == [30] and unanswered.deleted == [True]
+    assert restarted == []                                                      # neither of them restarts anything
