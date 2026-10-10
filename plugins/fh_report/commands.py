@@ -7,16 +7,21 @@ with front-line status and pilot leaderboard. No database required.
 from __future__ import annotations
 
 import asyncio
+import base64
 import calendar
 import functools
 import importlib.util
 import glob
+import io
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 from typing import Type
@@ -35,7 +40,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.2"
+FH_REPORT_RELEASE = "14.4.3"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2667,6 +2672,168 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
 
+# ── Upgrade from GitHub releases (/fh_report upgrade) ─────────────────────────
+UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
+# Base64 Ed25519 public key that releases must be signed with (see tools/release_tool.py).
+# Empty = the upgrade command is not set up and refuses to install anything.
+UPGRADE_PUBLIC_KEY = ""
+UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
+                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
+UPGRADE_MAX_BYTES = 5 * 1024 * 1024
+
+
+class UpgradeError(Exception):
+    """A refusal the user should read as is (nothing was changed)."""
+
+
+def _release_version(text) -> tuple[int, int, int] | None:
+    """(14, 4, 2) from a tag like 'v.14.4.2' or '14.4.2'; None if it has no x.y.z."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(text or ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
+    """The newest published release above `current` that carries a zip and its signature.
+    Drafts are ignored; a pre-release is returned with prerelease=True."""
+    best = None
+    for rel in releases or []:
+        if rel.get("draft"):
+            continue
+        version = _release_version(rel.get("tag_name"))
+        if not version or version <= current:
+            continue
+        assets = {a.get("name", ""): a.get("browser_download_url") for a in rel.get("assets") or []}
+        zips = [n for n in assets if n.endswith(".zip")]
+        if not zips or f"{zips[0]}.sig" not in assets:
+            continue
+        if best is None or version > best["version"]:
+            best = {"version": version, "text": ".".join(map(str, version)), "tag": rel.get("tag_name", ""),
+                    "prerelease": bool(rel.get("prerelease")), "notes": rel.get("body") or "",
+                    "published": rel.get("published_at") or "", "zip_url": assets[zips[0]],
+                    "sig_url": assets[f"{zips[0]}.sig"]}
+    return best
+
+
+def _signature_ok(data: bytes, sig_text: str, public_key_b64: str) -> bool:
+    """True only if `sig_text` (base64) is a valid Ed25519 signature of `data` for that key."""
+    if not public_key_b64:
+        return False
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64)).verify(
+            base64.b64decode(sig_text.strip()), data)
+        return True
+    except Exception:
+        return False
+
+
+def _read_release_zip(data: bytes, version_text: str) -> dict[str, bytes]:
+    """The files of a release zip, after checking that it holds exactly the expected ones, that
+    every .py compiles and that commands.py announces the version the release claims."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        names = [i.filename for i in zf.infolist() if not i.is_dir()]
+    except zipfile.BadZipFile:
+        raise UpgradeError("The downloaded file is not a valid zip.")
+    if sorted(names) != sorted(UPGRADE_FILES):
+        raise UpgradeError("The release does not contain exactly the expected files.")
+    files = {name: zf.read(name) for name in names}
+    for name, content in files.items():
+        if name.endswith(".py"):
+            try:
+                compile(content, name, "exec")
+            except SyntaxError as e:
+                raise UpgradeError(f"{name} does not compile ({e.msg}, line {e.lineno}).")
+    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
+    if not m or m.group(1).decode() != version_text:
+        raise UpgradeError("The version inside the release does not match its tag.")
+    return files
+
+
+def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
+    """Replace the plugin's files with the release's, keeping a copy of the old ones in
+    <plugin_dir>/.backup. Any failure puts the old files back and raises. Other files in the
+    folder are left alone. Returns the backup folder."""
+    targets = {name.rsplit("/", 1)[1]: content for name, content in files.items() if name.startswith("plugins/")}
+    backup = os.path.join(plugin_dir, ".backup")
+    old = {}
+    for name in targets:
+        path = os.path.join(plugin_dir, name)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                old[name] = f.read()
+    os.makedirs(backup, exist_ok=True)
+    for name, content in old.items():
+        with open(os.path.join(backup, name), "wb") as f:
+            f.write(content)
+    done = []
+    try:
+        for name, content in targets.items():
+            path = os.path.join(plugin_dir, name)
+            with open(path + ".new", "wb") as f:
+                f.write(content)
+            os.replace(path + ".new", path)
+            done.append(name)
+    except Exception:
+        for name in done:
+            if name in old:
+                with open(os.path.join(plugin_dir, name), "wb") as f:
+                    f.write(old[name])
+        for name in targets:
+            try:
+                os.remove(os.path.join(plugin_dir, name) + ".new")
+            except OSError:
+                pass
+        raise
+    return backup
+
+
+def _upgrade_embed(current_text: str, release: dict) -> discord.Embed:
+    embed = discord.Embed(title="⬆️ Fh_Report — new release available",
+                          description=(release["notes"].strip()[:900] or "(no release notes)"),
+                          color=0xF39C12 if release["prerelease"] else 0x2ECC71)
+    embed.add_field(name="Installed", value=f"Ver. {current_text}", inline=True)
+    embed.add_field(name="Available", value=f"Ver. {release['text']}", inline=True)
+    if release["prerelease"]:
+        embed.add_field(name="⚠️ PRE-RELEASE",
+                        value="This is a pre-release: it may be unstable. Update only if you want to test it.",
+                        inline=False)
+    embed.add_field(name="What happens",
+                    value="The files are replaced (a copy of the old ones is kept), the configuration is "
+                          "migrated and DCSServerBot **restarts**.", inline=False)
+    return embed
+
+
+class _UpgradeView(discord.ui.View):
+    """Update / Cancel buttons; only the admin who ran the command can press them."""
+
+    def __init__(self, plugin, user_id: int, release: dict):
+        super().__init__(timeout=60)
+        self.plugin, self.user_id, self.release = plugin, user_id, release
+        self.interaction = None          # the /fh_report upgrade interaction, set once the offer is sent
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Update and restart", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await self.plugin._upgrade_run(interaction, self.release)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Update cancelled.", embed=None, view=None)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(content="Update offer expired.", embed=None, view=None)
+        except Exception:
+            pass
+
+
+
 class Fh_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
     Supports multiple server instances defined in fh_report.yaml.
@@ -4172,6 +4339,83 @@ class Fh_Report(Plugin):
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
+    # ── Upgrade from GitHub releases ──────────────────────────────────────
+
+    async def _http_get(self, url: str, as_json: bool = False):
+        """GET `url` (HTTPS only, at most UPGRADE_MAX_BYTES). JSON or bytes."""
+        import aiohttp
+        if not url.startswith("https://"):
+            raise UpgradeError("Refusing a non-HTTPS download address.")
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Fh_Report-upgrade",
+                                                                 "Accept": "application/vnd.github+json"}) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise UpgradeError(f"GitHub answered {resp.status}.")
+                data = await resp.content.read(UPGRADE_MAX_BYTES + 1)
+        if len(data) > UPGRADE_MAX_BYTES:
+            raise UpgradeError("The download is larger than expected.")
+        return json.loads(data) if as_json else data
+
+    async def _upgrade_lookup(self) -> dict | None:
+        """The release to offer, or None when the installed one is the newest."""
+        releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
+                                        as_json=True)
+        return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
+
+    def _run_migration(self, migrate_source: bytes) -> str:
+        """Run the release's migrate_config.py on this installation's fh_report.yaml.
+        Returns "" when fine, else a short note (the config is left as it was)."""
+        yaml_path = os.path.join(self.node.config_dir, "plugins", "fh_report.yaml")
+        if not os.path.exists(yaml_path):
+            return ""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "migrate_config.py")
+            with open(script, "wb") as f:
+                f.write(migrate_source)
+            try:
+                res = subprocess.run([sys.executable, script, yaml_path], capture_output=True, text=True,
+                                     timeout=120)
+            except Exception as e:
+                return f"configuration migration could not run ({e})"
+        return "" if res.returncode == 0 else "configuration migration reported an error (your file is unchanged)"
+
+    async def _upgrade_run(self, interaction: discord.Interaction, release: dict) -> None:
+        """Download, verify, install, migrate and restart, telling the admin each step."""
+        if self.__dict__.get("_upgrading"):
+            await interaction.followup.send("An update is already running.", ephemeral=True)
+            return
+        self.__dict__["_upgrading"] = True
+
+        async def say(text: str) -> None:
+            await interaction.edit_original_response(content=text, embed=None, view=None)
+        try:
+            await say("⏳ Downloading the release...")
+            data = await self._http_get(release["zip_url"])
+            sig = (await self._http_get(release["sig_url"])).decode("ascii", "ignore")
+            await say("🔐 Verifying the signature...")
+            if not _signature_ok(data, sig, UPGRADE_PUBLIC_KEY):
+                raise UpgradeError("The signature is not valid: nothing was installed.")
+            files = _read_release_zip(data, release["text"])
+            await say("📦 Installing...")
+            plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            _install_release_files(plugin_dir, files)
+            note = await asyncio.to_thread(self._run_migration, files["migrate_config.py"])
+        except UpgradeError as e:
+            self.__dict__["_upgrading"] = False
+            await say(f"❌ Update stopped: {e}")
+            return
+        except Exception as e:
+            self.__dict__["_upgrading"] = False
+            self.log.error(f"Fh_Report: update failed: {e}", exc_info=True)
+            await say(f"❌ Update failed, the previous version is still in place: {e}")
+            return
+        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']}, restarting DCSServerBot.")
+        await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
+                  + " Restarting DCSServerBot now...")
+        await asyncio.sleep(1)
+        await self.bot.node.restart()
+
     async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False) -> None:
         """Private reply that removes itself: after 5 s when it reports success,
         after 30 s for anything else (errors, refusals), so the channel stays clean."""
@@ -4189,6 +4433,31 @@ class Fh_Report(Plugin):
         tasks = self.__dict__.setdefault("_temp_replies", set())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    @fh_report.command(name="upgrade", description="Admin only: update the plugin to the newest GitHub release and restart the bot.")
+    @utils.app_has_role("Admin")
+    async def upgrade(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not UPGRADE_PUBLIC_KEY:
+            await interaction.followup.send(
+                "❌ Updating from Discord is not set up in this version (no release-signing key).", ephemeral=True)
+            return
+        try:
+            release = await self._upgrade_lookup()
+        except UpgradeError as e:
+            await interaction.followup.send(f"❌ Could not check for updates: {e}", ephemeral=True)
+            return
+        except Exception as e:
+            self.log.error(f"Fh_Report: update check failed: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Could not check for updates: {e}", ephemeral=True)
+            return
+        if release is None:
+            await interaction.followup.send(f"✅ You already have the newest release (Ver. {FH_REPORT_RELEASE}).",
+                                            ephemeral=True)
+            return
+        view = _UpgradeView(self, interaction.user.id, release)
+        view.interaction = interaction
+        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release), view=view, ephemeral=True)
 
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
     @app_commands.describe(_server="Which server — only needed if more than one is configured.")

@@ -319,6 +319,22 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 - It never runs at the same time as the automatic refresh of the same server.
 - The reply is private and removes itself: after 5 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
 
+## `/fh_report upgrade` — update from Discord (admins)
+
+`/fh_report upgrade` checks the GitHub releases of this plugin and, if a newer one exists, offers to install it and restart DCSServerBot. It needs the `Admin` role of DCSServerBot, replies privately, and only the admin who ran it can press the buttons.
+
+1. The reply shows the installed version, the new one and the release notes. A **pre-release** is marked with a clear warning.
+2. **Update and restart** downloads the release, installs it and restarts the bot. **Cancel** (or letting it expire after a minute) changes nothing. Running the command and cancelling is the way to just check.
+3. Safety:
+   - Only releases **signed by the plugin's author** are installed: the release zip must carry a valid signature that matches the key built into the plugin. A release without a valid signature is refused and nothing changes.
+   - The zip may only contain the plugin's own files; each one is checked before anything is replaced.
+   - The previous files are kept in `plugins/fh_report/.backup`, and if anything fails halfway they are put back and the bot is **not** restarted.
+   - Your `fh_report.yaml` is migrated with the release's migration script, the same one `install.cmd` runs.
+   - Other files you keep in the plugin folder are not touched.
+4. The restart relies on how you start DCSServerBot: launched with `run.cmd` (or a service that restarts it) it comes back by itself; launched any other way it would only stop.
+
+It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
+
 ## `/fh_report player` — personal stats command
 
 A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.

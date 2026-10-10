@@ -46,6 +46,23 @@ class NotFound(HTTPException):
     pass
 
 
+class ButtonStyle:
+    danger, secondary = "danger", "secondary"
+
+
+class ui:
+    class View:
+        def __init__(self, timeout=None):
+            self.timeout, self.stopped = timeout, False
+
+        def stop(self):
+            self.stopped = True
+
+    @staticmethod
+    def button(**_):
+        return lambda f: f
+
+
 class _Passthrough:
     def __class_getitem__(cls, item):
         return object

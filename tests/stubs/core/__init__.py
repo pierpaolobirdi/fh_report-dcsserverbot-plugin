@@ -38,6 +38,10 @@ class utils:
             return False
 
     @staticmethod
+    def app_has_role(role):
+        return lambda f: f
+
+    @staticmethod
     def check_roles(roles, member):
         return False
 
