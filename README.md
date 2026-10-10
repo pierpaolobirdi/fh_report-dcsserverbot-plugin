@@ -628,7 +628,7 @@ __21/08/2026__
 ...
 ```
 
-Here `podium_combined_top: 1` means every day normally shows only the champion — but `podium_combined_min3_latest_day: true` forces yesterday specifically to show the top 3, so the most recent day gets extra detail while older days stay compact. Ranks shown are always current (not frozen from that day), and pull from custom ranks set in `fh_hook.yaml` just like every other table. A day with a campaign restart shows `(Session End)` next to its date.
+Here `podium_combined_top: 1` means every day normally shows only the champion — but `podium_combined_min3_latest_day: true` forces yesterday specifically to show the top 3, so the most recent day gets extra detail while older days stay compact. Ranks shown are always current (not frozen from that day), and pull from custom ranks set in `fh_hook.yaml` just like every other table. A day with a campaign restart shows `(Session End)` next to its date. On every day **except the latest**, the emoji in front of a name is the player's own medal (`custom_medal`) when your `fh_hook` gives one, in every position; players without one, and the whole latest day, keep the default 🥇🥈🥉 / 🎖️.
 
 ### A dedicated Podium-only table (`P` on its own)
 

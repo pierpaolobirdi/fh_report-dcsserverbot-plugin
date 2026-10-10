@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.0"
+FH_REPORT_RELEASE = "14.4.1"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1235,6 +1235,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     p_name = players_by_base.get(strip_callsign(name))
                     if p_name is not None:
                         current_name, player_data = p_name, players[p_name]
+                # Older days show the player's own medal when the hook gives one;
+                # the latest day keeps the default medals and never looks at it.
+                if not is_latest_day and player_data and player_data.get("custom_medal"):
+                    marker = player_data["custom_medal"]
                 # Current name if the player could be identified; otherwise
                 # (excluded, or no longer in Foothold_Ranks.lua) the name
                 # stored for that day, without a rank.
