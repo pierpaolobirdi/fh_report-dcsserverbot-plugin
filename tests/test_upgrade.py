@@ -266,3 +266,9 @@ def test_release_tool_copes_with_a_key_on_another_drive(monkeypatch):
         raise ValueError("Paths don't have the same drive")
     monkeypatch.setattr(tool.os.path, "commonpath", other_drive)
     assert tool._inside("L:\\keys\\k.key", "D:\\repo") is False
+
+
+def test_the_key_stored_in_the_plugin_is_a_valid_ed25519_public_key():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    assert commands.UPGRADE_PUBLIC_KEY
+    Ed25519PublicKey.from_public_bytes(base64.b64decode(commands.UPGRADE_PUBLIC_KEY, validate=True))
