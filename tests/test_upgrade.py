@@ -224,6 +224,16 @@ def test_only_what_is_newer_gets_an_enabled_button(tmp_path, monkeypatch):
     assert view.update_release.disabled is False and view.update_dev.disabled is True
 
 
+def test_dev_is_offered_only_when_it_is_above_the_release_too(tmp_path, monkeypatch):
+    def buttons(release_tag, dev_version):
+        plugin, _ = _plugin([_rel(release_tag)], {}, tmp_path, monkeypatch, dev_zip=_zip(version=dev_version))
+        view = _run_command(plugin).followup.sent[0][2]
+        return (not view.update_release.disabled, not view.update_dev.disabled)
+    assert buttons("v.14.9.0", "14.9.0") == (True, False)        # same version: only the release
+    assert buttons("v.14.9.0", "14.8.0") == (True, False)        # dev behind the release: only the release
+    assert buttons("v.14.9.0", "14.9.1") == (True, True)         # dev ahead of the release: both
+
+
 def test_without_a_dev_password_the_dev_branch_is_not_even_checked(tmp_path, monkeypatch):
     plugin, _ = _plugin([_rel("v.14.9.0")], {}, tmp_path, monkeypatch, dev_zip=_zip(version="14.9.5"), with_password=False)
     _, embed, view = _run_command(plugin).followup.sent[0]

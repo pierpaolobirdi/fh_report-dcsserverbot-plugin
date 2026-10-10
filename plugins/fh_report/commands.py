@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.8"
+FH_REPORT_RELEASE = "14.4.9"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4564,6 +4564,8 @@ class Fh_Report(Plugin):
             except Exception as e:
                 self.log.error(f"Fh_Report: development-branch check failed: {e}", exc_info=not isinstance(e, UpgradeError))
                 notes.append(f"Could not check the development branch: {e}")
+        if release and dev and dev["version"] <= release["version"]:
+            dev = None                  # the release is as new (or newer) and more stable: no point in offering dev
         if release is None and dev is None:
             text = (f"❌ {' '.join(notes)}" if notes else
                     f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
