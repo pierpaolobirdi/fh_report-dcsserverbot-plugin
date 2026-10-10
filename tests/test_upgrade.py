@@ -468,7 +468,7 @@ def test_the_restart_notice_reports_ok_or_a_mismatch(tmp_path, monkeypatch):
             {"app_id": 1, "token": "t", "message_id": 42, "expected": expected, "created": time.time()}))
         waits = _timed(monkeypatch, plugin, plugin._finish_restart_notice)
         assert hook.edits[0][0] == "@original" and hook.edits[0][1].startswith(mark)    # the button's own message first
-        assert waits == [10] and hook.deleted == ["@original"]
+        assert waits == [20] and hook.deleted == ["@original"]
         assert not (folder / ".restart_notice.json").exists()
 
 
@@ -545,7 +545,7 @@ def _notice_with(tmp_path, monkeypatch, hook):
 def test_if_discord_refuses_the_original_the_message_id_is_tried(tmp_path, monkeypatch):
     hook = _Hook(refuse=("@original",))
     plugin, waits = _notice_with(tmp_path, monkeypatch, hook)
-    assert hook.edits[0][0] == 42 and waits == [10] and hook.deleted == [42]
+    assert hook.edits[0][0] == 42 and waits == [20] and hook.deleted == [42]
 
 
 def test_if_both_ways_fail_it_is_logged_as_a_warning(tmp_path, monkeypatch, caplog):

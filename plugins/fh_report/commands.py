@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.13"
+FH_REPORT_RELEASE = "14.4.14"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4609,7 +4609,7 @@ class Fh_Report(Plugin):
                     last_error = e
                     continue
                 self.log.info(f"Fh_Report: restart notice delivered ({text[:2]}).")
-                self._later(10, lambda target=target: hook.delete_message(target))
+                self._later(20, lambda target=target: hook.delete_message(target))
                 return
             self.log.warning(f"Fh_Report: could not update the restart message: {last_error!r}")
         except Exception as e:
