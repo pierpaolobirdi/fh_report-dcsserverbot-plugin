@@ -468,6 +468,11 @@ def test_the_restart_notice_reports_ok_or_a_mismatch(tmp_path, monkeypatch):
             {"app_id": 1, "token": "t", "message_id": 42, "expected": expected, "created": time.time()}))
         waits = _timed(monkeypatch, plugin, plugin._finish_restart_notice)
         assert hook.edits[0][0] == "@original" and hook.edits[0][1].startswith(mark)    # the button's own message first
+        text = hook.edits[0][1]
+        if mark == "✅":
+            assert text == f"✅ DCSServerBot ha sido actualizado correctamente.\nFh_Report Ver. {current} está corriendo ahora."
+        else:
+            assert "no se ha aplicado" in text and "14.4.3" in text and "14.9.0" in text
         assert waits == [20] and hook.deleted == ["@original"]
         assert not (folder / ".restart_notice.json").exists()
 

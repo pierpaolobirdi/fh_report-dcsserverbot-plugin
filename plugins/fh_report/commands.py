@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.14"
+FH_REPORT_RELEASE = "14.4.15"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4594,10 +4594,11 @@ class Fh_Report(Plugin):
                 return                                   # too old: Discord no longer accepts its token
             expected = str(data["expected"])
             if expected == FH_REPORT_RELEASE:
-                text = f"✅ DCSServerBot is back. Fh_Report Ver. {FH_REPORT_RELEASE} is running."
+                text = (f"✅ DCSServerBot ha sido actualizado correctamente.\n"
+                        f"Fh_Report Ver. {FH_REPORT_RELEASE} está corriendo ahora.")
             else:
-                text = (f"⚠️ DCSServerBot is back, but Fh_Report Ver. {FH_REPORT_RELEASE} is running "
-                        f"(Ver. {expected} was expected).")
+                text = (f"⚠️ DCSServerBot se ha reiniciado, pero la actualización no se ha aplicado.\n"
+                        f"Fh_Report Ver. {FH_REPORT_RELEASE} está corriendo (se esperaba la Ver. {expected}).")
             hook = self._notice_webhook(data["app_id"], data["token"])
             last_error = None
             # The message is the one the "Restart now" button sat on: "@original" for that button's
