@@ -415,10 +415,12 @@ def test_a_failed_update_message_goes_after_30_seconds(tmp_path, monkeypatch):
 
 
 class _Hook:
-    def __init__(self):
-        self.edits, self.deleted = [], []
+    def __init__(self, refuse=()):
+        self.edits, self.deleted, self.refuse = [], [], refuse
 
     async def edit_message(self, message_id, **kw):
+        if message_id in self.refuse:
+            raise RuntimeError(f"404 for {message_id}")
         self.edits.append((message_id, kw["content"]))
 
     async def delete_message(self, message_id):
@@ -465,8 +467,8 @@ def test_the_restart_notice_reports_ok_or_a_mismatch(tmp_path, monkeypatch):
         (folder / ".restart_notice.json").write_text(json.dumps(
             {"app_id": 1, "token": "t", "message_id": 42, "expected": expected, "created": time.time()}))
         waits = _timed(monkeypatch, plugin, plugin._finish_restart_notice)
-        assert hook.edits[0][0] == 42 and hook.edits[0][1].startswith(mark)
-        assert waits == [10] and hook.deleted == [42]
+        assert hook.edits[0][0] == "@original" and hook.edits[0][1].startswith(mark)    # the button's own message first
+        assert waits == [10] and hook.deleted == ["@original"]
         assert not (folder / ".restart_notice.json").exists()
 
 
@@ -525,3 +527,29 @@ def test_later_and_an_unanswered_restart_question_clean_up_after_30_seconds(tmp_
     view.interaction = unanswered = _Interaction()
     assert _timed(monkeypatch, plugin, view.on_timeout) == [30] and unanswered.deleted == [True]
     assert restarted == []                                                      # neither of them restarts anything
+
+
+def _notice_with(tmp_path, monkeypatch, hook):
+    import json
+    import time
+    d = _folder(tmp_path)
+    monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
+    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "14.9.0")
+    plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
+    plugin._notice_webhook = lambda app_id, token: hook
+    (d / ".restart_notice.json").write_text(json.dumps(
+        {"app_id": 1, "token": "t", "message_id": 42, "expected": "14.9.0", "created": time.time()}))
+    return plugin, _timed(monkeypatch, plugin, plugin._finish_restart_notice)
+
+
+def test_if_discord_refuses_the_original_the_message_id_is_tried(tmp_path, monkeypatch):
+    hook = _Hook(refuse=("@original",))
+    plugin, waits = _notice_with(tmp_path, monkeypatch, hook)
+    assert hook.edits[0][0] == 42 and waits == [10] and hook.deleted == [42]
+
+
+def test_if_both_ways_fail_it_is_logged_as_a_warning(tmp_path, monkeypatch, caplog):
+    hook = _Hook(refuse=("@original", 42))
+    with caplog.at_level("WARNING", logger="fh_report.tests"):
+        plugin, waits = _notice_with(tmp_path, monkeypatch, hook)
+    assert hook.edits == [] and waits == [] and "could not update the restart message" in caplog.text

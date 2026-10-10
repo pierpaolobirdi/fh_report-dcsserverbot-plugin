@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.12"
+FH_REPORT_RELEASE = "14.4.13"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4567,8 +4567,9 @@ class Fh_Report(Plugin):
                 json.dump({"app_id": interaction.application_id, "token": interaction.token,
                            "message_id": interaction.message.id, "expected": expected,
                            "created": time.time()}, f)
+            self.log.info("Fh_Report: restart notice saved for the next start.")
         except Exception as e:
-            self.log.debug(f"Fh_Report: could not save the restart notice: {e!r}")
+            self.log.warning(f"Fh_Report: could not save the restart notice: {e!r}")
 
     def _notice_webhook(self, app_id, token):
         return discord.Webhook.partial(app_id, token, client=self.bot)
@@ -4598,11 +4599,21 @@ class Fh_Report(Plugin):
                 text = (f"⚠️ DCSServerBot is back, but Fh_Report Ver. {FH_REPORT_RELEASE} is running "
                         f"(Ver. {expected} was expected).")
             hook = self._notice_webhook(data["app_id"], data["token"])
-            message_id = int(data["message_id"])
-            await hook.edit_message(message_id, content=text, embeds=[], view=None)
-            self._later(10, lambda: hook.delete_message(message_id))
+            last_error = None
+            # The message is the one the "Restart now" button sat on: "@original" for that button's
+            # token; its numeric id as a second way if Discord refuses the first.
+            for target in ("@original", int(data["message_id"])):
+                try:
+                    await hook.edit_message(target, content=text, embeds=[], view=None)
+                except Exception as e:
+                    last_error = e
+                    continue
+                self.log.info(f"Fh_Report: restart notice delivered ({text[:2]}).")
+                self._later(10, lambda target=target: hook.delete_message(target))
+                return
+            self.log.warning(f"Fh_Report: could not update the restart message: {last_error!r}")
         except Exception as e:
-            self.log.debug(f"Fh_Report: could not finish the restart notice: {e!r}")
+            self.log.warning(f"Fh_Report: could not finish the restart notice: {e!r}")
 
     @fh_report.command(name="upgrade", description="Admin only: update the plugin from GitHub (release or development branch).")
     @utils.app_has_role("Admin")
