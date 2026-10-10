@@ -211,3 +211,68 @@ def test_a_broken_release_installs_nothing_and_does_not_restart(tmp_path, monkey
     assert "does not match its tag" in interaction.edits[-1]
 
 
+
+
+# ── the download itself (aiohttp replaced by a fake that hands the body over in pieces) ──
+
+def _fake_aiohttp(monkeypatch, body: bytes, status=200, scheme="https", piece=1000):
+    import sys
+    import types
+
+    class _Content:
+        async def iter_chunked(self, n):
+            for i in range(0, len(body), piece):
+                yield body[i:i + piece]
+
+    class _Resp:
+        def __init__(self):
+            self.status, self.content = status, _Content()
+            self.url = type("U", (), {"scheme": scheme})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+    class _Session:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def get(self, url):
+            return _Resp()
+
+    mod = types.ModuleType("aiohttp")
+    mod.ClientTimeout = lambda **_: None
+    mod.ClientSession = _Session
+    monkeypatch.setitem(sys.modules, "aiohttp", mod)
+
+
+def test_a_body_that_arrives_in_pieces_is_read_whole(monkeypatch):
+    import json
+    body = json.dumps([{"tag_name": "v.14.9.0", "body": "x" * 20000}]).encode()      # far more than one piece
+    _fake_aiohttp(monkeypatch, body)
+    got = asyncio.run(make_plugin()._http_get("https://api.github.com/x", as_json=True))
+    assert got[0]["tag_name"] == "v.14.9.0" and len(got[0]["body"]) == 20000
+    assert asyncio.run(make_plugin()._http_get("https://api.github.com/x")) == body
+
+
+def test_the_download_is_refused_when_too_big_not_https_or_not_200(monkeypatch):
+    _fake_aiohttp(monkeypatch, b"x" * 3000)
+    monkeypatch.setattr(commands, "UPGRADE_MAX_BYTES", 2000)
+    with pytest.raises(commands.UpgradeError, match="larger"):
+        asyncio.run(make_plugin()._http_get("https://h/x"))
+    _fake_aiohttp(monkeypatch, b"x", status=404)
+    with pytest.raises(commands.UpgradeError, match="404"):
+        asyncio.run(make_plugin()._http_get("https://h/x"))
+    _fake_aiohttp(monkeypatch, b"x", scheme="http")
+    with pytest.raises(commands.UpgradeError, match="HTTPS"):
+        asyncio.run(make_plugin()._http_get("https://h/x"))
+    with pytest.raises(commands.UpgradeError, match="non-HTTPS"):
+        asyncio.run(make_plugin()._http_get("http://h/x"))

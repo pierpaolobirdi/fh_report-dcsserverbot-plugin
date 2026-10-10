@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.5"
+FH_REPORT_RELEASE = "14.4.6"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4341,9 +4341,13 @@ class Fh_Report(Plugin):
                     raise UpgradeError(f"GitHub answered {resp.status}.")
                 if resp.url.scheme != "https":
                     raise UpgradeError("Refusing a download that left HTTPS.")
-                data = await resp.content.read(UPGRADE_MAX_BYTES + 1)
-        if len(data) > UPGRADE_MAX_BYTES:
-            raise UpgradeError("The download is larger than expected.")
+                chunks, size = [], 0
+                async for chunk in resp.content.iter_chunked(65536):      # the whole body, not just what has arrived
+                    size += len(chunk)
+                    if size > UPGRADE_MAX_BYTES:
+                        raise UpgradeError("The download is larger than expected.")
+                    chunks.append(chunk)
+        data = b"".join(chunks)
         return json.loads(data) if as_json else data
 
     async def _upgrade_lookup(self) -> dict | None:
