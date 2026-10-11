@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.23"
+FH_REPORT_RELEASE = "14.4.24"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2251,18 +2251,18 @@ def _finish_embed(embed: discord.Embed, cfg: dict, where: str | None = None) -> 
     return _trim_embed(embed)
 
 
-_FOOTER_PREVIEW = True   # TEMPORARY, removed once the symbol is chosen
+_NEW_RELEASE: str | None = None     # newest stable release found on GitHub, e.g. "14.5.0"
 
 
 def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
-    on the Master, N = on a remote node) is added only on a cluster of several nodes."""
-    base = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
-    if _FOOTER_PREVIEW:
-        # TEMPORARY look-and-feel test: one line per candidate symbol.
-        return "\n".join(f"{base} · {sym} 14.5.0 avail. → /fh_report upgrade"
-                         for sym in ("⬆", "🔔", "⚠️", "🆕", "📢", "✨", "🚀", "❗", "📣"))
-    return base
+    on the Master, N = on a remote node) is added only on a cluster of several nodes.
+    A newer stable release, when one was found, is added at the end."""
+    text = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    new = _release_version(_NEW_RELEASE)
+    if new and new > (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+        text += f" · 📣 Ver. {_NEW_RELEASE} available"
+    return text
 
 
 def _show_map(cfg: dict) -> bool:
@@ -2765,12 +2765,12 @@ def _release_version(text) -> tuple[int, int, int] | None:
     return tuple(int(x) for x in m.groups()) if m else None
 
 
-def _pick_release(releases: list, current: tuple[int, int, int]) -> dict | None:
+def _pick_release(releases: list, current: tuple[int, int, int], stable_only: bool = False) -> dict | None:
     """The newest published release above `current`; its code is GitHub's own zip of the tag.
     Drafts are ignored; a pre-release is returned with prerelease=True."""
     best = None
     for rel in releases or []:
-        if rel.get("draft"):
+        if rel.get("draft") or (stable_only and rel.get("prerelease")):
             continue
         version = _release_version(rel.get("tag_name"))
         if not version or version <= current:
@@ -3221,6 +3221,7 @@ class Fh_Report(Plugin):
     @updater.before_loop
     async def before_updater(self):
         await self.bot.wait_until_ready()
+        self._load_latest_release()
         await self._finish_restart_notice()
 
     def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
@@ -3403,6 +3404,8 @@ class Fh_Report(Plugin):
             stats_carry_over = {}
 
         elif date_reset_due:
+            if persist:
+                await self._check_new_release()
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
             self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_h:02d}:{reset_m:02d} {tz}{reason}")
 
@@ -4542,6 +4545,46 @@ class Fh_Report(Plugin):
                                         as_json=True)
         return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
 
+    @staticmethod
+    def _latest_release_file() -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".latest_release.json")
+
+    def _load_latest_release(self) -> None:
+        """Bring back what the last check found, so a restart does not forget it."""
+        global _NEW_RELEASE
+        try:
+            with open(self._latest_release_file(), encoding="utf-8") as f:
+                data = json.load(f)
+            _NEW_RELEASE = data.get("version") or None
+            self._release_checked = float(data.get("checked") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    _release_checked = 0.0
+
+    async def _check_new_release(self, force: bool = False) -> None:
+        """Look for a newer STABLE release (no pre-release, no dev) and remember it for the
+        embed footers. Run at the daily close and by /fh_report update; at most once every
+        6 hours unless forced. A failed look changes nothing."""
+        global _NEW_RELEASE
+        now = time.time()
+        if not force and now - self._release_checked < 6 * 3600:
+            return
+        self._release_checked = now
+        try:
+            releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
+                                            as_json=True)
+            rel = _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0), stable_only=True)
+        except Exception as e:
+            self.log.debug(f"Fh_Report: could not look for a new release: {e!r}")
+            return
+        _NEW_RELEASE = rel["text"] if rel else None
+        try:
+            with open(self._latest_release_file(), "w", encoding="utf-8") as f:
+                json.dump({"version": _NEW_RELEASE, "checked": now}, f)
+        except OSError as e:
+            self.log.debug(f"Fh_Report: could not save the latest release: {e!r}")
+
     async def _upgrade_lookup_dev(self) -> dict | None:
         """The development branch, if its version is above the installed one (None if not). The zip is
         downloaded and checked now, so what is offered is exactly what would be installed."""
@@ -4753,6 +4796,7 @@ class Fh_Report(Plugin):
                 f"❌ **{name}** has no usable report channel (`channel_id` missing or not found).")
             return
         self._cycle_punishment = None        # fresh penalties, not the last cycle's
+        await self._check_new_release(force=True)
         try:
             await self._update_server(srv, cfg)
         except Exception as e:

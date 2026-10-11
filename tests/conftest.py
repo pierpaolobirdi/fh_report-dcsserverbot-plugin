@@ -25,8 +25,6 @@ sys.path[:0] = [os.path.join(ROOT, "tests", "stubs"), os.path.join(ROOT, "plugin
 
 from fh_report import commands  # noqa: E402
 
-commands._FOOTER_PREVIEW = False   # the live look-and-feel test must not reach the tests
-
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 GOLDEN   = os.path.join(ROOT, "tests", "golden")
 UPDATE_GOLDEN = os.environ.get("FH_UPDATE_GOLDEN") == "1"
@@ -120,6 +118,19 @@ def check_golden(name: str, results: dict) -> None:
         expected = json.load(f)
     changed = sorted(k for k in expected.keys() | results.keys() if expected.get(k) != results.get(k))
     assert not changed, f"{len(changed)} case(s) differ from {name}, e.g. {changed[:5]}"
+
+
+ORIG_CHECK_NEW_RELEASE = commands.Fh_Report._check_new_release
+
+
+async def _no_release_check(self, force=False):
+    """Tests never go to GitHub; the real check is ORIG_CHECK_NEW_RELEASE."""
+
+
+@pytest.fixture(autouse=True)
+def _no_github(monkeypatch):
+    monkeypatch.setattr(commands.Fh_Report, "_check_new_release", _no_release_check)
+    monkeypatch.setattr(commands, "_NEW_RELEASE", None)
 
 
 @pytest.fixture(autouse=True)

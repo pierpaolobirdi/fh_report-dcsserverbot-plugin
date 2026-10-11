@@ -337,6 +337,10 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 
 It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
 
+### The "new release" note in the footers
+
+When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`.
+
 ## `/fh_report player` — personal stats command
 
 A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.

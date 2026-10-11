@@ -558,3 +558,71 @@ def test_if_both_ways_fail_it_is_logged_as_a_warning(tmp_path, monkeypatch, capl
     with caplog.at_level("WARNING", logger="fh_report.tests"):
         plugin, waits = _notice_with(tmp_path, monkeypatch, hook)
     assert hook.edits == [] and waits == [] and "could not update the restart message" in caplog.text
+
+
+# ── the "new release available" note in the footers ────────────────────────────────
+
+import asyncio
+from conftest import ORIG_CHECK_NEW_RELEASE
+
+
+def _releases():
+    return [{"tag_name": "v.14.6.0", "prerelease": True, "zipball_url": "https://x/z"},
+            {"tag_name": "v.14.5.0", "zipball_url": "https://x/z"},
+            {"tag_name": "v.14.9.0", "draft": True, "zipball_url": "https://x/z"},
+            {"tag_name": "v.14.0.0", "zipball_url": "https://x/z"}]
+
+
+def test_only_a_stable_release_above_the_installed_one_is_announced():
+    cur = commands._release_version(commands.FH_REPORT_RELEASE)
+    assert commands._pick_release(_releases(), cur, stable_only=True)["text"] == "14.5.0"
+    assert commands._pick_release(_releases(), cur)["text"] == "14.6.0"
+    assert commands._pick_release(_releases(), (14, 5, 0), stable_only=True) is None
+
+
+def test_the_footer_shows_the_new_release_after_the_version_and_the_node(monkeypatch):
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
+    monkeypatch.setattr(commands, "_NEW_RELEASE", "99.0.0")
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M · 📣 Ver. 99.0.0 available"
+    assert commands._version_text().endswith("📣 Ver. 99.0.0 available")
+    monkeypatch.setattr(commands, "_NEW_RELEASE", commands.FH_REPORT_RELEASE)     # already installed: nothing
+    assert "available" not in commands._version_text()
+
+
+def _checker(monkeypatch, tmp_path, answer):
+    p = make_plugin()
+    monkeypatch.setattr(commands.Fh_Report, "_latest_release_file", staticmethod(lambda: str(tmp_path / "l.json")))
+
+    async def fake_get(url, as_json=False):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    p._http_get = fake_get
+    return p
+
+
+def test_the_check_remembers_a_stable_release_and_a_failed_look_changes_nothing(monkeypatch, tmp_path):
+    p = _checker(monkeypatch, tmp_path, [{"tag_name": "v.99.1.0", "zipball_url": "https://x/z"}])
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
+    assert commands._NEW_RELEASE == "99.1.0"
+    q = _checker(monkeypatch, tmp_path, commands.UpgradeError("offline"))
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(q, force=True))
+    assert commands._NEW_RELEASE == "99.1.0"
+    r = make_plugin()                        # a restart: read back from the file
+    monkeypatch.setattr(commands, "_NEW_RELEASE", None)
+    r._load_latest_release()
+    assert commands._NEW_RELEASE == "99.1.0"
+
+
+def test_the_check_runs_at_most_every_six_hours_unless_forced(monkeypatch, tmp_path):
+    calls = []
+    p = _checker(monkeypatch, tmp_path, [])
+    async def counting(url, as_json=False):
+        calls.append(1)
+        return []
+    p._http_get = counting
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p))
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p))
+    assert len(calls) == 1
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
+    assert len(calls) == 2
