@@ -88,6 +88,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `enable_updates` | `true` | `false` = this instance never reads, posts, or edits anything for this server — see [Enabling or disabling per instance](#enabling-or-disabling-per-instance-enable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
+| `show_new_release` | `true` | `true` = the footers note when a newer stable release exists (see *The "new release" note*); `false` = never look for it. Read from `DEFAULT`, applies to every server |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 | `commands_channel_id` | none | *(per server only)* Extra channel(s) allowed to run `/fh_report player`/`podium` for this server, besides its own report channel — see [Multiple servers](#multiple-servers-server--commands_channel_id) below |
 
@@ -339,7 +340,7 @@ It is not an automatic updater: nothing happens unless an admin runs the command
 
 ### The "new release" note in the footers
 
-When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`.
+When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
 
 ## `/fh_report player` — personal stats command
 

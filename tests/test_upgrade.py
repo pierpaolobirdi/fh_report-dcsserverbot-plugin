@@ -626,3 +626,17 @@ def test_the_check_runs_at_most_every_six_hours_unless_forced(monkeypatch, tmp_p
     assert len(calls) == 1
     asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
     assert len(calls) == 2
+
+
+def test_show_new_release_false_never_looks_and_shows_nothing(monkeypatch, tmp_path):
+    p = _checker(monkeypatch, tmp_path, [{"tag_name": "v.99.1.0", "zipball_url": "https://x/z"}])
+    p.locals = {"DEFAULT": {"show_new_release": False}}
+    monkeypatch.setattr(commands, "_NEW_RELEASE", "99.1.0")
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
+    assert commands._NEW_RELEASE is None
+    (tmp_path / "l.json").write_text('{"version": "99.1.0", "checked": 1}')
+    p._load_latest_release()
+    assert commands._NEW_RELEASE is None
+    p.locals = {"DEFAULT": {"show_new_release": True}}       # on again
+    asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
+    assert commands._NEW_RELEASE == "99.1.0"

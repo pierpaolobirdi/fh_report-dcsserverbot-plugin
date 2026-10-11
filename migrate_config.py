@@ -357,6 +357,13 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                              players they can check their own stats.
 #   player_cmd_hint_text - Customize the footer reminder text        (default:
 #                      "Type /fh_report player to see your own stats.")
+#   show_new_release - Note in the embed footers when a newer stable release
+#                      of Fh_Report exists                           (default: true)
+#                      false = never look for it, nothing is shown
+#                      true  = adds "Ver. X.Y.Z available" after the version.
+#                              Looked at only when the day closes and on
+#                              /fh_report update; stable releases only.
+#                              Read from DEFAULT; applies to every server.
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -408,6 +415,7 @@ KNOWN_VARS = {
     "enable_updates",
     "show_player_cmd_hint",
     "player_cmd_hint_text",
+    "show_new_release",
     "saves_dir",
     "commands_channel_id",
     "channel_id",
@@ -446,6 +454,7 @@ DEFAULTS = {
     "show_bob":         True,
     "show_player_cmd_hint":  True,
     "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
+    "show_new_release":      True,
 }
 
 COMMENTS = {
@@ -478,6 +487,7 @@ COMMENTS = {
     "show_bob":         "# false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
+    "show_new_release": "# false = disabled  |  true = footer notes when a newer stable release exists",
 }
 
 
@@ -957,7 +967,7 @@ def main():
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
     "show_all_pilots", "show_punishment", "show_bob", "show_pilot_card", "compact_points",
-    "show_session_card", "show_daily_card", "show_player_cmd_hint", "podium_4x_min3_latest_day",
+    "show_session_card", "show_daily_card", "show_player_cmd_hint", "show_new_release", "podium_4x_min3_latest_day",
                  "show_map"}
     bool_converted = []
     for bvar in BOOL_VARS:

@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.24"
+FH_REPORT_RELEASE = "14.4.25"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4549,13 +4549,18 @@ class Fh_Report(Plugin):
     def _latest_release_file() -> str:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".latest_release.json")
 
+    def _release_notice_enabled(self) -> bool:
+        """show_new_release (default true), read from DEFAULT: it applies to every server."""
+        value = ((self.locals or {}).get("DEFAULT") or {}).get("show_new_release")
+        return True if value is None else _bool_cfg(value)
+
     def _load_latest_release(self) -> None:
         """Bring back what the last check found, so a restart does not forget it."""
         global _NEW_RELEASE
         try:
             with open(self._latest_release_file(), encoding="utf-8") as f:
                 data = json.load(f)
-            _NEW_RELEASE = data.get("version") or None
+            _NEW_RELEASE = (data.get("version") or None) if self._release_notice_enabled() else None
             self._release_checked = float(data.get("checked") or 0)
         except (OSError, ValueError, TypeError, AttributeError):
             pass
@@ -4567,6 +4572,9 @@ class Fh_Report(Plugin):
         embed footers. Run at the daily close and by /fh_report update; at most once every
         6 hours unless forced. A failed look changes nothing."""
         global _NEW_RELEASE
+        if not self._release_notice_enabled():
+            _NEW_RELEASE = None
+            return
         now = time.time()
         if not force and now - self._release_checked < 6 * 3600:
             return
