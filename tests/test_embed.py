@@ -310,7 +310,7 @@ def test_every_ruler_of_the_player_card_is_short_enough():
 def test_long_stat_names_are_shortened_so_the_table_fits():
     session = {"Strike known Bin Laden location": 1, "Destroy the EWR at Nimroz": 1, "Air": 11, "Points spent": 1700}
     table = commands._build_combined_stats_table(session, {"Air": 2})
-    assert _widest(table) <= commands.PLAYER_TABLE_WIDTH
+    assert _widest(table) <= commands.PLAYER_TABLE_WIDTH == 44
     assert ".." in table and "Category" in table and "Session" in table and "Daily" in table
     lines = table.strip("`\n").split("\n")
     assert len({len(line) for line in lines if not set(line) <= {"-"}}) == 1          # still aligned
@@ -321,3 +321,12 @@ def test_a_table_that_already_fits_is_left_as_it_was():
     table = commands._build_combined_stats_table({"Air": 3, "Helo": 1}, {"Air": 1})
     assert ".." not in table and "Air" in table and "Helo" in table
     assert commands._fit_label("Air", 10) == "Air" and commands._fit_label("Strike on enemy EWR", 10) == "Strike o.."
+
+
+def test_the_title_above_the_table_leaves_room_for_a_large_daily_total():
+    assert commands.PLAYER_TABLE_WIDTH == 44 and commands.PLAYER_TITLE_GAP == 37      # 7 less than before: "123,456" fits
+    stats = {"Points": 1, "Air": 3}
+    card = commands._build_player_report_embed("P", {"credits": 5000}, None, None, 8864, 123456, stats, "ok", stats)
+    title = next(f.name for f in card.fields if "Session Stats" in f.name)
+    left, right = title.split(" " * commands.PLAYER_TITLE_GAP)
+    assert "S: 8,864" in left and "D: 123,456" in right.strip()

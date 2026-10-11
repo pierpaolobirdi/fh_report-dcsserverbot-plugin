@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.19"
+FH_REPORT_RELEASE = "14.4.20"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1626,8 +1626,11 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
 
 
 # The player card's code blocks must not wrap: with the avatar next to the card, Discord leaves
-# room for about 42 monospace characters, so a table is kept to 40.
-PLAYER_TABLE_WIDTH = 40
+# room for about 44 monospace characters, so a table is kept to 44.
+PLAYER_TABLE_WIDTH = 44
+# Spaces between "Session Stats (S: ...)" and "Daily (D: ...)" above the table: kept short so that a
+# daily total as large as 123,456 still fits on the line.
+PLAYER_TITLE_GAP = 37
 
 
 def _fit_label(label: str, width: int) -> str:
@@ -1736,7 +1739,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
     if daily_stats is not None:
         title_parts.append(f"📅 __Daily__ (D: {_fmt_num(daily_points)})")
-    combined_title = "                                            ".join(title_parts)
+    combined_title = (" " * PLAYER_TITLE_GAP).join(title_parts)
     if other_stats or daily_filtered:
         _add_table_field(embed, combined_title,
                          _build_combined_stats_table(other_stats, daily_filtered))
