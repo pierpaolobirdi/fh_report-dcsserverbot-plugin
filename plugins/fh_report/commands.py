@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.20"
+FH_REPORT_RELEASE = "14.4.21"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1628,9 +1628,27 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
 # The player card's code blocks must not wrap: with the avatar next to the card, Discord leaves
 # room for about 44 monospace characters, so a table is kept to 44.
 PLAYER_TABLE_WIDTH = 44
-# Spaces between "Session Stats (S: ...)" and "Daily (D: ...)" above the table: kept short so that a
-# daily total as large as 123,456 still fits on the line.
-PLAYER_TITLE_GAP = 37
+
+
+def _text_width(text: str) -> int:
+    """Rough width of `text` in Discord's proportional font, in tenths of a space. Only the numbers
+    matter here (the words around them never change): a digit is about 2.3 spaces wide, a space,
+    comma or dot 1, anything else 2."""
+    text = text.replace("__", "")
+    return sum(10 if c in " ,." else 23 if c.isdigit() else 20 for c in text)
+
+
+# The line above the table holds "Session Stats (S: ...)" on the left and "Daily (D: ...)" on the
+# right. Its total width is what it was with S 8,864, D 0 and 44 spaces in between (that fitted exactly),
+# less a small margin; the spaces between the two are worked out from the real numbers so the line
+# never wraps, however large they are.
+_TITLE_BASELINE = (_text_width("📊 Session Stats (S: 8,864)") + 44 * 10 + _text_width("📅 Daily (D: 0)"))
+PLAYER_TITLE_WIDTH = _TITLE_BASELINE - 20            # two spaces of safety
+
+
+def _title_gap(left: str, right: str) -> int:
+    """Spaces to put between the two halves so that the whole line is PLAYER_TITLE_WIDTH wide."""
+    return max((PLAYER_TITLE_WIDTH - _text_width(left) - _text_width(right)) // 10, 2)
 
 
 def _fit_label(label: str, width: int) -> str:
@@ -1739,7 +1757,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
     if daily_stats is not None:
         title_parts.append(f"📅 __Daily__ (D: {_fmt_num(daily_points)})")
-    combined_title = (" " * PLAYER_TITLE_GAP).join(title_parts)
+    combined_title = (" " * _title_gap(*title_parts)).join(title_parts) if len(title_parts) == 2 else title_parts[0]
     if other_stats or daily_filtered:
         _add_table_field(embed, combined_title,
                          _build_combined_stats_table(other_stats, daily_filtered))

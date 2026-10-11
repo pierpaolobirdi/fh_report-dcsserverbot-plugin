@@ -323,10 +323,27 @@ def test_a_table_that_already_fits_is_left_as_it_was():
     assert commands._fit_label("Air", 10) == "Air" and commands._fit_label("Strike on enemy EWR", 10) == "Strike o.."
 
 
-def test_the_title_above_the_table_leaves_room_for_a_large_daily_total():
-    assert commands.PLAYER_TABLE_WIDTH == 44 and commands.PLAYER_TITLE_GAP == 37      # 7 less than before: "123,456" fits
+def _title(session_points, daily_points, daily=True):
     stats = {"Points": 1, "Air": 3}
-    card = commands._build_player_report_embed("P", {"credits": 5000}, None, None, 8864, 123456, stats, "ok", stats)
-    title = next(f.name for f in card.fields if "Session Stats" in f.name)
-    left, right = title.split(" " * commands.PLAYER_TITLE_GAP)
-    assert "S: 8,864" in left and "D: 123,456" in right.strip()
+    card = commands._build_player_report_embed("P", {"credits": 5000}, None, None, session_points, daily_points,
+                                              stats, "ok", stats if daily else None)
+    return next(f.name for f in card.fields if "Session Stats" in f.name)
+
+
+def test_the_spaces_above_the_table_are_worked_out_from_the_numbers():
+    gaps = {}
+    for s, d in ((8864, 0), (8864, 123456), (999999, 999999), (5, 5), (123456789, 123456789)):
+        title = _title(s, d)
+        left, right = title.split("  ", 1)[0], title.split("  ", 1)[1].lstrip(" ")
+        gap = len(title) - len(left) - len(right)
+        assert gap >= 2
+        gaps[(s, d)] = gap
+        width = commands._text_width(title)
+        assert width <= commands.PLAYER_TITLE_WIDTH or gap == 2             # never wider, unless already at the minimum
+    assert gaps[(8864, 0)] == 42                                             # the old 44 less the safety margin
+    assert gaps[(8864, 123456)] < gaps[(8864, 0)]                            # a bigger daily total takes spaces away
+    assert gaps[(5, 5)] > gaps[(8864, 0)]                                    # smaller numbers leave more
+
+
+def test_without_daily_stats_the_title_is_just_the_session_part():
+    assert "Daily" not in _title(8864, 0, daily=False)
