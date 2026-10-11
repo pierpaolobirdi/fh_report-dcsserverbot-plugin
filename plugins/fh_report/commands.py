@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.17"
+FH_REPORT_RELEASE = "14.4.18"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1651,6 +1651,29 @@ def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -
 
 
 _SEPARATOR = "▬" * 32
+# The player card's first ruler: short enough not to wrap next to the avatar (Discord widths vary).
+PLAYER_SEPARATOR_LEN = 28
+
+_AVATAR_CACHE: dict[str, tuple[float, str | None]] = {}
+AVATAR_CACHE_SECONDS = 600.0
+
+
+async def _discord_avatar_url(bot, ucid: str | None) -> str | None:
+    """Avatar URL of the Discord user linked to `ucid` (/linkme), or None when nobody is linked or
+    DCSServerBot cannot answer in time (best effort). Kept for 10 minutes to spare repeated lookups."""
+    if not ucid:
+        return None
+    hit = _AVATAR_CACHE.get(ucid)
+    if hit and time.time() - hit[0] < AVATAR_CACHE_SECONDS:
+        return hit[1]
+    try:
+        member = await asyncio.wait_for(bot.get_member_by_ucid(ucid), timeout=2.0)
+        url = member.display_avatar.url if member else None
+    except Exception:
+        return None          # not cached: try again next time
+    _AVATAR_CACHE[ucid] = (time.time(), url)
+    return url
+
 
 
 def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
@@ -1660,7 +1683,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                daily_stats: dict | None = None,
                                bnb: dict | None = None,
                                penalties: dict | None = None,
-                               where: str | None = None) -> discord.Embed:
+                               where: str | None = None,
+                               avatar_url: str | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
     No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
@@ -1671,12 +1695,14 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         color=0x3498DB, timestamp=datetime.now(timezone.utc)
     )
 
-    # ── UCID ────────────────────────────────────────────────────────────
-    if ucid:
-        embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
+    if avatar_url:       # the linked Discord user's picture, top right
+        embed.set_thumbnail(url=avatar_url)
+
+    # ── UCID + first ruler, in the description: a field would leave a blank line under
+    # the title (its empty name) ─────────────────────────────────────────────────────
+    embed.description = (f"\u200b\n🔑 UCID: {ucid}\n" if ucid else "") + "▬" * PLAYER_SEPARATOR_LEN
 
     # ── Last seen ───────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     if last_seen is not None:
         ts = int(calendar.timegm(last_seen.timetuple()))
         activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
@@ -4431,6 +4457,7 @@ class Fh_Report(Plugin):
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
             mission_status=mission_status, daily_stats=d_stats,
             bnb=bnb, penalties=penalties, where=self._where_tag(srv),
+            avatar_url=await _discord_avatar_url(getattr(self, "bot", None), ucid),
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 

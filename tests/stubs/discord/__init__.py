@@ -30,6 +30,9 @@ class Embed:
     def remove_field(self, index):
         del self._fields[index]
 
+    def set_thumbnail(self, url=None):
+        self.thumbnail_url = url
+
     def set_footer(self, text=None):
         self.footer = _Footer(text)
 

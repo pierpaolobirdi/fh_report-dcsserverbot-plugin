@@ -1,6 +1,7 @@
 """Rendering: every option combination must keep producing exactly the same
 embed (golden file). Covers zones, all report_layout tables, Podium, cards,
 punishment badges, field chunking and the /fh_report player embed."""
+import asyncio
 import copy
 import itertools
 import random
@@ -231,3 +232,60 @@ def test_older_podium_days_use_the_players_own_medal_but_the_latest_day_never_do
     assert latest[1].startswith("🥇") and latest[2].startswith("🥈")
     assert older[1].startswith("🦅")
     assert older[2].startswith("🥈") and older[3].startswith("🥉")
+
+
+# ── the Discord avatar on the player card ───────────────────────────────────────────
+
+def _card(**kw):
+    return commands._build_player_report_embed("P", {"credits": 5000}, kw.pop("ucid", "u" * 32), None, 0, 0, {}, "ok", **kw)
+
+
+def test_the_player_card_has_ucid_and_a_short_ruler_in_the_description_and_the_avatar_on_the_right():
+    card = _card(avatar_url="https://cdn/avatar.png")
+    assert card.thumbnail_url == "https://cdn/avatar.png"
+    assert card.description == "\u200b\n🔑 UCID: " + "u" * 32 + "\n" + "▬" * commands.PLAYER_SEPARATOR_LEN
+    assert commands.PLAYER_SEPARATOR_LEN < len(commands._SEPARATOR)          # shorter, so it does not wrap
+    assert not hasattr(_card(), "thumbnail_url")                              # no avatar: no thumbnail
+    assert _card(ucid=None).description == "▬" * commands.PLAYER_SEPARATOR_LEN
+
+
+class _Member:
+    display_avatar = type("A", (), {"url": "https://cdn/a.png"})()
+
+
+def _avatar(bot, ucid="x1", monkeypatch=None):
+    commands._AVATAR_CACHE.clear()
+    return asyncio.run(commands._discord_avatar_url(bot, ucid))
+
+
+def test_the_avatar_comes_from_the_linked_discord_user_and_is_cached(monkeypatch):
+    calls = []
+
+    class Bot:
+        async def get_member_by_ucid(self, ucid):
+            calls.append(ucid)
+            return _Member()
+    commands._AVATAR_CACHE.clear()
+    assert asyncio.run(commands._discord_avatar_url(Bot(), "x1")) == "https://cdn/a.png"
+    assert asyncio.run(commands._discord_avatar_url(Bot(), "x1")) == "https://cdn/a.png" and calls == ["x1"]   # cached
+
+
+def test_no_link_no_ucid_a_failing_or_a_slow_lookup_just_means_no_avatar(monkeypatch):
+    class NoLink:
+        async def get_member_by_ucid(self, ucid):
+            return None
+
+    class Broken:
+        async def get_member_by_ucid(self, ucid):
+            raise RuntimeError("db down")
+
+    class Slow:
+        async def get_member_by_ucid(self, ucid):
+            await asyncio.sleep(10)
+
+    assert _avatar(NoLink()) is None and _avatar(Broken()) is None and _avatar(None) is None
+    assert asyncio.run(commands._discord_avatar_url(NoLink(), None)) is None
+    real_wait = asyncio.wait_for
+    monkeypatch.setattr(commands.asyncio, "wait_for", lambda coro, timeout: real_wait(coro, 0.01))
+    assert _avatar(Slow()) is None
+    assert "x1" not in commands._AVATAR_CACHE                                   # failures are not remembered

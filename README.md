@@ -349,6 +349,7 @@ A read-only slash command that shows a single player's full stats as a private (
 - With a single server configured, this works from **any channel** — no need to specify it. With more than one server configured, see [Multiple servers](#multiple-servers-server--commands_channel_id) below.
 - **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
+- If the player has linked their Discord account with `/linkme`, their **Discord avatar** appears at the top right of the card. Without a link (or if DCSServerBot does not answer in time) the card is shown without it.
 
 The embed shows, in order: UCID, Last seen, a combined Session + Daily stats table, Career Stats (from `Foothold_Ranks.lua`), and current mission status. Session and Daily points are shown directly in the combined table's title (e.g. `Session Stats (S: 10,971)` / `Daily (D: 890)`).
 
