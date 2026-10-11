@@ -567,17 +567,17 @@ from conftest import ORIG_CHECK_NEW_RELEASE
 
 
 def _releases():
-    return [{"tag_name": "v.14.6.0", "prerelease": True, "zipball_url": "https://x/z"},
-            {"tag_name": "v.14.5.0", "zipball_url": "https://x/z"},
-            {"tag_name": "v.14.9.0", "draft": True, "zipball_url": "https://x/z"},
-            {"tag_name": "v.14.0.0", "zipball_url": "https://x/z"}]
+    return [{"tag_name": "v.99.6.0", "prerelease": True, "zipball_url": "https://x/z"},
+            {"tag_name": "v.99.5.0", "zipball_url": "https://x/z"},
+            {"tag_name": "v.99.9.0", "draft": True, "zipball_url": "https://x/z"},
+            {"tag_name": "v.1.0.0", "zipball_url": "https://x/z"}]
 
 
 def test_only_a_stable_release_above_the_installed_one_is_announced():
     cur = commands._release_version(commands.FH_REPORT_RELEASE)
-    assert commands._pick_release(_releases(), cur, stable_only=True)["text"] == "14.5.0"
-    assert commands._pick_release(_releases(), cur)["text"] == "14.6.0"
-    assert commands._pick_release(_releases(), (14, 5, 0), stable_only=True) is None
+    assert commands._pick_release(_releases(), cur, stable_only=True)["text"] == "99.5.0"
+    assert commands._pick_release(_releases(), cur)["text"] == "99.6.0"
+    assert commands._pick_release(_releases(), (99, 5, 0), stable_only=True) is None
 
 
 def test_the_footer_shows_the_new_release_after_the_version_and_the_node(monkeypatch):
