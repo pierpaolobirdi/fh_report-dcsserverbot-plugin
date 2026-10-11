@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.18"
+FH_REPORT_RELEASE = "14.4.19"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1625,34 +1625,46 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
         embed.add_field(name="\u200b", value=chunk, inline=False)
 
 
+# The player card's code blocks must not wrap: with the avatar next to the card, Discord leaves
+# room for about 42 monospace characters, so a table is kept to 40.
+PLAYER_TABLE_WIDTH = 40
+
+
+def _fit_label(label: str, width: int) -> str:
+    """`label` cut to `width` characters, ending in '..' when it had to be shortened."""
+    return label if len(label) <= width else label[:max(width - 2, 1)] + ".."
+
+
 def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -> str:
     """Monospace table with Session and Daily values side by side for every
     category present in either; '-' marks a missing value (never '0').
     Ordering uses _order_stat_items, which recognises map-specific missions.
+    Names that would make it wider than PLAYER_TABLE_WIDTH are shortened with '..'.
     """
     daily_stats = daily_stats or {}
     all_keys = set(session_stats.keys()) | set(daily_stats.keys())
     ordered_keys = [k for k, _ in _order_stat_items({k: 0 for k in all_keys})]
 
-    name_width = max([len(_display_stat_label(k)) for k in ordered_keys] + [len("Category")])
     session_vals = [_display_stat_value(k, session_stats[k]) for k in ordered_keys if k in session_stats]
     daily_vals   = [_display_stat_value(k, daily_stats[k]) for k in ordered_keys if k in daily_stats]
     session_width = max([len(v) for v in session_vals] + [len("Session")])
     daily_width   = max([len(v) for v in daily_vals] + [len("Daily")])
+    room = max(PLAYER_TABLE_WIDTH - (2 + session_width + 2 + daily_width), 10)
+    name_width = min(max([len(_display_stat_label(k)) for k in ordered_keys] + [len("Category")]), room)
 
     header = f"{'Category':<{name_width}}  {'Session':>{session_width}}  {'Daily':>{daily_width}}"
     lines = [header, "-" * len(header)]
     for k in ordered_keys:
-        label = _display_stat_label(k)
+        label = _fit_label(_display_stat_label(k), name_width)
         s_val = _display_stat_value(k, session_stats[k]) if k in session_stats else "-"
         d_val = _display_stat_value(k, daily_stats[k]) if k in daily_stats else "-"
         lines.append(f"{label:<{name_width}}  {s_val:>{session_width}}  {d_val:>{daily_width}}")
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-_SEPARATOR = "▬" * 32
-# The player card's first ruler: short enough not to wrap next to the avatar (Discord widths vary).
+# The player card's ruler: short enough not to wrap next to the avatar (Discord widths vary).
 PLAYER_SEPARATOR_LEN = 28
+_SEPARATOR = "▬" * PLAYER_SEPARATOR_LEN
 
 _AVATAR_CACHE: dict[str, tuple[float, str | None]] = {}
 AVATAR_CACHE_SECONDS = 600.0
