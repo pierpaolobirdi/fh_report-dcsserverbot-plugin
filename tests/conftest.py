@@ -25,6 +25,8 @@ sys.path[:0] = [os.path.join(ROOT, "tests", "stubs"), os.path.join(ROOT, "plugin
 
 from fh_report import commands  # noqa: E402
 
+commands._FOOTER_PREVIEW = False   # the live look-and-feel test must not reach the tests
+
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 GOLDEN   = os.path.join(ROOT, "tests", "golden")
 UPDATE_GOLDEN = os.environ.get("FH_UPDATE_GOLDEN") == "1"

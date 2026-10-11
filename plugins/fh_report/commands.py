@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.22"
+FH_REPORT_RELEASE = "14.4.23"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2251,10 +2251,18 @@ def _finish_embed(embed: discord.Embed, cfg: dict, where: str | None = None) -> 
     return _trim_embed(embed)
 
 
+_FOOTER_PREVIEW = True   # TEMPORARY, removed once the symbol is chosen
+
+
 def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
     on the Master, N = on a remote node) is added only on a cluster of several nodes."""
-    return f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    base = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    if _FOOTER_PREVIEW:
+        # TEMPORARY look-and-feel test: one line per candidate symbol.
+        return "\n".join(f"{base} · {sym} 14.5.0 avail. → /fh_report upgrade"
+                         for sym in ("⬆", "🔔", "⚠️", "🆕", "📢", "✨", "🚀", "❗", "📣"))
+    return base
 
 
 def _show_map(cfg: dict) -> bool:
