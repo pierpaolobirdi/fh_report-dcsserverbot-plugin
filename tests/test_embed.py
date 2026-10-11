@@ -234,6 +234,14 @@ def test_older_podium_days_use_the_players_own_medal_but_the_latest_day_never_do
     assert older[2].startswith("🥈") and older[3].startswith("🥉")
 
 
+def test_podium_orders_each_day_by_points_whatever_the_file_order():
+    history = {"2026-10-10": [{"top": [{"name": "Dax", "points": 856},
+                                       {"name": "Vip", "points": 1165},
+                                       {"name": "Asa", "points": 432}]}]}
+    lines = commands._build_podium_table(history, {}, days=0, top=3).split("\n")[1:]
+    assert "Vip" in lines[0] and "Dax" in lines[1] and "Asa" in lines[2]
+
+
 # ── the Discord avatar on the player card ───────────────────────────────────────────
 
 def _card(**kw):

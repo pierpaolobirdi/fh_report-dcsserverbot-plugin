@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.21"
+FH_REPORT_RELEASE = "14.4.22"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1169,6 +1169,13 @@ def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
     return None
 
 
+def _num(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _build_podium_table(history: dict, players: dict, days: int, top: int,
                         strip_callsign_flag: bool = False,
                         min3_latest_day: bool = False,
@@ -1207,7 +1214,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
         except ValueError:
             date_disp = date_str
         for event in history[date_str]:
-            top_list = event.get("top") or []
+            # Best first, whatever order the file has (e.g. after a manual edit);
+            # sorted() is stable, so ties keep their stored order.
+            top_list = sorted(event.get("top") or [],
+                              key=lambda e: -_num(e.get("points")))
             n = min(effective_top, len(top_list))
             if n <= 0:
                 continue
