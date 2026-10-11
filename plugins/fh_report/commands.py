@@ -11,12 +11,16 @@ import calendar
 import functools
 import importlib.util
 import glob
+import io
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 from typing import Type
@@ -35,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.4.0"
+FH_REPORT_RELEASE = "14.4.25"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1125,8 +1129,8 @@ def _safe_code_span(text: str) -> str:
 def _fit_rank(prefix: str, rank: str, suffix: str, threshold: int = 78) -> str:
     """Shorten `rank` from the tail (adding '..') just enough to keep the
     visible line (prefix + rank + suffix, Markdown excluded) under
-    `threshold` characters on Discord desktop. Works for hook-supplied
-    custom ranks too, which a fixed abbreviation table couldn't.
+    `threshold` characters on Discord desktop. Works for custom ranks
+    too, which a fixed abbreviation table couldn't.
     """
     other_len = len(prefix) + len(suffix)
     full_len  = other_len + len(rank)
@@ -1163,6 +1167,13 @@ def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
             pts_str = f"({int(points)} p.p.) "
             return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
     return None
+
+
+def _num(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _build_podium_table(history: dict, players: dict, days: int, top: int,
@@ -1203,7 +1214,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
         except ValueError:
             date_disp = date_str
         for event in history[date_str]:
-            top_list = event.get("top") or []
+            # Best first, whatever order the file has (e.g. after a manual edit);
+            # sorted() is stable, so ties keep their stored order.
+            top_list = sorted(event.get("top") or [],
+                              key=lambda e: -_num(e.get("points")))
             n = min(effective_top, len(top_list))
             if n <= 0:
                 continue
@@ -1235,6 +1249,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     p_name = players_by_base.get(strip_callsign(name))
                     if p_name is not None:
                         current_name, player_data = p_name, players[p_name]
+                # Older days show the player's own medal when it has one; the
+                # latest day always keeps the default medals.
+                if not is_latest_day and player_data and player_data.get("custom_medal"):
+                    marker = player_data["custom_medal"]
                 # Current name if the player could be identified; otherwise
                 # (excluded, or no longer in Foothold_Ranks.lua) the name
                 # stored for that day, without a rank.
@@ -1617,32 +1635,88 @@ def _add_table_field(embed: discord.Embed, name: str, table_text: str, limit: in
         embed.add_field(name="\u200b", value=chunk, inline=False)
 
 
+# The player card's code blocks must not wrap: with the avatar next to the card, Discord leaves
+# room for about 44 monospace characters, so a table is kept to 44.
+PLAYER_TABLE_WIDTH = 44
+
+
+def _text_width(text: str) -> int:
+    """Rough width of `text` in Discord's proportional font, in tenths of a space. Only the numbers
+    matter here (the words around them never change): a digit is about 2.3 spaces wide, a space,
+    comma or dot 1, anything else 2."""
+    text = text.replace("__", "")
+    return sum(10 if c in " ,." else 23 if c.isdigit() else 20 for c in text)
+
+
+# The line above the table holds "Session Stats (S: ...)" on the left and "Daily (D: ...)" on the
+# right. Its total width is what it was with S 8,864, D 0 and 44 spaces in between (that fitted exactly),
+# less a small margin; the spaces between the two are worked out from the real numbers so the line
+# never wraps, however large they are.
+_TITLE_BASELINE = (_text_width("📊 Session Stats (S: 8,864)") + 44 * 10 + _text_width("📅 Daily (D: 0)"))
+PLAYER_TITLE_WIDTH = _TITLE_BASELINE - 20            # two spaces of safety
+
+
+def _title_gap(left: str, right: str) -> int:
+    """Spaces to put between the two halves so that the whole line is PLAYER_TITLE_WIDTH wide."""
+    return max((PLAYER_TITLE_WIDTH - _text_width(left) - _text_width(right)) // 10, 2)
+
+
+def _fit_label(label: str, width: int) -> str:
+    """`label` cut to `width` characters, ending in '..' when it had to be shortened."""
+    return label if len(label) <= width else label[:max(width - 2, 1)] + ".."
+
+
 def _build_combined_stats_table(session_stats: dict, daily_stats: dict | None) -> str:
     """Monospace table with Session and Daily values side by side for every
     category present in either; '-' marks a missing value (never '0').
     Ordering uses _order_stat_items, which recognises map-specific missions.
+    Names that would make it wider than PLAYER_TABLE_WIDTH are shortened with '..'.
     """
     daily_stats = daily_stats or {}
     all_keys = set(session_stats.keys()) | set(daily_stats.keys())
     ordered_keys = [k for k, _ in _order_stat_items({k: 0 for k in all_keys})]
 
-    name_width = max([len(_display_stat_label(k)) for k in ordered_keys] + [len("Category")])
     session_vals = [_display_stat_value(k, session_stats[k]) for k in ordered_keys if k in session_stats]
     daily_vals   = [_display_stat_value(k, daily_stats[k]) for k in ordered_keys if k in daily_stats]
     session_width = max([len(v) for v in session_vals] + [len("Session")])
     daily_width   = max([len(v) for v in daily_vals] + [len("Daily")])
+    room = max(PLAYER_TABLE_WIDTH - (2 + session_width + 2 + daily_width), 10)
+    name_width = min(max([len(_display_stat_label(k)) for k in ordered_keys] + [len("Category")]), room)
 
     header = f"{'Category':<{name_width}}  {'Session':>{session_width}}  {'Daily':>{daily_width}}"
     lines = [header, "-" * len(header)]
     for k in ordered_keys:
-        label = _display_stat_label(k)
+        label = _fit_label(_display_stat_label(k), name_width)
         s_val = _display_stat_value(k, session_stats[k]) if k in session_stats else "-"
         d_val = _display_stat_value(k, daily_stats[k]) if k in daily_stats else "-"
         lines.append(f"{label:<{name_width}}  {s_val:>{session_width}}  {d_val:>{daily_width}}")
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-_SEPARATOR = "▬" * 32
+# The player card's ruler: short enough not to wrap next to the avatar (Discord widths vary).
+PLAYER_SEPARATOR_LEN = 28
+_SEPARATOR = "▬" * PLAYER_SEPARATOR_LEN
+
+_AVATAR_CACHE: dict[str, tuple[float, str | None]] = {}
+AVATAR_CACHE_SECONDS = 600.0
+
+
+async def _discord_avatar_url(bot, ucid: str | None) -> str | None:
+    """Avatar URL of the Discord user linked to `ucid` (/linkme), or None when nobody is linked or
+    DCSServerBot cannot answer in time (best effort). Kept for 10 minutes to spare repeated lookups."""
+    if not ucid:
+        return None
+    hit = _AVATAR_CACHE.get(ucid)
+    if hit and time.time() - hit[0] < AVATAR_CACHE_SECONDS:
+        return hit[1]
+    try:
+        member = await asyncio.wait_for(bot.get_member_by_ucid(ucid), timeout=2.0)
+        url = member.display_avatar.url if member else None
+    except Exception:
+        return None          # not cached: try again next time
+    _AVATAR_CACHE[ucid] = (time.time(), url)
+    return url
+
 
 
 def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
@@ -1652,7 +1726,8 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
                                daily_stats: dict | None = None,
                                bnb: dict | None = None,
                                penalties: dict | None = None,
-                               where: str | None = None) -> discord.Embed:
+                               where: str | None = None,
+                               avatar_url: str | None = None) -> discord.Embed:
     """Build a read-only, info-only player embed for /fh_report player.
     No buttons, no editing — mirrors Fh_Control's player embed sections
     (UCID, points, session stats, career stats, mission) in display-only form.
@@ -1663,12 +1738,14 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
         color=0x3498DB, timestamp=datetime.now(timezone.utc)
     )
 
-    # ── UCID ────────────────────────────────────────────────────────────
-    if ucid:
-        embed.add_field(name="\u200b", value=f"🔑 UCID: {ucid}", inline=False)
+    if avatar_url:       # the linked Discord user's picture, top right
+        embed.set_thumbnail(url=avatar_url)
+
+    # ── UCID + first ruler, in the description: a field would leave a blank line under
+    # the title (its empty name) ─────────────────────────────────────────────────────
+    embed.description = (f"\u200b\n🔑 UCID: {ucid}\n" if ucid else "") + "▬" * PLAYER_SEPARATOR_LEN
 
     # ── Last seen ───────────────────────────────────────────────────────
-    embed.add_field(name="\u200b", value=_SEPARATOR, inline=False)
     if last_seen is not None:
         ts = int(calendar.timegm(last_seen.timetuple()))
         activity_line = f"- **Last seen:** <t:{ts}:F> (<t:{ts}:R>)"
@@ -1690,7 +1767,7 @@ def _build_player_report_embed(player_name: str, data: dict, ucid: str | None,
     title_parts = [f"📊 __Session Stats__ (S: {_fmt_num(session_points)})"]
     if daily_stats is not None:
         title_parts.append(f"📅 __Daily__ (D: {_fmt_num(daily_points)})")
-    combined_title = "                                            ".join(title_parts)
+    combined_title = (" " * _title_gap(*title_parts)).join(title_parts) if len(title_parts) == 2 else title_parts[0]
     if other_stats or daily_filtered:
         _add_table_field(embed, combined_title,
                          _build_combined_stats_table(other_stats, daily_filtered))
@@ -2114,8 +2191,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
     drs  = daily_stats_raw or {}
 
     # Attach session points / raw session stats / raw daily stats to each
-    # player (hook-provided values take priority). Exact name first, then
-    # the first callsign-stripped match.
+    # player. Exact name first, then the first callsign-stripped match.
     cs_idx, srs_idx, drs_idx = _stripped_index(cs), _stripped_index(srs), _stripped_index(drs)
     for name, data in players.items():
         base = strip_callsign(name)
@@ -2175,10 +2251,18 @@ def _finish_embed(embed: discord.Embed, cfg: dict, where: str | None = None) -> 
     return _trim_embed(embed)
 
 
+_NEW_RELEASE: str | None = None     # newest stable release found on GitHub, e.g. "14.5.0"
+
+
 def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
-    on the Master, N = on a remote node) is added only on a cluster of several nodes."""
-    return f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    on the Master, N = on a remote node) is added only on a cluster of several nodes.
+    A newer stable release, when one was found, is added at the end."""
+    text = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    new = _release_version(_NEW_RELEASE)
+    if new and new > (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+        text += f" · 📣 Ver. {_NEW_RELEASE} available"
+    return text
 
 
 def _show_map(cfg: dict) -> bool:
@@ -2490,7 +2574,6 @@ class _FHServerTransformer(utils.ServerTransformer):
         return out
 
 
-# ── Optional private hook ─────────────────────────────────────────────────────
 def _load_hook():
     hook_path = os.path.join(os.path.dirname(__file__), "fh_hook.py")
     if not os.path.exists(hook_path):
@@ -2664,6 +2747,263 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 
 
 # ── Plugin class ──────────────────────────────────────────────────────────────
+
+# ── Upgrade from GitHub releases (/fh_report upgrade) ─────────────────────────
+UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
+UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
+                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
+UPGRADE_MAX_BYTES = 25 * 1024 * 1024
+
+
+class UpgradeError(Exception):
+    """A refusal the user should read as is (nothing was changed)."""
+
+
+def _release_version(text) -> tuple[int, int, int] | None:
+    """(14, 4, 2) from a tag like 'v.14.4.2' or '14.4.2'; None if it has no x.y.z."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(text or ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _pick_release(releases: list, current: tuple[int, int, int], stable_only: bool = False) -> dict | None:
+    """The newest published release above `current`; its code is GitHub's own zip of the tag.
+    Drafts are ignored; a pre-release is returned with prerelease=True."""
+    best = None
+    for rel in releases or []:
+        if rel.get("draft") or (stable_only and rel.get("prerelease")):
+            continue
+        version = _release_version(rel.get("tag_name"))
+        if not version or version <= current:
+            continue
+        if not rel.get("zipball_url"):
+            continue
+        if best is None or version > best["version"]:
+            best = {"version": version, "text": ".".join(map(str, version)), "tag": rel.get("tag_name", ""),
+                    "prerelease": bool(rel.get("prerelease")), "notes": rel.get("body") or "",
+                    "published": rel.get("published_at") or "", "zip_url": rel["zipball_url"]}
+    return best
+
+
+def _zip_version(files: dict[str, bytes]) -> str | None:
+    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
+    return m.group(1).decode() if m else None
+
+
+def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str, bytes]:
+    """The plugin's files out of GitHub's zip of a tag (everything sits under one folder named
+    after the repository and commit). Only the expected files are taken, the rest of the
+    repository is ignored; every .py must compile and commands.py must announce the tag's version."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        entries = [i.filename for i in zf.infolist() if not i.is_dir()]
+    except zipfile.BadZipFile:
+        raise UpgradeError("The downloaded file is not a valid zip.")
+    tops = {n.split("/", 1)[0] for n in entries if "/" in n}
+    if len(tops) != 1:
+        raise UpgradeError("The downloaded zip does not have the expected layout.")
+    top = tops.pop() + "/"
+    files = {}
+    for name in UPGRADE_FILES:
+        if top + name not in entries:
+            raise UpgradeError(f"The release does not contain {name}.")
+        files[name] = zf.read(top + name)
+    for name, content in files.items():
+        if name.endswith(".py"):
+            try:
+                compile(content, name, "exec")
+            except SyntaxError as e:
+                raise UpgradeError(f"{name} does not compile ({e.msg}, line {e.lineno}).")
+    found = _zip_version(files)
+    if not found or (version_text is not None and found != version_text):
+        raise UpgradeError("The version inside the release does not match its tag.")
+    return files
+
+
+def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
+    """Replace the plugin's files with the release's, keeping a copy of the old ones in
+    <plugin_dir>/.backup. Any failure puts the old files back and raises. Other files in the
+    folder are left alone. Returns the backup folder."""
+    targets = {name.rsplit("/", 1)[1]: content for name, content in files.items() if name.startswith("plugins/")}
+    backup = os.path.join(plugin_dir, ".backup")
+    old = {}
+    for name in targets:
+        path = os.path.join(plugin_dir, name)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                old[name] = f.read()
+    os.makedirs(backup, exist_ok=True)
+    for name, content in old.items():
+        with open(os.path.join(backup, name), "wb") as f:
+            f.write(content)
+    done = []
+    try:
+        for name, content in targets.items():
+            path = os.path.join(plugin_dir, name)
+            with open(path + ".new", "wb") as f:
+                f.write(content)
+            os.replace(path + ".new", path)
+            done.append(name)
+    except Exception:
+        for name in done:
+            if name in old:
+                with open(os.path.join(plugin_dir, name), "wb") as f:
+                    f.write(old[name])
+        for name in targets:
+            try:
+                os.remove(os.path.join(plugin_dir, name) + ".new")
+            except OSError:
+                pass
+        raise
+    return backup
+
+
+def _upgrade_embed(current_text: str, release: dict | None, dev: dict | None, notes: list[str]) -> discord.Embed:
+    embed = discord.Embed(title="⬆️ Fh_Report — update",
+                          description=((release or {}).get("notes", "").strip()[:900] or None),
+                          color=0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71)
+    embed.add_field(name="Installed", value=f"Ver. {current_text}", inline=True)
+    if release:
+        embed.add_field(name="Release", value=f"Ver. {release['text']}" + (" ⚠️ pre-release" if release["prerelease"] else ""),
+                        inline=True)
+    if dev:
+        embed.add_field(name="Development branch", value=f"Ver. {dev['text']} ⚠️", inline=True)
+    if release and release["prerelease"]:
+        embed.add_field(name="⚠️ PRE-RELEASE",
+                        value="This release is a pre-release: it may be unstable. Update only if you want to test it.",
+                        inline=False)
+    if dev:
+        embed.add_field(name="⚠️ DEVELOPMENT BRANCH",
+                        value="Work in progress: it may contain errors. Updating to it asks you to accept that risk first.", inline=False)
+    for note in notes:
+        embed.add_field(name="ℹ️", value=note[:500], inline=False)
+    embed.add_field(name="What happens",
+                    value="The files are replaced (a copy of the old ones is kept) and the configuration is "
+                          "migrated. Afterwards you choose whether to restart DCSServerBot.", inline=False)
+    return embed
+
+
+class _UpgradeView(discord.ui.View):
+    """Update to release / Update to development / Cancel; only the admin who ran the command can press."""
+
+    def __init__(self, plugin, user_id: int, release: dict | None, dev: dict | None):
+        super().__init__(timeout=120)
+        self.plugin, self.user_id, self.release, self.dev = plugin, user_id, release, dev
+        self.interaction = None          # the /fh_report upgrade interaction, set once the offer is sent
+        self.update_release.disabled = release is None
+        self.update_dev.disabled = dev is None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Update to release", style=discord.ButtonStyle.success)
+    async def update_release(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await self.plugin._upgrade_run(interaction, self.release)
+
+    @discord.ui.button(label="Update to development branch", style=discord.ButtonStyle.danger)
+    async def update_dev(self, interaction: discord.Interaction, button):
+        self.stop()
+        view = _DevWarningView(self.plugin, self.user_id, self.dev)
+        view.interaction = interaction
+        await interaction.response.edit_message(embed=_dev_warning_embed(self.dev), view=view)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Update cancelled.", embed=None, view=None)
+        self.plugin._later(5, interaction.delete_original_response)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(content="Update offer expired.", embed=None, view=None)
+            self.plugin._later(10, self.interaction.delete_original_response)
+        except Exception:
+            pass
+
+
+def _dev_warning_embed(dev: dict) -> discord.Embed:
+    embed = discord.Embed(title="⚠️ Development branch", color=0xE74C3C,
+                          description=f"You are about to install **Ver. {dev['text']}** from the development branch.")
+    embed.add_field(name="The risk",
+                    value="This is code that is still being developed. It can contain errors, change how the "
+                          "report looks or behaves, or stop working. It has not gone through a release.",
+                    inline=False)
+    embed.add_field(name="If something goes wrong",
+                    value="A copy of the current files is kept in `plugins/fh_report/.backup`, and a release can "
+                          "always be installed again with `install.cmd`.", inline=False)
+    embed.add_field(name="To continue", value="Press **Accept the risk and update** to confirm you understand this.",
+                    inline=False)
+    return embed
+
+
+class _DevWarningView(discord.ui.View):
+    """The step before a development-branch update: accept the risk, or cancel."""
+
+    def __init__(self, plugin, user_id: int, dev: dict):
+        super().__init__(timeout=120)
+        self.plugin, self.user_id, self.dev = plugin, user_id, dev
+        self.interaction = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Accept the risk and update", style=discord.ButtonStyle.danger)
+    async def accept(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await self.plugin._upgrade_run(interaction, self.dev)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Update cancelled.", embed=None, view=None)
+        self.plugin._later(5, interaction.delete_original_response)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(content="Update offer expired.", embed=None, view=None)
+            self.plugin._later(10, self.interaction.delete_original_response)
+        except Exception:
+            pass
+
+
+class _RestartView(discord.ui.View):
+    """After a successful update: restart DCSServerBot now, or later."""
+
+    def __init__(self, plugin, user_id: int, text: str):
+        super().__init__(timeout=600)
+        self.plugin, self.user_id, self.text = plugin, user_id, text
+        self.interaction = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Restart now", style=discord.ButtonStyle.danger)
+    async def restart_now(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(
+            content="🔄 Restarting DCSServerBot now... this message updates when it is back.", view=None)
+        self.plugin._save_restart_notice(interaction, self.text)
+        await asyncio.sleep(1)
+        await self.plugin.bot.node.restart()
+
+    @discord.ui.button(label="Later", style=discord.ButtonStyle.secondary)
+    async def later(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.", view=None)
+        self.plugin._later(30, interaction.delete_original_response)
+
+    async def on_timeout(self) -> None:
+        try:
+            await self.interaction.edit_original_response(
+                content=f"✅ Ver. {self.text} is installed. It takes effect the next time DCSServerBot restarts.",
+                view=None)
+            self.plugin._later(30, self.interaction.delete_original_response)
+        except Exception:
+            pass
+
 
 class Fh_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
@@ -2881,6 +3221,8 @@ class Fh_Report(Plugin):
     @updater.before_loop
     async def before_updater(self):
         await self.bot.wait_until_ready()
+        self._load_latest_release()
+        await self._finish_restart_notice()
 
     def _resolve_report_layout(self, server_name: str, cfg: dict) -> tuple[str, dict]:
         """(report_layout, points_detail) from config. report_layout may be a
@@ -3062,6 +3404,8 @@ class Fh_Report(Plugin):
             stats_carry_over = {}
 
         elif date_reset_due:
+            if persist:
+                await self._check_new_release()
             reason = " (a mid-day mission/map reset was also detected and is folded in)" if mission_reset else ""
             self.log.debug(f"Fh_Report: daily reset for {saves_dir} at {reset_h:02d}:{reset_m:02d} {tz}{reason}")
 
@@ -3397,7 +3741,7 @@ class Fh_Report(Plugin):
     async def _update_server_locked(self, server, cfg: dict):
 
         instance_name = _server_key(server)     # node/instance: unique across the cluster
-        hook_name = server.instance.name         # what the optional private hook has always received
+        hook_name = server.instance.name
 
         if not _updates_enabled(cfg):
             # Switched-off instance (or a duplicate install elsewhere in the
@@ -3461,7 +3805,6 @@ class Fh_Report(Plugin):
             self.log.error(f"Fh_Report [{instance_name}]: error parsing data: {e}")
             return
 
-        # Optional private hook — post-processes players dict
         if _HAS_HOOK:
             try:
                 players = _fh_hook.post_process(players, cfg, hook_name, campaign_stats)
@@ -4168,26 +4511,266 @@ class Fh_Report(Plugin):
             session_points=s_pts, daily_points=d_pts, session_stats=s_stats,
             mission_status=mission_status, daily_stats=d_stats,
             bnb=bnb, penalties=penalties, where=self._where_tag(srv),
+            avatar_url=await _discord_avatar_url(getattr(self, "bot", None), ucid),
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
-    async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False) -> None:
-        """Private reply that removes itself: after 5 s when it reports success,
-        after 30 s for anything else (errors, refusals), so the channel stays clean."""
-        message = await interaction.followup.send(text, ephemeral=True)
-        if message is None or not hasattr(message, "delete"):
-            return
+    # ── Upgrade from GitHub releases ──────────────────────────────────────
 
-        async def remove():
-            await asyncio.sleep(5 if ok else 30)
+    async def _http_get(self, url: str, as_json: bool = False):
+        """GET `url` (HTTPS only, at most UPGRADE_MAX_BYTES). JSON or bytes."""
+        import aiohttp
+        if not url.startswith("https://"):
+            raise UpgradeError("Refusing a non-HTTPS download address.")
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Fh_Report-upgrade",
+                                                                 "Accept": "application/vnd.github+json"}) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise UpgradeError(f"GitHub answered {resp.status}.")
+                if resp.url.scheme != "https":
+                    raise UpgradeError("Refusing a download that left HTTPS.")
+                chunks, size = [], 0
+                async for chunk in resp.content.iter_chunked(65536):      # the whole body, not just what has arrived
+                    size += len(chunk)
+                    if size > UPGRADE_MAX_BYTES:
+                        raise UpgradeError("The download is larger than expected.")
+                    chunks.append(chunk)
+        data = b"".join(chunks)
+        return json.loads(data) if as_json else data
+
+    async def _upgrade_lookup(self) -> dict | None:
+        """The release to offer, or None when the installed one is the newest."""
+        releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
+                                        as_json=True)
+        return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
+
+    @staticmethod
+    def _latest_release_file() -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".latest_release.json")
+
+    def _release_notice_enabled(self) -> bool:
+        """show_new_release (default true), read from DEFAULT: it applies to every server."""
+        value = ((self.locals or {}).get("DEFAULT") or {}).get("show_new_release")
+        return True if value is None else _bool_cfg(value)
+
+    def _load_latest_release(self) -> None:
+        """Bring back what the last check found, so a restart does not forget it."""
+        global _NEW_RELEASE
+        try:
+            with open(self._latest_release_file(), encoding="utf-8") as f:
+                data = json.load(f)
+            _NEW_RELEASE = (data.get("version") or None) if self._release_notice_enabled() else None
+            self._release_checked = float(data.get("checked") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    _release_checked = 0.0
+
+    async def _check_new_release(self, force: bool = False) -> None:
+        """Look for a newer STABLE release (no pre-release, no dev) and remember it for the
+        embed footers. Run at the daily close and by /fh_report update; at most once every
+        6 hours unless forced. A failed look changes nothing."""
+        global _NEW_RELEASE
+        if not self._release_notice_enabled():
+            _NEW_RELEASE = None
+            return
+        now = time.time()
+        if not force and now - self._release_checked < 6 * 3600:
+            return
+        self._release_checked = now
+        try:
+            releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
+                                            as_json=True)
+            rel = _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0), stable_only=True)
+        except Exception as e:
+            self.log.debug(f"Fh_Report: could not look for a new release: {e!r}")
+            return
+        _NEW_RELEASE = rel["text"] if rel else None
+        try:
+            with open(self._latest_release_file(), "w", encoding="utf-8") as f:
+                json.dump({"version": _NEW_RELEASE, "checked": now}, f)
+        except OSError as e:
+            self.log.debug(f"Fh_Report: could not save the latest release: {e!r}")
+
+    async def _upgrade_lookup_dev(self) -> dict | None:
+        """The development branch, if its version is above the installed one (None if not). The zip is
+        downloaded and checked now, so what is offered is exactly what would be installed."""
+        data = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/zipball/dev")
+        text = _zip_version(_read_release_zip(data))
+        version = _release_version(text)
+        if not version or version <= (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+            return None
+        return {"channel": "dev", "version": version, "text": text, "tag": "dev", "prerelease": True,
+                "notes": "", "data": data}
+
+    def _run_migration(self, migrate_source: bytes) -> str:
+        """Run the release's migrate_config.py on this installation's fh_report.yaml.
+        Returns "" when fine, else a short note (the config is left as it was)."""
+        yaml_path = os.path.join(self.node.config_dir, "plugins", "fh_report.yaml")
+        if not os.path.exists(yaml_path):
+            return ""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "migrate_config.py")
+            with open(script, "wb") as f:
+                f.write(migrate_source)
             try:
-                await message.delete()
-            except Exception:
-                pass            # already dismissed, or the interaction token expired
-        task = asyncio.get_running_loop().create_task(remove())
+                res = subprocess.run([sys.executable, script, yaml_path], capture_output=True, text=True,
+                                     timeout=120)
+            except Exception as e:
+                return f"configuration migration could not run ({e})"
+        return "" if res.returncode == 0 else "configuration migration reported an error (your file is unchanged)"
+
+    async def _upgrade_run(self, interaction: discord.Interaction, release: dict) -> None:
+        """Download (or take the checked dev zip), install and migrate, telling the admin each step,
+        then ask whether to restart."""
+        if self.__dict__.get("_upgrading"):
+            await interaction.followup.send("An update is already running.", ephemeral=True)
+            return
+        self.__dict__["_upgrading"] = True
+
+        async def say(text: str, view=None) -> None:
+            await interaction.edit_original_response(content=text, embed=None, view=view)
+        try:
+            if release.get("data") is None:
+                await say("⏳ Downloading the release...")
+                data = await self._http_get(release["zip_url"])
+            else:
+                data = release["data"]
+            await say("🔎 Checking the files...")
+            files = _read_release_zip(data, release["text"])
+            await say("📦 Installing...")
+            plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            _install_release_files(plugin_dir, files)
+            note = await asyncio.to_thread(self._run_migration, files["migrate_config.py"])
+        except UpgradeError as e:
+            self.__dict__["_upgrading"] = False
+            await say(f"❌ Update stopped: {e}")
+            self._later(30, interaction.delete_original_response)
+            return
+        except Exception as e:
+            self.__dict__["_upgrading"] = False
+            self.log.error(f"Fh_Report: update failed: {e}", exc_info=True)
+            await say(f"❌ Update failed, the previous version is still in place: {e}")
+            self._later(30, interaction.delete_original_response)
+            return
+        self.__dict__["_upgrading"] = False
+        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']} (restart pending).")
+        view = _RestartView(self, interaction.user.id, release["text"])
+        view.interaction = interaction
+        await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
+                  + "\nDo you want to restart DCSServerBot now so the update takes effect?", view=view)
+
+    def _later(self, delay: float, action) -> None:
+        """Run the async `action` once, `delay` seconds from now (errors ignored: the message may
+        already be gone or its interaction token expired)."""
+        async def run():
+            await asyncio.sleep(delay)
+            try:
+                await action()
+            except Exception as e:
+                self.log.debug(f"Fh_Report: clean-up of a message failed: {e!r}")
+        task = asyncio.get_running_loop().create_task(run())
         tasks = self.__dict__.setdefault("_temp_replies", set())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    async def _reply_temporarily(self, interaction: discord.Interaction, text: str, ok: bool = False,
+                                 delay: float | None = None) -> None:
+        """Private reply that removes itself: after 5 s when it reports success, after 30 s for
+        anything else (errors, refusals) unless `delay` says otherwise, so the channel stays clean."""
+        message = await interaction.followup.send(text, ephemeral=True)
+        if message is None or not hasattr(message, "delete"):
+            return
+        self._later(delay if delay is not None else (5 if ok else 30), message.delete)
+
+    # ── The notice that closes a restart (the new process finishes what the old one started) ──
+
+    @staticmethod
+    def _restart_notice_file() -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".restart_notice.json")
+
+    def _save_restart_notice(self, interaction: discord.Interaction, expected: str) -> None:
+        try:
+            with open(self._restart_notice_file(), "w", encoding="utf-8") as f:
+                json.dump({"app_id": interaction.application_id, "token": interaction.token,
+                           "message_id": interaction.message.id, "expected": expected,
+                           "created": time.time()}, f)
+            self.log.info("Fh_Report: restart notice saved for the next start.")
+        except Exception as e:
+            self.log.warning(f"Fh_Report: could not save the restart notice: {e!r}")
+
+    def _notice_webhook(self, app_id, token):
+        return discord.Webhook.partial(app_id, token, client=self.bot)
+
+    async def _finish_restart_notice(self) -> None:
+        """After a restart asked from /fh_report upgrade: say whether DCSServerBot is back and which
+        version runs, then remove the message. The file is always deleted: used, stale or unreadable."""
+        path = self._restart_notice_file()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        try:
+            if not isinstance(data, dict) or time.time() - float(data["created"]) > 14 * 60:
+                return                                   # too old: Discord no longer accepts its token
+            expected = str(data["expected"])
+            if expected == FH_REPORT_RELEASE:
+                text = (f"✅ DCSServerBot has been updated successfully.\n"
+                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is now running.")
+            else:
+                text = (f"⚠️ DCSServerBot restarted, but the update was not applied.\n"
+                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is running (Ver. {expected} was expected).")
+            hook = self._notice_webhook(data["app_id"], data["token"])
+            last_error = None
+            # The message is the one the "Restart now" button sat on: "@original" for that button's
+            # token; its numeric id as a second way if Discord refuses the first.
+            for target in ("@original", int(data["message_id"])):
+                try:
+                    await hook.edit_message(target, content=text, embeds=[], view=None)
+                except Exception as e:
+                    last_error = e
+                    continue
+                self.log.info(f"Fh_Report: restart notice delivered ({text[:2]}).")
+                self._later(20, lambda target=target: hook.delete_message(target))
+                return
+            self.log.warning(f"Fh_Report: could not update the restart message: {last_error!r}")
+        except Exception as e:
+            self.log.warning(f"Fh_Report: could not finish the restart notice: {e!r}")
+
+    @fh_report.command(name="upgrade", description="Admin only: update the plugin from GitHub (release or development branch).")
+    @utils.app_has_role("Admin")
+    async def upgrade(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        release, dev, notes = None, None, []
+        try:
+            release = await self._upgrade_lookup()
+        except Exception as e:
+            self.log.error(f"Fh_Report: release check failed: {e}", exc_info=not isinstance(e, UpgradeError))
+            notes.append(f"Could not check the releases: {e}")
+        try:
+            dev = await self._upgrade_lookup_dev()
+        except Exception as e:
+            self.log.error(f"Fh_Report: development-branch check failed: {e}", exc_info=not isinstance(e, UpgradeError))
+            notes.append(f"Could not check the development branch: {e}")
+        if release and dev and dev["version"] <= release["version"]:
+            dev = None                  # the release is as new (or newer) and more stable: no point in offering dev
+        if release is None and dev is None:
+            text = (f"❌ {' '.join(notes)}" if notes else
+                    f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
+            await self._reply_temporarily(interaction, text, delay=30 if notes else 10)
+            return
+        view = _UpgradeView(self, interaction.user.id, release, dev)
+        view.interaction = interaction
+        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release, dev, notes),
+                                        view=view, ephemeral=True)
 
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
     @app_commands.describe(_server="Which server — only needed if more than one is configured.")
@@ -4221,6 +4804,7 @@ class Fh_Report(Plugin):
                 f"❌ **{name}** has no usable report channel (`channel_id` missing or not found).")
             return
         self._cycle_punishment = None        # fresh penalties, not the last cycle's
+        await self._check_new_release(force=True)
         try:
             await self._update_server(srv, cfg)
         except Exception as e:

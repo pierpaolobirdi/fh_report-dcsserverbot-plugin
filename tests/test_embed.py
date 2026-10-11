@@ -1,6 +1,7 @@
 """Rendering: every option combination must keep producing exactly the same
 embed (golden file). Covers zones, all report_layout tables, Podium, cards,
 punishment badges, field chunking and the /fh_report player embed."""
+import asyncio
 import copy
 import itertools
 import random
@@ -216,3 +217,141 @@ def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
              if l.startswith(("🥇", "🥈", "🥉", "🎖", "•"))]
     assert len(lines) == 70 and not any(l.startswith("•") for l in lines)       # past the 53rd too
     assert [l[0] for l in lines[:3]] == ["🥇", "🥈", "🥉"] and all(l.startswith("🎖") for l in lines[3:])
+
+
+def test_older_podium_days_use_the_players_own_medal_but_the_latest_day_never_does():
+    players = {"Ann": {"credits": 1000, "ucid": "ua", "custom_medal": "🦅"},
+               "Bob": {"credits": 900, "ucid": "ub"}}
+    history = {"2026-08-02": [{"top": [{"name": "Ann", "points": 50, "ucid": "ua"},
+                                       {"name": "Bob", "points": 40, "ucid": "ub"}]}],
+               "2026-08-01": [{"top": [{"name": "Ann", "points": 30, "ucid": "ua"},
+                                       {"name": "Bob", "points": 20, "ucid": "ub"},
+                                       {"name": "Ghost", "points": 10}]}]}
+    text = commands._build_podium_table(history, players, days=0, top=3)
+    latest, older = text.split("\n")[:3], text.split("\n")[3:]
+    assert latest[1].startswith("🥇") and latest[2].startswith("🥈")
+    assert older[1].startswith("🦅")
+    assert older[2].startswith("🥈") and older[3].startswith("🥉")
+
+
+def test_podium_orders_each_day_by_points_whatever_the_file_order():
+    history = {"2026-10-10": [{"top": [{"name": "Dax", "points": 856},
+                                       {"name": "Vip", "points": 1165},
+                                       {"name": "Asa", "points": 432}]}]}
+    lines = commands._build_podium_table(history, {}, days=0, top=3).split("\n")[1:]
+    assert "Vip" in lines[0] and "Dax" in lines[1] and "Asa" in lines[2]
+
+
+# ── the Discord avatar on the player card ───────────────────────────────────────────
+
+def _card(**kw):
+    return commands._build_player_report_embed("P", {"credits": 5000}, kw.pop("ucid", "u" * 32), None, 0, 0, {}, "ok", **kw)
+
+
+def test_the_player_card_has_ucid_and_a_short_ruler_in_the_description_and_the_avatar_on_the_right():
+    card = _card(avatar_url="https://cdn/avatar.png")
+    assert card.thumbnail_url == "https://cdn/avatar.png"
+    assert card.description == "\u200b\n🔑 UCID: " + "u" * 32 + "\n" + "▬" * commands.PLAYER_SEPARATOR_LEN
+    assert commands._SEPARATOR == "▬" * commands.PLAYER_SEPARATOR_LEN       # every ruler of the card is that short
+    assert not hasattr(_card(), "thumbnail_url")                              # no avatar: no thumbnail
+    assert _card(ucid=None).description == "▬" * commands.PLAYER_SEPARATOR_LEN
+
+
+class _Member:
+    display_avatar = type("A", (), {"url": "https://cdn/a.png"})()
+
+
+def _avatar(bot, ucid="x1", monkeypatch=None):
+    commands._AVATAR_CACHE.clear()
+    return asyncio.run(commands._discord_avatar_url(bot, ucid))
+
+
+def test_the_avatar_comes_from_the_linked_discord_user_and_is_cached(monkeypatch):
+    calls = []
+
+    class Bot:
+        async def get_member_by_ucid(self, ucid):
+            calls.append(ucid)
+            return _Member()
+    commands._AVATAR_CACHE.clear()
+    assert asyncio.run(commands._discord_avatar_url(Bot(), "x1")) == "https://cdn/a.png"
+    assert asyncio.run(commands._discord_avatar_url(Bot(), "x1")) == "https://cdn/a.png" and calls == ["x1"]   # cached
+
+
+def test_no_link_no_ucid_a_failing_or_a_slow_lookup_just_means_no_avatar(monkeypatch):
+    class NoLink:
+        async def get_member_by_ucid(self, ucid):
+            return None
+
+    class Broken:
+        async def get_member_by_ucid(self, ucid):
+            raise RuntimeError("db down")
+
+    class Slow:
+        async def get_member_by_ucid(self, ucid):
+            await asyncio.sleep(10)
+
+    assert _avatar(NoLink()) is None and _avatar(Broken()) is None and _avatar(None) is None
+    assert asyncio.run(commands._discord_avatar_url(NoLink(), None)) is None
+    real_wait = asyncio.wait_for
+    monkeypatch.setattr(commands.asyncio, "wait_for", lambda coro, timeout: real_wait(coro, 0.01))
+    assert _avatar(Slow()) is None
+    assert "x1" not in commands._AVATAR_CACHE                                   # failures are not remembered
+
+
+# ── the player card must not wrap next to the avatar ──────────────────────────────────
+
+def _widest(table):
+    return max(len(line) for line in table.strip("`\n").split("\n"))
+
+
+def test_every_ruler_of_the_player_card_is_short_enough():
+    stats = {"Points": 1, "Air": 11, "Ground Units": 38, "Achievement": 2}
+    card = commands._build_player_report_embed("P", {"credits": 5000}, "u" * 32, None, 10, 20, stats, "ok", stats,
+                                              bnb={"total": 1, "session": 1, "day": 1, "destroyed": 1, "damaged": 0,
+                                                   "recent": []},
+                                              penalties={"total": 5, "rows": [("kill", 1, 5.0)]})
+    rulers = [f.value for f in card.fields if f.value.strip() and set(f.value) == {"▬"}]
+    assert rulers and all(len(r) <= commands.PLAYER_SEPARATOR_LEN for r in rulers)
+
+
+def test_long_stat_names_are_shortened_so_the_table_fits():
+    session = {"Strike known Bin Laden location": 1, "Destroy the EWR at Nimroz": 1, "Air": 11, "Points spent": 1700}
+    table = commands._build_combined_stats_table(session, {"Air": 2})
+    assert _widest(table) <= commands.PLAYER_TABLE_WIDTH == 44
+    assert ".." in table and "Category" in table and "Session" in table and "Daily" in table
+    lines = table.strip("`\n").split("\n")
+    assert len({len(line) for line in lines if not set(line) <= {"-"}}) == 1          # still aligned
+    assert "1,700" in table and "Air" in table                                           # values and short names intact
+
+
+def test_a_table_that_already_fits_is_left_as_it_was():
+    table = commands._build_combined_stats_table({"Air": 3, "Helo": 1}, {"Air": 1})
+    assert ".." not in table and "Air" in table and "Helo" in table
+    assert commands._fit_label("Air", 10) == "Air" and commands._fit_label("Strike on enemy EWR", 10) == "Strike o.."
+
+
+def _title(session_points, daily_points, daily=True):
+    stats = {"Points": 1, "Air": 3}
+    card = commands._build_player_report_embed("P", {"credits": 5000}, None, None, session_points, daily_points,
+                                              stats, "ok", stats if daily else None)
+    return next(f.name for f in card.fields if "Session Stats" in f.name)
+
+
+def test_the_spaces_above_the_table_are_worked_out_from_the_numbers():
+    gaps = {}
+    for s, d in ((8864, 0), (8864, 123456), (999999, 999999), (5, 5), (123456789, 123456789)):
+        title = _title(s, d)
+        left, right = title.split("  ", 1)[0], title.split("  ", 1)[1].lstrip(" ")
+        gap = len(title) - len(left) - len(right)
+        assert gap >= 2
+        gaps[(s, d)] = gap
+        width = commands._text_width(title)
+        assert width <= commands.PLAYER_TITLE_WIDTH or gap == 2             # never wider, unless already at the minimum
+    assert gaps[(8864, 0)] == 42                                             # the old 44 less the safety margin
+    assert gaps[(8864, 123456)] < gaps[(8864, 0)]                            # a bigger daily total takes spaces away
+    assert gaps[(5, 5)] > gaps[(8864, 0)]                                    # smaller numbers leave more
+
+
+def test_without_daily_stats_the_title_is_just_the_session_part():
+    assert "Daily" not in _title(8864, 0, daily=False)

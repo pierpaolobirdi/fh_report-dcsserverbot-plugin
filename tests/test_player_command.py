@@ -87,7 +87,7 @@ def test_self_lookup_uses_one_connection(saves_dir):
     assert sum("discord_id" in q for q in pool.queries) == 1
     embed = sent[0]
     assert embed.title == "👤 Player — Zarpa"
-    assert any("UCID" in f.value for f in embed.fields)
+    assert "UCID" in embed.description and not any("UCID" in f.value for f in embed.fields)
 
 
 def test_admin_lookup_by_ucid(saves_dir):

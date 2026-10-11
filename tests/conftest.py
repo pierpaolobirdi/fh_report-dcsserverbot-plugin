@@ -90,6 +90,7 @@ def make_plugin(**attrs):
     p._campaign_absent, p._campaign_watch = set(), {}
     p._base_interval, p._beat, p._beats_left, p._last_status = 300, 300, {}, {}
     p._reset_handled = {}
+    p.locals = {}
     for k, v in attrs.items():
         setattr(p, k, v)
     return p
@@ -118,6 +119,19 @@ def check_golden(name: str, results: dict) -> None:
         expected = json.load(f)
     changed = sorted(k for k in expected.keys() | results.keys() if expected.get(k) != results.get(k))
     assert not changed, f"{len(changed)} case(s) differ from {name}, e.g. {changed[:5]}"
+
+
+ORIG_CHECK_NEW_RELEASE = commands.Fh_Report._check_new_release
+
+
+async def _no_release_check(self, force=False):
+    """Tests never go to GitHub; the real check is ORIG_CHECK_NEW_RELEASE."""
+
+
+@pytest.fixture(autouse=True)
+def _no_github(monkeypatch):
+    monkeypatch.setattr(commands.Fh_Report, "_check_new_release", _no_release_check)
+    monkeypatch.setattr(commands, "_NEW_RELEASE", None)
 
 
 @pytest.fixture(autouse=True)

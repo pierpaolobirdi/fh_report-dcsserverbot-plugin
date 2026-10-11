@@ -88,6 +88,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `enable_updates` | `true` | `false` = this instance never reads, posts, or edits anything for this server — see [Enabling or disabling per instance](#enabling-or-disabling-per-instance-enable_updates) below |
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
+| `show_new_release` | `true` | `true` = the footers note when a newer stable release exists (see *The "new release" note*); `false` = never look for it. Read from `DEFAULT`, applies to every server |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 | `commands_channel_id` | none | *(per server only)* Extra channel(s) allowed to run `/fh_report player`/`podium` for this server, besides its own report channel — see [Multiple servers](#multiple-servers-server--commands_channel_id) below |
 
@@ -319,6 +320,28 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 - It never runs at the same time as the automatic refresh of the same server.
 - The reply is private and removes itself: after 5 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
 
+## `/fh_report upgrade` — update from Discord (admins)
+
+`/fh_report upgrade` checks GitHub for a newer version of this plugin and offers to install it. It needs the `Admin` role of DCSServerBot, replies privately, and only the admin who ran it can press the buttons.
+
+1. The reply shows the installed version and what is newer, with the release notes: the latest **release**, and the **development branch** when its version is higher. A **pre-release** is marked with a clear warning.
+2. Buttons: **Update to release**, **Update to development branch**, **Cancel** (or let it expire after two minutes). Running the command and cancelling is the way to just check. A button is disabled when there is nothing newer on that side.
+3. The development branch is work in progress and may contain errors, so choosing it first shows a **warning of the risk**, and nothing is installed until you press **Accept the risk and update**.
+4. When the update finishes you are told it worked and asked whether to **restart DCSServerBot now** or **later**. If you restart, the message updates by itself once DCSServerBot is back, confirming which version is running, and then disappears. Messages that only inform (nothing newer, a cancelled or expired offer, *Later*, an error) remove themselves after a few seconds. The new version only takes effect after a restart: choosing *Later* leaves it installed and active at the next restart.
+5. Safety:
+   - It downloads only from this plugin's GitHub repository, over HTTPS (a release's zip, or the development branch's).
+   - Only the plugin's own files are taken from that zip; each one is checked (it must compile, and the version inside must be what was announced) before anything is replaced.
+   - The previous files are kept in `plugins/fh_report/.backup`, and if anything fails halfway they are put back and nothing restarts.
+   - Your `fh_report.yaml` is migrated with the downloaded migration script, the same one `install.cmd` runs.
+   - Other files you keep in the plugin folder are not touched.
+6. The restart is the same one as DCSServerBot's own `/node restart` on the master node. It relies on how you start the bot: launched with `run.cmd` (or `run.sh`, or a service that starts it again) it comes back by itself; launched any other way it would only stop.
+
+It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
+
+### The "new release" note in the footers
+
+When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
+
 ## `/fh_report player` — personal stats command
 
 A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.
@@ -331,6 +354,7 @@ A read-only slash command that shows a single player's full stats as a private (
 - With a single server configured, this works from **any channel** — no need to specify it. With more than one server configured, see [Multiple servers](#multiple-servers-server--commands_channel_id) below.
 - **Without `player_name`**: shows your own stats, resolved via your linked Discord account (the same link used by `/linkme`). If your Discord isn't linked yet, you'll be prompted to run `/linkme` first.
 - **With `player_name`**: only available to admins (see `admin` config option below). Everyone else gets a permission error and should leave it empty to see their own stats.
+- If the player has linked their Discord account with `/linkme`, their **Discord avatar** appears at the top right of the card. Without a link (or if DCSServerBot does not answer in time) the card is shown without it.
 
 The embed shows, in order: UCID, Last seen, a combined Session + Daily stats table, Career Stats (from `Foothold_Ranks.lua`), and current mission status. Session and Daily points are shown directly in the combined table's title (e.g. `Session Stats (S: 10,971)` / `Daily (D: 890)`).
 
@@ -628,7 +652,7 @@ __21/08/2026__
 ...
 ```
 
-Here `podium_combined_top: 1` means every day normally shows only the champion — but `podium_combined_min3_latest_day: true` forces yesterday specifically to show the top 3, so the most recent day gets extra detail while older days stay compact. Ranks shown are always current (not frozen from that day), and pull from custom ranks set in `fh_hook.yaml` just like every other table. A day with a campaign restart shows `(Session End)` next to its date.
+Here `podium_combined_top: 1` means every day normally shows only the champion — but `podium_combined_min3_latest_day: true` forces yesterday specifically to show the top 3, so the most recent day gets extra detail while older days stay compact. Ranks shown are always current (not frozen from that day). A day with a campaign restart shows `(Session End)` next to its date.
 
 ### A dedicated Podium-only table (`P` on its own)
 
