@@ -99,7 +99,7 @@ def make_plugin(**attrs):
 def embed_dump(embed) -> list:
     """Embed content, minus the current time and the release number."""
     import re
-    footer = embed.footer.text.replace(commands.FH_REPORT_RELEASE, "X") if embed.footer else None
+    footer = embed.footer.text.replace(commands.PLUGIN_RELEASE, "X") if embed.footer else None
     return ([embed.title, re.sub(r"<t:\d+:f>", "T", embed.description or "")]
             + [[f.name, f.value, f.inline] for f in embed.fields] + [footer])
 

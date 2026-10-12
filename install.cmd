@@ -4,10 +4,10 @@ setlocal EnableDelayedExpansion
 :: Get the directory where this script is located (works from anywhere)
 set "SCRIPT_DIR=%~dp0"
 
-:: ── Version being installed (read from commands.py, never duplicated here) ───
-:: Line format there:  FH_REPORT_RELEASE = "x.y.z"   (%%~V strips the quotes)
+:: ── Version being installed (read from version.py, never duplicated here) ────
+:: Line format there:  PLUGIN_RELEASE = "x.y.z"   (%%~V strips the quotes)
 set "NEW_VER=unknown"
-for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "%SCRIPT_DIR%plugins\fh_report\commands.py" 2^>nul') do set "NEW_VER=%%~V"
+for /f "tokens=3" %%V in ('findstr /B /C:"PLUGIN_RELEASE = " "%SCRIPT_DIR%plugins\fh_report\version.py" 2^>nul') do set "NEW_VER=%%~V"
 
 :: ── Colors (Windows 10/11 only; empty on older systems so no stray characters)
 :: NEWC new version, OLDC previous version, OKC/ERRC/ACTC status words, RSTC restart notice
@@ -167,7 +167,9 @@ exit /b 0
 set "OLD_VER="
 set "OLD_FILE=!DCSSB_PATH!\plugins\fh_report\commands.py"
 if exist "!OLD_FILE!" set "OLD_VER=unknown (no version in the installed file)"
+:: Before 14.6.1 the release was written in commands.py; since then it is in version.py.
 if exist "!OLD_FILE!" for /f "tokens=3" %%V in ('findstr /B /C:"FH_REPORT_RELEASE" "!OLD_FILE!" 2^>nul') do set "OLD_VER=%%~V"
+if exist "!DCSSB_PATH!\plugins\fh_report\version.py" for /f "tokens=3" %%V in ('findstr /B /C:"PLUGIN_RELEASE = " "!DCSSB_PATH!\plugins\fh_report\version.py" 2^>nul') do set "OLD_VER=%%~V"
 
 echo Installing Fh_Report !NEWC!Ver. !NEW_VER!!OFF! to: !DCSSB_PATH!
 if "!OLD_VER!"=="" (

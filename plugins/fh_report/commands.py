@@ -32,14 +32,18 @@ from core import Plugin, TEventListener, utils, Status, Group, Server
 from services.bot import DCSServerBot
 
 
-from .version import __version__
+from .version import PLUGIN_RELEASE, __version__
 
 log = logging.getLogger(__name__)
 
-# Shown in every embed footer — bumped manually alongside each GitHub
-# release, independent of version.py (which DCSSB manages/reads on its own
-# terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.6.0"
+# The release shown in every embed footer is PLUGIN_RELEASE (version.py), bumped manually
+# alongside each GitHub release. DCSServerBot reads only __version__ there, not this one.
+#
+# Bridge line, to be removed in the release after 14.6.1: a plugin older than 14.6.1 checks a
+# downloaded release by reading this exact line in commands.py, so it must stay for them to
+# be able to update to 14.6.1. Nothing in the code uses it (a test keeps it equal to
+# PLUGIN_RELEASE).
+FH_REPORT_RELEASE = "14.6.1"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2258,9 +2262,9 @@ def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
     on the Master, N = on a remote node) is added only on a cluster of several nodes.
     A newer stable release, when one was found, is added at the end."""
-    text = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    text = f"Fh_Report Ver. {PLUGIN_RELEASE}" + (f" • {where}" if where else "")
     new = _release_version(_NEW_RELEASE)
-    if new and new > (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+    if new and new > (_release_version(PLUGIN_RELEASE) or (0, 0, 0)):
         text += f" · 📣 Ver. {_NEW_RELEASE} available"
     return text
 
@@ -2786,14 +2790,14 @@ def _pick_release(releases: list, current: tuple[int, int, int], stable_only: bo
 
 
 def _zip_version(files: dict[str, bytes]) -> str | None:
-    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
+    m = re.search(rb'^PLUGIN_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/version.py"], re.MULTILINE)
     return m.group(1).decode() if m else None
 
 
 def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str, bytes]:
     """The plugin's files out of GitHub's zip of a tag (everything sits under one folder named
     after the repository and commit). Only the expected files are taken, the rest of the
-    repository is ignored; every .py must compile and commands.py must announce the tag's version."""
+    repository is ignored; every .py must compile and version.py must announce the tag's version."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         entries = [i.filename for i in zf.infolist() if not i.is_dir()]
@@ -2846,7 +2850,7 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
                 old[name] = f.read()
     os.makedirs(backup, exist_ok=True)
     with open(os.path.join(backup, "RESTORE.txt"), "w", encoding="utf-8") as f:
-        f.write(_RESTORE_TEXT.format(version=FH_REPORT_RELEASE))
+        f.write(_RESTORE_TEXT.format(version=PLUGIN_RELEASE))
     for name, content in old.items():
         os.makedirs(os.path.dirname(os.path.join(backup, name)), exist_ok=True)
         with open(os.path.join(backup, name), "wb") as f:
@@ -4562,7 +4566,7 @@ class Fh_Report(Plugin):
         """The release to offer, or None when the installed one is the newest."""
         releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
                                         as_json=True)
-        return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
+        return _pick_release(releases, _release_version(PLUGIN_RELEASE) or (0, 0, 0))
 
     @staticmethod
     def _latest_release_file() -> str:
@@ -4601,7 +4605,7 @@ class Fh_Report(Plugin):
         try:
             releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
                                             as_json=True)
-            rel = _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0), stable_only=True)
+            rel = _pick_release(releases, _release_version(PLUGIN_RELEASE) or (0, 0, 0), stable_only=True)
         except Exception as e:
             self.log.debug(f"Fh_Report: could not look for a new release: {e!r}")
             return
@@ -4618,7 +4622,7 @@ class Fh_Report(Plugin):
         data = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/zipball/dev")
         text = _zip_version(_read_release_zip(data))
         version = _release_version(text)
-        if not version or version <= (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+        if not version or version <= (_release_version(PLUGIN_RELEASE) or (0, 0, 0)):
             return None
         return {"channel": "dev", "version": version, "text": text, "tag": "dev", "prerelease": True,
                 "notes": "", "data": data}
@@ -4674,7 +4678,7 @@ class Fh_Report(Plugin):
             self._later(30, interaction.delete_original_response)
             return
         self.__dict__["_upgrading"] = False
-        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']} (restart pending).")
+        self.log.info(f"Fh_Report: updated {PLUGIN_RELEASE} -> {release['text']} (restart pending).")
         view = _RestartView(self, interaction.user.id, release["text"])
         view.interaction = interaction
         await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
@@ -4741,12 +4745,12 @@ class Fh_Report(Plugin):
             if not isinstance(data, dict) or time.time() - float(data["created"]) > 14 * 60:
                 return                                   # too old: Discord no longer accepts its token
             expected = str(data["expected"])
-            if expected == FH_REPORT_RELEASE:
+            if expected == PLUGIN_RELEASE:
                 text = (f"✅ DCSServerBot has been updated successfully.\n"
-                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is now running.")
+                        f"Fh_Report Ver. {PLUGIN_RELEASE} is now running.")
             else:
                 text = (f"⚠️ DCSServerBot restarted, but the update was not applied.\n"
-                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is running (Ver. {expected} was expected).")
+                        f"Fh_Report Ver. {PLUGIN_RELEASE} is running (Ver. {expected} was expected).")
             hook = self._notice_webhook(data["app_id"], data["token"])
             last_error = None
             # The message is the one the "Restart now" button sat on: "@original" for that button's
@@ -4783,12 +4787,12 @@ class Fh_Report(Plugin):
             dev = None                  # the release is as new (or newer) and more stable: no point in offering dev
         if release is None and dev is None:
             text = (f"❌ {' '.join(notes)}" if notes else
-                    f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
+                    f"✅ You already have the newest version (Ver. {PLUGIN_RELEASE}).")
             await self._reply_temporarily(interaction, text, delay=30 if notes else 10)
             return
         view = _UpgradeView(self, interaction.user.id, release, dev)
         view.interaction = interaction
-        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release, dev, notes),
+        await interaction.followup.send(embed=_upgrade_embed(PLUGIN_RELEASE, release, dev, notes),
                                         view=view, ephemeral=True)
 
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")

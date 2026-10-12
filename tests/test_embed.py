@@ -16,7 +16,7 @@ from conftest import UCID, check_golden, commands, digest, embed_dump
 def _pin_release(monkeypatch):
     """The footer's length decides how many lines fit in Discord's 6000 characters, so a
     longer version number (14.1.9 -> 14.1.10) would shift the golden output."""
-    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "12.5.4")
+    monkeypatch.setattr(commands, "PLUGIN_RELEASE", "12.5.4")
 
 
 def _zone(name, level, active, suspended=False, true_max=None):
@@ -120,7 +120,7 @@ def test_embed_respects_discord_limits():
 
 
 def test_version_is_written_as_fh_report_ver_everywhere():
-    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.PLUGIN_RELEASE}"
     main = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
     assert main.footer.text.splitlines()[0] == commands._version_text()
     notstarted = commands.build_not_started_embed({}, {"campaign_name": "C"}, "R", {})
@@ -195,8 +195,8 @@ def _tag(nodes, remote):
 def test_footer_says_where_the_server_runs_only_on_a_cluster():
     assert _tag(1, False) is None and _tag(1, True) is None            # a single node needs no tag
     assert _tag(2, False) == "M" and _tag(3, True) == "N"
-    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
-    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.PLUGIN_RELEASE} • M"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.PLUGIN_RELEASE}"
 
 
 def test_footer_tag_reaches_every_embed():

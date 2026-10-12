@@ -11,10 +11,9 @@ from conftest import commands, make_plugin
 TOP = "pierpaolobirdi-fh_report-dcsserverbot-plugin-abc1234/"      # GitHub's zip puts everything in one folder
 
 
-def _zip(version="14.9.0", extra=None, drop=None, commands_src=None, top=TOP):
-    src = commands_src or f'FH_REPORT_RELEASE = "{version}"\n'
+def _zip(version="14.9.0", extra=None, drop=None, commands_src=None, top=TOP):   # commands_src: version.py's text
     files = {n: "x = 1\n" for n in commands.UPGRADE_FILES}
-    files["plugins/fh_report/commands.py"] = src
+    files["plugins/fh_report/version.py"] = commands_src or f'__version__ = "1.0"\nPLUGIN_RELEASE = "{version}"\n'
     files["migrate_config.py"] = "print('migrated')\n"
     files["README.md"] = "the rest of the repository\n"
     files["tests/test_x.py"] = "def test(): pass\n"
@@ -101,7 +100,7 @@ def test_install_replaces_the_files_keeps_a_backup_and_leaves_other_files(tmp_pa
     d = _folder(tmp_path)
     files = commands._read_release_zip(_zip(), "14.9.0")
     backup = commands._install_release_files(str(d), files)
-    assert "14.9.0" in (d / "commands.py").read_text() and (d / "something_else.txt").read_text() == "keep me"
+    assert "14.9.0" in (d / "version.py").read_text() and (d / "something_else.txt").read_text() == "keep me"
     assert open(os.path.join(backup, "commands.py")).read() == "old commands.py"
     assert not list(d.glob("*.new"))
 
@@ -174,7 +173,7 @@ class _Interaction:
 
 
 def _plugin(releases, blobs, tmp_path, monkeypatch, dev_zip=None):
-    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "14.4.3")
+    monkeypatch.setattr(commands, "PLUGIN_RELEASE", "14.4.3")
     plugin = make_plugin(node=type("N", (), {"config_dir": str(tmp_path / "config")})())
     restarted = []
 
@@ -258,7 +257,7 @@ def test_a_release_update_installs_migrates_and_then_asks_about_the_restart(tmp_
     plugin._run_migration = lambda src: ""
     interaction = _confirm(plugin, rel)
     text, view = interaction.edits[-1]
-    assert "14.9.0" in (d / "commands.py").read_text()
+    assert "14.9.0" in (d / "version.py").read_text()
     assert "Updated to Ver. 14.9.0" in text and "restart" in text and restarted == []     # asked, not restarted
     assert isinstance(view, commands._RestartView)
 
@@ -285,7 +284,7 @@ def test_the_dev_update_installs_the_zip_that_was_offered(tmp_path, monkeypatch)
     dev = asyncio.run(plugin._upgrade_lookup_dev())
     assert dev["text"] == "14.9.5" and dev["prerelease"] is True
     _confirm(plugin, dev)
-    assert "14.9.5" in (d / "commands.py").read_text() and restarted == []
+    assert "14.9.5" in (d / "version.py").read_text() and restarted == []
 
 
 def test_a_broken_release_installs_nothing_and_says_so(tmp_path, monkeypatch):
@@ -461,7 +460,7 @@ def test_the_restart_notice_reports_ok_or_a_mismatch(tmp_path, monkeypatch):
         folder = _folder(d)
         monkeypatch.setattr(commands, "__file__", str(folder / "commands.py"))
         plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
-        monkeypatch.setattr(commands, "FH_REPORT_RELEASE", current)
+        monkeypatch.setattr(commands, "PLUGIN_RELEASE", current)
         hook = _Hook()
         plugin._notice_webhook = lambda app_id, token, hook=hook: hook
         (folder / ".restart_notice.json").write_text(json.dumps(
@@ -511,7 +510,7 @@ def test_the_dev_button_shows_a_risk_warning_and_installs_only_after_accepting(t
     warn_view = commands._DevWarningView(plugin, 7, {"text": "14.9.5", "data": _zip(version="14.9.5")})
     assert asyncio.run(warn_view.interaction_check(type("I", (), {"user": type("U", (), {"id": 8})()})())) is False
     asyncio.run(warn_view.accept(_Interaction(), None))
-    assert "14.9.5" in (d / "commands.py").read_text() and restarted == []
+    assert "14.9.5" in (d / "version.py").read_text() and restarted == []
 
 
 def test_cancel_and_expiry_of_the_risk_warning_clean_up(tmp_path, monkeypatch):
@@ -539,7 +538,7 @@ def _notice_with(tmp_path, monkeypatch, hook):
     import time
     d = _folder(tmp_path)
     monkeypatch.setattr(commands, "__file__", str(d / "commands.py"))
-    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "14.9.0")
+    monkeypatch.setattr(commands, "PLUGIN_RELEASE", "14.9.0")
     plugin, _ = _plugin([], {}, tmp_path, monkeypatch)
     plugin._notice_webhook = lambda app_id, token: hook
     (d / ".restart_notice.json").write_text(json.dumps(
@@ -574,18 +573,18 @@ def _releases():
 
 
 def test_only_a_stable_release_above_the_installed_one_is_announced():
-    cur = commands._release_version(commands.FH_REPORT_RELEASE)
+    cur = commands._release_version(commands.PLUGIN_RELEASE)
     assert commands._pick_release(_releases(), cur, stable_only=True)["text"] == "99.5.0"
     assert commands._pick_release(_releases(), cur)["text"] == "99.6.0"
     assert commands._pick_release(_releases(), (99, 5, 0), stable_only=True) is None
 
 
 def test_the_footer_shows_the_new_release_after_the_version_and_the_node(monkeypatch):
-    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.PLUGIN_RELEASE} • M"
     monkeypatch.setattr(commands, "_NEW_RELEASE", "99.0.0")
-    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M · 📣 Ver. 99.0.0 available"
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.PLUGIN_RELEASE} • M · 📣 Ver. 99.0.0 available"
     assert commands._version_text().endswith("📣 Ver. 99.0.0 available")
-    monkeypatch.setattr(commands, "_NEW_RELEASE", commands.FH_REPORT_RELEASE)     # already installed: nothing
+    monkeypatch.setattr(commands, "_NEW_RELEASE", commands.PLUGIN_RELEASE)     # already installed: nothing
     assert "available" not in commands._version_text()
 
 
@@ -663,7 +662,7 @@ def test_the_backup_folder_explains_how_to_go_back(tmp_path):
     d = _folder(tmp_path)
     backup = commands._install_release_files(str(d), commands._read_release_zip(_zip(), "14.9.0"))
     text = open(os.path.join(backup, "RESTORE.txt"), encoding="utf-8").read()
-    assert commands.FH_REPORT_RELEASE in text and "install.cmd" in text and "Stop DCSServerBot" in text
+    assert commands.PLUGIN_RELEASE in text and "install.cmd" in text and "Stop DCSServerBot" in text
 
 
 def test_the_update_card_is_green_only_when_a_release_is_all_there_is_and_red_when_dev_can_be_chosen():

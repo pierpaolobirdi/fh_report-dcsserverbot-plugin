@@ -719,11 +719,28 @@ This needs a one-time cache shared with Fh_Control (if installed) and only refre
 | `commands.py` | Main plugin logic |
 | `listener.py` | Placeholder event listener (required by DCSSB) |
 | `__init__.py` | Plugin registration |
-| `version.py` | Version string |
+| `version.py` | `PLUGIN_RELEASE` (this plugin's release, `x.y.z`) and `__version__` (DCSServerBot's database-schema version; leave it at `1.0`) |
 | `fh_report.yaml` | Configuration template (goes in `config/plugins/`) |
 | `migrate_config.py` | Migration script, called automatically by `install.cmd` on updates |
 | `install.cmd` | Installation and update script |
 | `tests/` | Automated tests (developers only — not needed to run the plugin) |
+
+---
+
+## Versioning (developers)
+
+The release number is `PLUGIN_RELEASE` in `plugins/fh_report/version.py`, and nowhere else: the
+footers, `/fh_report upgrade`, `install.cmd` and external tools read it from there. Bump it with
+every release, keeping the line exactly as it is (`PLUGIN_RELEASE = "x.y.z"`).
+
+`__version__`, in the same file, is **not** the release. DCSServerBot's core reads it as the
+plugin's database-schema version (it expects `major.minor` and logs `migrated to version ...`
+whenever it changes), and Fh_Report has no tables, so it stays at `1.0`.
+
+`commands.py` still carries one `FH_REPORT_RELEASE = "x.y.z"` line. It is a bridge for installations
+older than 14.6.1, whose `/fh_report upgrade` looks for it to accept a downloaded release. The
+code does not use it and a test keeps it equal to `PLUGIN_RELEASE` (so bump both until it goes);
+it is removed in the release after 14.6.1.
 
 ---
 
