@@ -72,7 +72,7 @@ def test_install_cmd_reads_the_release_from_version_py():
 # ── the bridge: a plugin older than 14.6.1 must still be able to update to this one ──────────
 
 def test_bridge_line_equals_the_release():
-    """Remove this test, together with the FH_REPORT_RELEASE line, in the release after 14.6.1."""
+    """Keep it while installations older than 14.6.1 may update straight to a newer release."""
     assert commands.FH_REPORT_RELEASE == commands.PLUGIN_RELEASE
 
 
@@ -94,7 +94,7 @@ def test_the_release_check_reads_version_py_and_ignores_commands_py():
         files["plugins/fh_report/commands.py"] = re.sub(r'(?m)^FH_REPORT_RELEASE = .*\n', "",
                                                         files["plugins/fh_report/commands.py"])
     zip_without_bridge = _repo_zip(drop_bridge)
-    assert commands._read_release_zip(zip_without_bridge, commands.PLUGIN_RELEASE)     # the release after 14.6.1
+    assert commands._read_release_zip(zip_without_bridge, commands.PLUGIN_RELEASE)     # a future release without the bridge line
 
 
 def test_a_release_that_announces_another_version_is_refused():
@@ -110,3 +110,40 @@ def test_a_release_with_the_version_only_in_commands_py_is_refused():
         files["plugins/fh_report/version.py"] = '__version__ = "1.0"\n'
     with pytest.raises(commands.UpgradeError, match="does not match its tag"):
         commands._read_release_zip(_repo_zip(old_layout), commands.PLUGIN_RELEASE)
+
+
+# ── a straight jump from an installation older than the bridge (14.6.1) ─────────────────────
+# Their /fh_report upgrade is code already installed, so we cannot change it. It accepts a release
+# only if the release carries the bridge line (tests above) AND every file of its own list, and
+# it copies only the files of that list.
+OLD_UPGRADE_FILES = (
+    "plugins/fh_report/__init__.py",
+    "plugins/fh_report/commands.py",
+    "plugins/fh_report/listener.py",
+    "plugins/fh_report/version.py",
+    "plugins/fh_report/schemas/fh_report_schema.yaml",
+    "migrate_config.py",
+)
+# Files added after 14.6.1 that migrate_config.py puts in place itself (an older upgrade does
+# run the new release's migrate_config.py). Empty today; add a file here only if it is.
+DELIVERED_BY_MIGRATE_CONFIG: set = set()
+
+
+def test_a_release_still_has_every_file_an_older_upgrade_expects():
+    for name in OLD_UPGRADE_FILES:
+        assert os.path.isfile(os.path.join(ROOT, *name.split("/"))), f"{name} is missing: older upgrades refuse the release"
+    assert set(OLD_UPGRADE_FILES) <= set(commands.UPGRADE_FILES)
+
+
+def test_no_new_file_that_an_older_upgrade_would_not_copy():
+    plugin = os.path.join(ROOT, "plugins", "fh_report")
+    present = set()
+    for folder, dirs, names in os.walk(plugin):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "__"))]
+        for n in names:
+            if not n.startswith("."):
+                rel = os.path.relpath(os.path.join(folder, n), ROOT).replace(os.sep, "/")
+                present.add(rel)
+    unknown = present - set(OLD_UPGRADE_FILES) - DELIVERED_BY_MIGRATE_CONFIG
+    assert not unknown, (f"{sorted(unknown)}: an installation older than 14.6.1 would not receive "
+                         "them when updating straight to this release (see DELIVERED_BY_MIGRATE_CONFIG)")

@@ -737,10 +737,7 @@ every release, keeping the line exactly as it is (`PLUGIN_RELEASE = "x.y.z"`).
 plugin's database-schema version (it expects `major.minor` and logs `migrated to version ...`
 whenever it changes), and Fh_Report has no tables, so it stays at `1.0`.
 
-`commands.py` still carries one `FH_REPORT_RELEASE = "x.y.z"` line. It is a bridge for installations
-older than 14.6.1, whose `/fh_report upgrade` looks for it to accept a downloaded release. The
-code does not use it and a test keeps it equal to `PLUGIN_RELEASE` (so bump both until it goes);
-it is removed in the release after 14.6.1.
+`commands.py` still carries one `FH_REPORT_RELEASE = "x.y.z"` line. It is a bridge for installations older than 14.6.1, whose `/fh_report upgrade` accepts a downloaded release only if it finds that line. The code does not use it and a test keeps it equal to `PLUGIN_RELEASE` (so bump both). **Keep it in every release**: without it an installation older than 14.6.1 refuses to jump straight to the new release. For the same reason a file that did not exist in 14.6.1 is not copied by those older upgrades: every file under `plugins/fh_report/` must be in the list of that version (a test checks it) or be put in place by `migrate_config.py`, which the older upgrade does run from the new release.
 
 ---
 
