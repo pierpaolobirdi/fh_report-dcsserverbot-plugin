@@ -657,3 +657,10 @@ def test_install_creates_the_schema_folder_when_there_is_none(tmp_path):
     d = _folder(tmp_path)
     commands._install_release_files(str(d), commands._read_release_zip(_zip(), "14.9.0"))
     assert (d / "schemas" / "fh_report_schema.yaml").exists()
+
+
+def test_the_backup_folder_explains_how_to_go_back(tmp_path):
+    d = _folder(tmp_path)
+    backup = commands._install_release_files(str(d), commands._read_release_zip(_zip(), "14.9.0"))
+    text = open(os.path.join(backup, "RESTORE.txt"), encoding="utf-8").read()
+    assert commands.FH_REPORT_RELEASE in text and "install.cmd" in text and "Stop DCSServerBot" in text

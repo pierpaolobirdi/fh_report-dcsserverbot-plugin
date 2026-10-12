@@ -336,7 +336,12 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
    - Other files you keep in the plugin folder are not touched.
 6. The restart is the same one as DCSServerBot's own `/node restart` on the master node. It relies on how you start the bot: launched with `run.cmd` (or `run.sh`, or a service that starts it again) it comes back by itself; launched any other way it would only stop.
 
-It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
+### If something goes wrong
+
+- If the installation itself fails, the previous files are put back by the plugin and nothing restarts.
+- If the new version installs but does not work (the bot or the plugin fails to start), stop DCSServerBot, copy the files from `plugins/fh_report/.backup` over the ones in `plugins/fh_report` (all of them except `RESTORE.txt`, keeping the `schemas` subfolder) and start it again. `.backup/RESTORE.txt` says the same. `.backup` holds only the plugin files, not `install.cmd`; to use that, download a release from GitHub.
+
+It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation, and the way to update a version older than the one that introduced `/fh_report upgrade`.
 
 ### The "new release" note in the footers
 
@@ -348,8 +353,8 @@ The plugin ships a schema (`plugins/fh_report/schemas/fh_report_schema.yaml`), s
 
 - Saves apply after a restart of the bot, like any other plugin setting.
 - `report_layout` is a text field: letters `D`, `P`, `S`, `R`, or groups separated by commas (`DP, SR`).
-- A new variable is added to the schema together with the plugin; `/fh_report upgrade` and `install.cmd` install the schema file with the rest.
-- If you update from a version older than the one that introduced the schema, run `install.cmd` once (or copy the `schemas` folder by hand): the older `/fh_report upgrade` does not know that file.
+- A new variable is added to the schema together with the plugin. `/fh_report upgrade` and `install.cmd` install the schema file with the rest, and `migrate_config.py` (which both run) puts it in place too, so it also arrives when the update is made by an older version of the command.
+- If you copy the plugin files by hand, copy the `schemas` folder as well, or run `migrate_config.py` on your `fh_report.yaml`: without the schema the settings form is shown read-only.
 
 ## `/fh_report player` — personal stats command
 

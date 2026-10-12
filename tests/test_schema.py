@@ -83,3 +83,36 @@ def test_the_schema_accepts_our_config_forms_and_refuses_mistakes(tmp_path):
                     unknown="DEFAULT:\n  bogus: 1\n")
     assert got == {"example.yaml": "OK", "by_node.yaml": "OK", "bad_layout.yaml": "INVALID",
                    "bad_number.yaml": "INVALID", "unknown.yaml": "INVALID"}
+
+
+def test_the_schema_text_inside_migrate_config_is_the_schema_file():
+    with open(SCHEMA, encoding="utf-8") as f:
+        assert mc.SCHEMA_TEXT == f.read()
+
+
+def test_migrate_puts_the_schema_in_place_from_the_working_directory(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "plugins" / "fh_report").mkdir(parents=True)
+    (root / "config" / "plugins").mkdir(parents=True)
+    monkeypatch.chdir(root)
+    mc.install_schema(str(root / "config" / "plugins" / "fh_report.yaml"))
+    target = root / "plugins" / "fh_report" / "schemas" / "fh_report_schema.yaml"
+    assert target.read_text(encoding="utf-8") == mc.SCHEMA_TEXT
+    target.write_text("old")
+    mc.install_schema(str(root / "config" / "plugins" / "fh_report.yaml"))      # a different one is replaced
+    assert target.read_text(encoding="utf-8") == mc.SCHEMA_TEXT
+
+
+def test_migrate_finds_the_plugin_folder_from_the_config_path_and_skips_quietly_without_one(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    (root / "plugins" / "fh_report").mkdir(parents=True)
+    (root / "config" / "plugins").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    mc.install_schema(str(root / "config" / "plugins" / "fh_report.yaml"))
+    assert (root / "plugins" / "fh_report" / "schemas" / "fh_report_schema.yaml").exists()
+    other = tmp_path / "nowhere" / "config" / "plugins"
+    other.mkdir(parents=True)
+    mc.install_schema(str(other / "fh_report.yaml"))                            # no plugin folder: no error
+    assert "not found" in capsys.readouterr().out

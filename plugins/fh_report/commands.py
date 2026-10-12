@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.5.2"
+FH_REPORT_RELEASE = "14.5.3"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2820,6 +2820,17 @@ def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str,
     return files
 
 
+_RESTORE_TEXT = """Fh_Report - files of Ver. {version}, kept before the last update.
+
+If the new version does not work:
+  1. Stop DCSServerBot.
+  2. Copy every file in this folder except this one (keep the schemas subfolder as it is) over
+     the ones in the plugin folder, the one that contains this .backup folder.
+  3. Start DCSServerBot.
+Alternatively, download a release from GitHub and run its install.cmd.
+"""
+
+
 def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
     """Replace the plugin's files with the release's, keeping a copy of the old ones in
     <plugin_dir>/.backup. Any failure puts the old files back and raises. Other files in the
@@ -2834,6 +2845,8 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
             with open(path, "rb") as f:
                 old[name] = f.read()
     os.makedirs(backup, exist_ok=True)
+    with open(os.path.join(backup, "RESTORE.txt"), "w", encoding="utf-8") as f:
+        f.write(_RESTORE_TEXT.format(version=FH_REPORT_RELEASE))
     for name, content in old.items():
         os.makedirs(os.path.dirname(os.path.join(backup, name)), exist_ok=True)
         with open(os.path.join(backup, name), "wb") as f:
@@ -2934,8 +2947,10 @@ def _dev_warning_embed(dev: dict) -> discord.Embed:
                           "report looks or behaves, or stop working. It has not gone through a release.",
                     inline=False)
     embed.add_field(name="If something goes wrong",
-                    value="A copy of the current files is kept in `plugins/fh_report/.backup`, and a release can "
-                          "always be installed again with `install.cmd`.", inline=False)
+                    value="A copy of the current files is kept in `plugins/fh_report/.backup`. If the new "
+                          "version does not work, copy those files back over the ones in "
+                          "`plugins/fh_report` and restart, or run `install.cmd` from a release "
+                          "downloaded from GitHub.", inline=False)
     embed.add_field(name="To continue", value="Press **Accept the risk and update** to confirm you understand this.",
                     inline=False)
     return embed

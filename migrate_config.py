@@ -946,6 +946,127 @@ def migrate_disable_updates(content: str) -> tuple[str, list[str]]:
     return "\n".join(out), changes
 
 
+# ── The schema for DCSServerBot's web console ──────────────────────────────────
+# Same text as plugins/fh_report/schemas/fh_report_schema.yaml (a test keeps them equal).
+# It is here so that this script, which every install and every /fh_report upgrade runs,
+# also puts that file in place when an older installer did not know about it.
+SCHEMA_TEXT = r'''schema;instance_schema:
+  type: map
+  func: is_node
+  nullable: false
+  mapping:
+    regex;(.+):
+      include: 'element_schema'
+
+schema;element_schema:
+  type: map
+  nullable: false
+  mapping:
+    # Required per server
+    channel_id: {type: any, nullable: false, func: int_or_list}
+    campaign_name: {type: str, nullable: false}
+    # Optional per server
+    saves_dir: {type: str}   # an empty value means auto-resolve
+    commands_channel_id: {type: any, func: text_or_list}
+    admin: {type: any, nullable: false, func: str_or_list}
+    enable_updates: {type: bool, nullable: false}
+    disable_updates: {type: any, func: deprecated, enum: ['Use "enable_updates" instead (the opposite value).']}
+    # What the report shows
+    # report_layout: letters D/P/S/R, or several such groups separated by commas (one per update cycle)
+    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRdpsr]{1,4}(\s*,\s*[DPSRdpsr]{1,4})*\s*$'}
+    points_detail_D: {type: str, pattern: '^[DSRdsr]*$'}
+    points_detail_S: {type: str, pattern: '^[DSRdsr]*$'}
+    points_detail_R: {type: str, pattern: '^[DSRdsr]*$'}
+    update_interval: {type: int, nullable: false, range: {min: 1}}
+    daily_reset_hour: {type: text, nullable: false}
+    daily_reset_schedule:
+      type: map
+      nullable: false
+      mapping:
+        mon: {type: text, nullable: false}
+        tue: {type: text, nullable: false}
+        wed: {type: text, nullable: false}
+        thu: {type: text, nullable: false}
+        fri: {type: text, nullable: false}
+        sat: {type: text, nullable: false}
+        sun: {type: text, nullable: false}
+    show_map: {type: bool, nullable: false}
+    bar_length: {type: int, nullable: false, range: {min: 1}}
+    bar_style_emoji: {type: bool, nullable: false}
+    max_zones: {type: int, nullable: false, range: {min: 0}}
+    zone_name_length: {type: int, nullable: false, range: {min: 8, max: 24}}
+    slot_status: {type: bool, nullable: false}
+    sort_zones_by_waypoint: {type: bool, nullable: false}
+    strip_callsign: {type: bool, nullable: false}
+    max_pilots: {type: int, nullable: false, range: {min: 0}}
+    max_pilots_R: {type: int, nullable: false, range: {min: 0}}
+    max_pilots_S: {type: int, nullable: false, range: {min: 0}}
+    max_pilots_D: {type: int, nullable: false, range: {min: 0}}
+    show_all_pilots: {type: bool, nullable: false}
+    show_pilot_card: {type: bool, nullable: false}
+    pilot_card_icon: {type: str, nullable: false}
+    show_session_card: {type: bool, nullable: false}
+    session_card_icon: {type: str, nullable: false}
+    show_daily_card: {type: bool, nullable: false}
+    daily_card_icon: {type: str, nullable: false}
+    podium_days: {type: int, nullable: false, range: {min: 0}}
+    podium_top: {type: int, nullable: false, range: {min: 1, max: 50}}
+    podium_combined_days: {type: int, nullable: false, range: {min: 0}}
+    podium_combined_top: {type: int, nullable: false, range: {min: 1, max: 50}}
+    podium_combined_min3_latest_day: {type: bool, nullable: false}
+    show_punishment: {type: bool, nullable: false}
+    show_bob: {type: bool, nullable: false}
+    excluded_ucids:
+      type: seq
+      sequence:
+        - {type: str, nullable: false, unique: true}
+    show_player_cmd_hint: {type: bool, nullable: false}
+    player_cmd_hint_text: {type: str, nullable: false}
+    show_new_release: {type: bool, nullable: false}
+
+type: map
+func: check_main_structure
+nullable: false
+mapping:
+  DEFAULT:
+    include: 'element_schema'
+  commands:
+    include: 'commands_schema'
+  chat_commands:
+    include: 'chat_commands_schema'
+  regex;(.+):
+    type: any
+    func: any_of
+    nullable: false
+    enum: ['element_schema', 'instance_schema']
+'''
+
+
+def install_schema(yaml_path: str) -> None:
+    """Write schemas/fh_report_schema.yaml into the plugin folder when it is missing or
+    different. The folder is looked for from the working directory (DCSServerBot's root),
+    then from the config file's place (<root>/config/plugins/fh_report.yaml). Never fatal."""
+    candidates = [os.path.join(os.getcwd(), "plugins", "fh_report"),
+                  os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(yaml_path)))),
+                               "plugins", "fh_report")]
+    folder = next((c for c in candidates if os.path.isdir(c)), None)
+    if folder is None:
+        print("  Schema: plugin folder not found, schema file not installed.")
+        return
+    target = os.path.join(folder, "schemas", "fh_report_schema.yaml")
+    try:
+        if os.path.exists(target):
+            with open(target, encoding="utf-8") as f:
+                if f.read() == SCHEMA_TEXT:
+                    return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(SCHEMA_TEXT)
+        print("  Schema: schemas/fh_report_schema.yaml installed.")
+    except OSError as e:
+        print(f"  Schema: could not write {target} ({e}).")
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: migrate_config.py <path_to_fh_report.yaml>")
@@ -956,6 +1077,8 @@ def main():
     if not os.path.exists(yaml_path):
         print(f"File not found: {yaml_path}")
         sys.exit(1)
+
+    install_schema(yaml_path)
 
     with open(yaml_path, "r", encoding="utf-8") as f:
         content = f.read()
