@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.5.0"
+FH_REPORT_RELEASE = "14.6.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2751,7 +2751,8 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 # ── Upgrade from GitHub releases (/fh_report upgrade) ─────────────────────────
 UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
 UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
-                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
+                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py",
+                 "plugins/fh_report/schemas/fh_report_schema.yaml", "migrate_config.py")
 UPGRADE_MAX_BYTES = 25 * 1024 * 1024
 
 
@@ -2819,11 +2820,23 @@ def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str,
     return files
 
 
+_RESTORE_TEXT = """Fh_Report - files of Ver. {version}, kept before the last update.
+
+If the new version does not work:
+  1. Stop DCSServerBot.
+  2. Copy every file in this folder except this one (keep the schemas subfolder as it is) over
+     the ones in the plugin folder, the one that contains this .backup folder.
+  3. Start DCSServerBot.
+Alternatively, download a release from GitHub and run its install.cmd.
+"""
+
+
 def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
     """Replace the plugin's files with the release's, keeping a copy of the old ones in
     <plugin_dir>/.backup. Any failure puts the old files back and raises. Other files in the
     folder are left alone. Returns the backup folder."""
-    targets = {name.rsplit("/", 1)[1]: content for name, content in files.items() if name.startswith("plugins/")}
+    prefix = "plugins/fh_report/"
+    targets = {name[len(prefix):]: content for name, content in files.items() if name.startswith(prefix)}
     backup = os.path.join(plugin_dir, ".backup")
     old = {}
     for name in targets:
@@ -2832,13 +2845,17 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
             with open(path, "rb") as f:
                 old[name] = f.read()
     os.makedirs(backup, exist_ok=True)
+    with open(os.path.join(backup, "RESTORE.txt"), "w", encoding="utf-8") as f:
+        f.write(_RESTORE_TEXT.format(version=FH_REPORT_RELEASE))
     for name, content in old.items():
+        os.makedirs(os.path.dirname(os.path.join(backup, name)), exist_ok=True)
         with open(os.path.join(backup, name), "wb") as f:
             f.write(content)
     done = []
     try:
         for name, content in targets.items():
             path = os.path.join(plugin_dir, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path + ".new", "wb") as f:
                 f.write(content)
             os.replace(path + ".new", path)
@@ -2860,7 +2877,7 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
 def _upgrade_embed(current_text: str, release: dict | None, dev: dict | None, notes: list[str]) -> discord.Embed:
     embed = discord.Embed(title="⬆️ Fh_Report — update",
                           description=((release or {}).get("notes", "").strip()[:900] or None),
-                          color=0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71)
+                          color=0xE74C3C if dev else (0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71))
     embed.add_field(name="Installed", value=f"Ver. {current_text}", inline=True)
     if release:
         embed.add_field(name="Release", value=f"Ver. {release['text']}" + (" ⚠️ pre-release" if release["prerelease"] else ""),
@@ -2930,8 +2947,10 @@ def _dev_warning_embed(dev: dict) -> discord.Embed:
                           "report looks or behaves, or stop working. It has not gone through a release.",
                     inline=False)
     embed.add_field(name="If something goes wrong",
-                    value="A copy of the current files is kept in `plugins/fh_report/.backup`, and a release can "
-                          "always be installed again with `install.cmd`.", inline=False)
+                    value="A copy of the current files is kept in `plugins/fh_report/.backup`. If the new "
+                          "version does not work, copy those files back over the ones in "
+                          "`plugins/fh_report` and restart, or run `install.cmd` from a release "
+                          "downloaded from GitHub.", inline=False)
     embed.add_field(name="To continue", value="Press **Accept the risk and update** to confirm you understand this.",
                     inline=False)
     return embed
@@ -4682,7 +4701,7 @@ class Fh_Report(Plugin):
         message = await interaction.followup.send(text, ephemeral=True)
         if message is None or not hasattr(message, "delete"):
             return
-        self._later(delay if delay is not None else (5 if ok else 30), message.delete)
+        self._later(delay if delay is not None else (10 if ok else 30), message.delete)
 
     # ── The notice that closes a restart (the new process finishes what the old one started) ──
 

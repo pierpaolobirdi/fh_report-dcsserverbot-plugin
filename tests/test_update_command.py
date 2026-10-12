@@ -118,8 +118,8 @@ def _reply_delays(monkeypatch, ok, delete_fails=False):
     return waits, deleted
 
 
-def test_a_success_reply_removes_itself_after_5_seconds(monkeypatch):
-    assert _reply_delays(monkeypatch, ok=True) == ([5], [True])
+def test_a_success_reply_removes_itself_after_10_seconds(monkeypatch):
+    assert _reply_delays(monkeypatch, ok=True) == ([10], [True])
 
 
 def test_any_other_reply_removes_itself_after_30_seconds(monkeypatch):
@@ -127,4 +127,4 @@ def test_any_other_reply_removes_itself_after_30_seconds(monkeypatch):
 
 
 def test_a_reply_that_cannot_be_deleted_is_not_an_error(monkeypatch):
-    assert _reply_delays(monkeypatch, ok=True, delete_fails=True) == ([5], [])
+    assert _reply_delays(monkeypatch, ok=True, delete_fails=True) == ([10], [])

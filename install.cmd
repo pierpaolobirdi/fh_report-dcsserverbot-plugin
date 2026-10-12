@@ -87,6 +87,8 @@ copy /Y "%SCRIPT_DIR%plugins\fh_report\commands.py"   "!DCSSB_PATH!\plugins\fh_r
 copy /Y "%SCRIPT_DIR%plugins\fh_report\__init__.py"   "!DCSSB_PATH!\plugins\fh_report\__init__.py"   > nul
 copy /Y "%SCRIPT_DIR%plugins\fh_report\listener.py"   "!DCSSB_PATH!\plugins\fh_report\listener.py"   > nul
 copy /Y "%SCRIPT_DIR%plugins\fh_report\version.py"    "!DCSSB_PATH!\plugins\fh_report\version.py"    > nul
+if not exist "!DCSSB_PATH!\plugins\fh_report\schemas" mkdir "!DCSSB_PATH!\plugins\fh_report\schemas"
+copy /Y "%SCRIPT_DIR%plugins\fh_report\schemas\fh_report_schema.yaml" "!DCSSB_PATH!\plugins\fh_report\schemas\fh_report_schema.yaml" > nul
 echo       !OKC!OK!OFF! - Plugin files copied.
 
 :: ── Handle config file ────────────────────────────────────────────────────────

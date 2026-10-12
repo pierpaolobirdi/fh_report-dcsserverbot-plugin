@@ -318,7 +318,7 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
 - A server with `enable_updates: false` is not refreshed: the command says so.
 - If the `report_layout` rotates between compositions, a manual refresh advances it one step, like any other refresh.
 - It never runs at the same time as the automatic refresh of the same server.
-- The reply is private and removes itself: after 5 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
+- The reply is private and removes itself: after 10 seconds when the update worked, after 30 seconds for anything else (a refusal or an error), so it does not clutter the channel.
 
 ## `/fh_report upgrade` — update from Discord (admins)
 
@@ -336,11 +336,25 @@ It is most useful for a server whose mission is **paused or stopped**: the plugi
    - Other files you keep in the plugin folder are not touched.
 6. The restart is the same one as DCSServerBot's own `/node restart` on the master node. It relies on how you start the bot: launched with `run.cmd` (or `run.sh`, or a service that starts it again) it comes back by itself; launched any other way it would only stop.
 
-It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation.
+### If something goes wrong
+
+- If the installation itself fails, the previous files are put back by the plugin and nothing restarts.
+- If the new version installs but does not work (the bot or the plugin fails to start), stop DCSServerBot, copy the files from `plugins/fh_report/.backup` over the ones in `plugins/fh_report` (all of them except `RESTORE.txt`, keeping the `schemas` subfolder) and start it again. `.backup/RESTORE.txt` says the same. `.backup` holds only the plugin files, not `install.cmd`; to use that, download a release from GitHub.
+
+It is not an automatic updater: nothing happens unless an admin runs the command and confirms. `install.cmd` stays the way to do the first installation, and the way to update a version older than the one that introduced `/fh_report upgrade`.
 
 ### The "new release" note in the footers
 
 When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
+
+## Settings in the DCSServerBot web console
+
+The plugin ships a schema (`plugins/fh_report/schemas/fh_report_schema.yaml`), so the web console's **Settings** page builds a form for `fh_report.yaml` (switches, numbers and text fields for every option, per `DEFAULT`, node or server block). The same schema is used by DCSServerBot to check the file when it loads. Notes:
+
+- Saves apply after a restart of the bot, like any other plugin setting.
+- `report_layout` is a text field: letters `D`, `P`, `S`, `R`, or groups separated by commas (`DP, SR`).
+- A new variable is added to the schema together with the plugin. `/fh_report upgrade` and `install.cmd` install the schema file with the rest, and `migrate_config.py` (which both run) puts it in place too, so it also arrives when the update is made by an older version of the command.
+- If you copy the plugin files by hand, copy the `schemas` folder as well, or run `migrate_config.py` on your `fh_report.yaml`: without the schema the settings form is shown read-only.
 
 ## `/fh_report player` — personal stats command
 
