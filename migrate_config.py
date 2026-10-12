@@ -978,18 +978,18 @@ schema;element_schema:
     points_detail_S: {type: str, pattern: '^[DSRdsr]*$'}
     points_detail_R: {type: str, pattern: '^[DSRdsr]*$'}
     update_interval: {type: int, nullable: false, range: {min: 1}}
-    daily_reset_hour: {type: text, nullable: false}
+    daily_reset_hour: {type: str, nullable: false}   # HH:MM (the migration turns a plain hour into HH:MM)
     daily_reset_schedule:
       type: map
       nullable: false
       mapping:
-        mon: {type: text, nullable: false}
-        tue: {type: text, nullable: false}
-        wed: {type: text, nullable: false}
-        thu: {type: text, nullable: false}
-        fri: {type: text, nullable: false}
-        sat: {type: text, nullable: false}
-        sun: {type: text, nullable: false}
+        mon: {type: str, nullable: false}
+        tue: {type: str, nullable: false}
+        wed: {type: str, nullable: false}
+        thu: {type: str, nullable: false}
+        fri: {type: str, nullable: false}
+        sat: {type: str, nullable: false}
+        sun: {type: str, nullable: false}
     show_map: {type: bool, nullable: false}
     bar_length: {type: int, nullable: false, range: {min: 1}}
     bar_style_emoji: {type: bool, nullable: false}
