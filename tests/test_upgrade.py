@@ -664,3 +664,15 @@ def test_the_backup_folder_explains_how_to_go_back(tmp_path):
     backup = commands._install_release_files(str(d), commands._read_release_zip(_zip(), "14.9.0"))
     text = open(os.path.join(backup, "RESTORE.txt"), encoding="utf-8").read()
     assert commands.FH_REPORT_RELEASE in text and "install.cmd" in text and "Stop DCSServerBot" in text
+
+
+def test_the_update_card_is_green_only_when_a_release_is_all_there_is_and_red_when_dev_can_be_chosen():
+    stable = commands._pick_release([_rel("v.14.8.0")], (14, 4, 3))
+    pre = commands._pick_release([_rel("v.14.9.0", pre=True)], (14, 4, 3))
+    dev = {"text": "14.9.9", "channel": "dev"}
+    green, orange, red = 0x2ECC71, 0xF39C12, 0xE74C3C
+    assert commands._upgrade_embed("14.4.3", stable, None, []).color == green
+    assert commands._upgrade_embed("14.4.3", None, None, []).color == green
+    assert commands._upgrade_embed("14.4.3", pre, None, []).color == orange
+    assert commands._upgrade_embed("14.4.3", None, dev, []).color == red
+    assert commands._upgrade_embed("14.4.3", stable, dev, []).color == red      # a release too, but dev is on offer

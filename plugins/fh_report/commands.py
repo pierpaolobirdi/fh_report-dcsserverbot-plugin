@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.5.4"
+FH_REPORT_RELEASE = "14.5.5"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2877,7 +2877,7 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
 def _upgrade_embed(current_text: str, release: dict | None, dev: dict | None, notes: list[str]) -> discord.Embed:
     embed = discord.Embed(title="⬆️ Fh_Report — update",
                           description=((release or {}).get("notes", "").strip()[:900] or None),
-                          color=0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71)
+                          color=0xE74C3C if dev else (0xF39C12 if (release or {}).get("prerelease") else 0x2ECC71))
     embed.add_field(name="Installed", value=f"Ver. {current_text}", inline=True)
     if release:
         embed.add_field(name="Release", value=f"Ver. {release['text']}" + (" ⚠️ pre-release" if release["prerelease"] else ""),
