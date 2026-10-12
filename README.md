@@ -342,6 +342,15 @@ It is not an automatic updater: nothing happens unless an admin runs the command
 
 When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
 
+## Settings in the DCSServerBot web console
+
+The plugin ships a schema (`plugins/fh_report/schemas/fh_report_schema.yaml`), so the web console's **Settings** page builds a form for `fh_report.yaml` (switches, numbers and text fields for every option, per `DEFAULT`, node or server block). The same schema is used by DCSServerBot to check the file when it loads. Notes:
+
+- Saves apply after a restart of the bot, like any other plugin setting.
+- `report_layout` is a text field: letters `D`, `P`, `S`, `R`, or groups separated by commas (`DP, SR`).
+- A new variable is added to the schema together with the plugin; `/fh_report upgrade` and `install.cmd` install the schema file with the rest.
+- If you update from a version older than the one that introduced the schema, run `install.cmd` once (or copy the `schemas` folder by hand): the older `/fh_report upgrade` does not know that file.
+
 ## `/fh_report player` — personal stats command
 
 A read-only slash command that shows a single player's full stats as a private (ephemeral) message — no buttons, nothing editable, just information.

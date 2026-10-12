@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Shown in every embed footer — bumped manually alongside each GitHub
 # release, independent of version.py (which DCSSB manages/reads on its own
 # terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.5.1"
+FH_REPORT_RELEASE = "14.5.2"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -2751,7 +2751,8 @@ async def _resolve_saves_dir(server, cfg: dict) -> str:
 # ── Upgrade from GitHub releases (/fh_report upgrade) ─────────────────────────
 UPGRADE_REPO = "pierpaolobirdi/fh_report-dcsserverbot-plugin"
 UPGRADE_FILES = ("plugins/fh_report/__init__.py", "plugins/fh_report/commands.py",
-                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py", "migrate_config.py")
+                 "plugins/fh_report/listener.py", "plugins/fh_report/version.py",
+                 "plugins/fh_report/schemas/fh_report_schema.yaml", "migrate_config.py")
 UPGRADE_MAX_BYTES = 25 * 1024 * 1024
 
 
@@ -2823,7 +2824,8 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
     """Replace the plugin's files with the release's, keeping a copy of the old ones in
     <plugin_dir>/.backup. Any failure puts the old files back and raises. Other files in the
     folder are left alone. Returns the backup folder."""
-    targets = {name.rsplit("/", 1)[1]: content for name, content in files.items() if name.startswith("plugins/")}
+    prefix = "plugins/fh_report/"
+    targets = {name[len(prefix):]: content for name, content in files.items() if name.startswith(prefix)}
     backup = os.path.join(plugin_dir, ".backup")
     old = {}
     for name in targets:
@@ -2833,12 +2835,14 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
                 old[name] = f.read()
     os.makedirs(backup, exist_ok=True)
     for name, content in old.items():
+        os.makedirs(os.path.dirname(os.path.join(backup, name)), exist_ok=True)
         with open(os.path.join(backup, name), "wb") as f:
             f.write(content)
     done = []
     try:
         for name, content in targets.items():
             path = os.path.join(plugin_dir, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path + ".new", "wb") as f:
                 f.write(content)
             os.replace(path + ".new", path)

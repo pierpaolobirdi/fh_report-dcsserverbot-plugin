@@ -640,3 +640,20 @@ def test_show_new_release_false_never_looks_and_shows_nothing(monkeypatch, tmp_p
     p.locals = {"DEFAULT": {"show_new_release": True}}       # on again
     asyncio.run(ORIG_CHECK_NEW_RELEASE(p, force=True))
     assert commands._NEW_RELEASE == "99.1.0"
+
+
+def test_install_puts_the_schema_in_its_own_folder_and_backs_up_the_old_one(tmp_path):
+    d = _folder(tmp_path)
+    (d / "schemas").mkdir()
+    (d / "schemas" / "fh_report_schema.yaml").write_text("old schema")
+    files = commands._read_release_zip(_zip(), "14.9.0")
+    backup = commands._install_release_files(str(d), files)
+    assert (d / "schemas" / "fh_report_schema.yaml").read_text() == "x = 1\n"
+    assert open(os.path.join(backup, "schemas", "fh_report_schema.yaml")).read() == "old schema"
+    assert not (d / "fh_report_schema.yaml").exists()
+
+
+def test_install_creates_the_schema_folder_when_there_is_none(tmp_path):
+    d = _folder(tmp_path)
+    commands._install_release_files(str(d), commands._read_release_zip(_zip(), "14.9.0"))
+    assert (d / "schemas" / "fh_report_schema.yaml").exists()
