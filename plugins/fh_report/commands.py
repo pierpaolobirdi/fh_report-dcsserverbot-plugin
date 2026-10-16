@@ -1961,6 +1961,12 @@ def _render_layout_tables(
 
     pp = punishment_points or {}
 
+    def _pp_points(data: dict) -> float:
+        ucid = data.get("ucid")
+        if "hook_punishment" in data:
+            return data["hook_punishment"]
+        return pp.get(ucid, 0) if (pp and ucid) else 0
+
     for letter in layout:
         if letter == "P":
             if layout == "P":
@@ -1991,6 +1997,20 @@ def _render_layout_tables(
         elif role == "S":
             items = [(n, d) for n, d in players.items() if d.get("session_points", 0) > 0]
             items.sort(key=lambda x: x[1].get("session_points", 0), reverse=True)
+            # Pilots with nothing scored yet but something to show on their line (their BoB
+            # in the session card, a punishment badge) come last, so that is never hidden.
+            listed = {n for n, _ in items}
+            extras = []
+            for n, d in players.items():
+                if n in listed:
+                    continue
+                bob = (d.get("bnb") or {}).get("session", 0) if show_session_card else 0
+                pun = _pp_points(d) if (show_punishment and role == badge_role and not badge_role_done) else 0
+                if bob > 0 or get_punishment_badge(pun, "", d.get("punishment_icon", ""),
+                                                   d.get("punishment_label", ""), d.get("punishment_pre_icon", "")):
+                    extras.append((n, d, pun, bob))
+            extras.sort(key=lambda x: (-x[2], -x[3]))
+            items += [(n, d) for n, d, _, _ in extras]
         else:  # D
             items = [(n, d) for n, d in players.items() if dp.get(n, 0) > 0 or d.get("daily_stats")]
             items.sort(key=lambda x: dp.get(x[0], 0), reverse=True)
@@ -2048,13 +2068,7 @@ def _render_layout_tables(
                     block.append(d_card)
 
             if show_punishment and role == badge_role and not badge_role_done:
-                ucid = data.get("ucid")
-                if "hook_punishment" in data:
-                    pts = data["hook_punishment"]
-                elif pp and ucid:
-                    pts = pp.get(ucid, 0)
-                else:
-                    pts = 0
+                pts = _pp_points(data)
                 badge = get_punishment_badge(
                     pts, "", data.get("punishment_icon", ""),
                     data.get("punishment_label", ""), data.get("punishment_pre_icon", "")

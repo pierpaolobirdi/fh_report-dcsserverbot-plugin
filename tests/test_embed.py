@@ -211,7 +211,7 @@ def test_footer_tag_reaches_every_embed():
 def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
     import discord
     players = {f"P{i:03d}": {"credits": 100000 - i, "ucid": f"u{i}"} for i in range(70)}
-    embed = discord.Embed(title="t")
+    embed = commands.discord.Embed(title="t")
     commands._render_layout_tables(embed, {"max_pilots": 0, "show_all_pilots": True}, "R", {}, players, {}, False, None, None, None)
     lines = [l for f in embed.fields for l in f.value.splitlines()
              if l.startswith(("🥇", "🥈", "🥉", "🎖", "•"))]
@@ -355,3 +355,40 @@ def test_the_spaces_above_the_table_are_worked_out_from_the_numbers():
 
 def test_without_daily_stats_the_title_is_just_the_session_part():
     assert "Daily" not in _title(8864, 0, daily=False)
+
+
+# ── pilots with nothing scored yet but a BoB or a punishment badge are listed in Session ──
+
+def _session_text(players, cfg, pp=None, layout="S"):
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, cfg, layout, {}, players, {}, False, pp or {}, None)
+    return "\n".join(f.value for f in embed.fields)
+
+
+def _pilot(name, pts=0, **kw):
+    return name, {"credits": 100, "session_points": pts, "ucid": "u" + name, **kw}
+
+
+def test_session_lists_a_pilot_with_only_bob_or_a_punishment_badge_after_the_scorers():
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 0, bnb={"session": 2}), _pilot("Cy", 0),
+                    _pilot("Dee", 0)])
+    cfg = {"show_session_card": True, "show_punishment": True}
+    text = _session_text(players, cfg, pp={"uDee": 40})
+    assert "Ann" in text and "Bob" in text and "Dee" in text and "Cy" not in text
+    assert text.index("Ann") < text.index("Dee") < text.index("Bob")           # scorers, then punished, then BoB
+    assert "BoB: 2" in text and "🔨" in text and "S: 0" not in text
+
+
+def test_session_keeps_zero_point_pilots_out_when_the_features_are_off():
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 0, bnb={"session": 2}), _pilot("Dee", 0)])
+    text = _session_text(players, {"show_session_card": False, "show_punishment": False}, pp={"uDee": 40})
+    assert "Ann" in text and "Bob" not in text and "Dee" not in text
+
+
+def test_the_punished_pilot_only_counts_in_the_table_that_carries_the_badges():
+    players = dict([_pilot("Ann", 50), _pilot("Dee", 0)])
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "RS", {}, players, {}, False, {"uDee": 40}, None)
+    rank, session = embed.fields[0].value, embed.fields[-1].value               # R carries the badges
+    assert "Dee" in rank and "🔨" in rank
+    assert "Ann" in session and "Dee" not in session
