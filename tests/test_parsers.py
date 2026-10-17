@@ -82,8 +82,8 @@ def test_session_card_bnb_priority_and_cap():
              "Refueling": 2, "Deaths": 2, "Achievement": 1, "Mission X": 1}
     card = commands._build_session_card(stats, bnb=2)
     parts = card.split(" · ")
-    assert len(parts) == 7 and parts[-2] == "BoB: 2" and parts[-1] == "2 Deaths"
-    assert commands._build_session_card({}, bnb=1).endswith("BoB: 1")
+    assert len(parts) == 7 and parts[-2] == "2 BoB" and parts[-1] == "2 Deaths"
+    assert commands._build_session_card({}, bnb=1).endswith("1 BoB")
     assert commands._build_session_card({}, bnb=0) is None
     assert "BoB" not in commands._build_session_card({"Air": 1})
 
@@ -91,9 +91,9 @@ def test_session_card_bnb_priority_and_cap():
 def test_pilot_card_bnb_is_penultimate():
     from conftest import commands
     card = commands._build_pilot_card({10: 47, 21: 3}, bnb=2)
-    assert card.endswith("47 Kills · BoB: 2 · 3 Deaths")
+    assert card.endswith("47 Kills · 2 BoB · 3 Deaths")
     assert "BoB" not in commands._build_pilot_card({10: 47, 21: 3})
-    assert commands._build_pilot_card({}, bnb=1).endswith("BoB: 1")
+    assert commands._build_pilot_card({}, bnb=1).endswith("1 BoB")
 
 
 def test_day_start_uses_schedule():

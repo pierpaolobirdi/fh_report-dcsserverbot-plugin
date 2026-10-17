@@ -330,7 +330,7 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                      Foothold): friendly units destroyed + damaged. Without that plugin
 #                      nothing is shown and nothing breaks.
 #                      false = hidden everywhere
-#                      true  = shown: "BoB: n" in the stats card (it also needs show_pilot_card,
+#                      true  = shown: "n BoB" in the stats card (it also needs show_pilot_card,
 #                              show_session_card and/or show_daily_card), and in /fh_report
 #                              player the BoB row of the stats table, the Blue-on-Blue section
 #                              and a line in Career Stats.

@@ -263,7 +263,7 @@ Stats shown:
 
 `show_bob` (default `true`; a config without the line counts as `true`) switches all of this on or off. `false` hides every `BoB` below and skips its database queries; the penalties in force of `/fh_report player` stay under `show_punishment`.
 
-`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
+`n BoB` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
 
 - *Destroyed*: every kill of a friendly unit.
 - *Damaged*: DCS reports every single hit as an event, so hits are grouped into one incident per attacker, victim and minute. A group is not counted when a kill of that victim type happened in that same minute, so a kill never counts twice.

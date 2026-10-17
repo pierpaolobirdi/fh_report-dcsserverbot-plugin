@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.3"
+FH_REPORT_RELEASE = "14.6.4"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1472,7 +1472,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸", bnb: int = 0) -> str | N
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
-    if bnb > 0:        parts.append(f"BoB: {bnb}")   # penultimate, never dropped
+    if bnb > 0:        parts.append(f"{bnb} BoB")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1539,7 +1539,7 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> st
         (5, f"{ship} Ship") if ship > 0 else None,
         (6, f"{rescues} Resc") if rescues > 0 else None,
         (7, f"{refuels} Refuels") if refuels > 0 else None,
-        (8, f"BoB: {bnb}") if bnb > 0 else None,
+        (8, f"{bnb} BoB") if bnb > 0 else None,
         (9, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]

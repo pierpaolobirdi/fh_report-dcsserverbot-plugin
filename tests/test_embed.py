@@ -376,7 +376,7 @@ def test_session_lists_a_pilot_with_only_bob_or_a_punishment_badge_after_the_sco
     text = _session_text(players, cfg, pp={"uDee": 40})
     assert "Ann" in text and "Bob" in text and "Dee" in text and "Cy" not in text
     assert text.index("Ann") < text.index("Dee") < text.index("Bob")           # scorers, then punished, then BoB
-    assert "BoB: 2" in text and "🔨" in text and "S: 0" not in text
+    assert "2 BoB" in text and "🔨" in text and "S: 0" not in text
 
 
 def test_session_keeps_zero_point_pilots_out_when_the_features_are_off():
