@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.4"
+FH_REPORT_RELEASE = "14.6.5"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1185,7 +1185,16 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                         strip_callsign_flag: bool = False,
                         min3_latest_day: bool = False,
                         name_to_ucid: dict | None = None) -> str | None:
-    """Podium text: for each closing event (newest date first), the top `top`
+    """The Podium as one text (see _podium_blocks); None if there is nothing to show."""
+    blocks = _podium_blocks(history, players, days, top, strip_callsign_flag, min3_latest_day, name_to_ucid)
+    return "\n".join("\n".join(b) for b in blocks) if blocks else None
+
+
+def _podium_blocks(history: dict, players: dict, days: int, top: int,
+                   strip_callsign_flag: bool = False,
+                   min3_latest_day: bool = False,
+                   name_to_ucid: dict | None = None) -> list[list[str]]:
+    """Podium blocks, one per closing event (newest first), each a list of lines: for each closing event (newest date first), the top `top`
     positions of that day as
         __date__ (Session End)
         🥇 `Name` — **Rank** — N,NNN pts
@@ -1195,10 +1204,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
     name, and shown with their CURRENT name and rank; unknown players show the
     stored name without rank. min3_latest_day forces at least 3 positions on
     the newest date (used when "P" is combined with other tables).
-    Field-size limits are handled by _add_podium_field. None if nothing to show.
+    Field-size limits are handled by _add_podium_field. [] if nothing to show.
     """
     if not history:
-        return None
+        return []
 
     dates_desc = sorted(history.keys(), reverse=True)
     if days and days > 0:
@@ -1287,10 +1296,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     block.append(f"{marker} {line_body}")
             blocks.append(block)
 
-    if not blocks:
-        return None
-
-    return "\n".join("\n".join(b) for b in blocks)
+    return blocks
 
 
 def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
@@ -1344,6 +1350,106 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 
 
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
+
+
+# ── /fh_report podium: typing dates and paging the answer ─────────────────────────────
+
+PODIUM_PAGE_CHARS = 3800     # text per page; with titles and footer a page stays well under Discord's 6000
+
+
+def _fmt_date(d) -> str:
+    """dd-mm-yyyy, the way dates are shown and typed."""
+    return d.strftime("%d-%m-%Y")
+
+
+def _parse_user_date(text: str | None, today):
+    """A date typed by an admin, as a `date`, or None when it cannot be read. Accepted:
+    dd-mm-yyyy (also with / or . or no separator: 25122026), dd-mm-yy, dd-mm (this year),
+    yyyy-mm-dd, `today`, `yesterday` and `Nd` (N days ago, e.g. 7d)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t == "today":
+        return today
+    if t == "yesterday":
+        return today - timedelta(days=1)
+    m = re.fullmatch(r"(\d{1,4})\s*d", t)
+    if m:
+        try:
+            return today - timedelta(days=int(m.group(1)))
+        except OverflowError:
+            return None
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t)               # yyyy-mm-dd
+    if m:
+        y, mo, d = (int(x) for x in m.groups())
+    else:
+        m = re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})(?:[-/. ](\d{4}|\d{2}))?", t)   # dd-mm[-yyyy|-yy]
+        if m:
+            d, mo = int(m.group(1)), int(m.group(2))
+            y = m.group(3)
+            y = today.year if y is None else (int(y) + 2000 if len(y) == 2 else int(y))
+        else:
+            m = re.fullmatch(r"(\d{2})(\d{2})(\d{4})", t)                          # ddmmyyyy
+            if not m:
+                return None
+            d, mo, y = (int(x) for x in m.groups())
+    try:
+        return datetime(y, mo, d).date()
+    except ValueError:
+        return None
+
+
+def _podium_pages(blocks: list[list[str]], limit: int = PODIUM_PAGE_CHARS) -> list[str]:
+    """Pack Podium blocks (one per day/event) into pages of at most about `limit` characters,
+    never splitting a block unless it is longer than a page by itself."""
+    pages, cur, size = [], [], 0
+    for block in blocks:
+        n = sum(len(line) + 1 for line in block)
+        if cur and size + n > limit:
+            pages.append("\n".join("\n".join(b) for b in cur))
+            cur, size = [], 0
+        cur.append(block)
+        size += n
+    if cur:
+        pages.append("\n".join("\n".join(b) for b in cur))
+    return pages
+
+
+class _PodiumView(discord.ui.View):
+    """Previous / Next over the pages of a long Podium; only the admin who asked can press."""
+
+    def __init__(self, user_id: int, embeds: list):
+        super().__init__(timeout=300)
+        self.user_id, self.embeds, self.index = user_id, embeds, 0
+        self.message = None              # the message that carries this view, set once sent
+        self._sync()
+
+    def _sync(self) -> None:
+        self.previous.disabled = self.index <= 0
+        self.next.disabled = self.index >= len(self.embeds) - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    async def _go(self, interaction: discord.Interaction, step: int) -> None:
+        self.index = max(0, min(len(self.embeds) - 1, self.index + step))
+        self._sync()
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button):
+        await self._go(interaction, -1)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button):
+        await self._go(interaction, +1)
+
+    async def on_timeout(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
 
 
 _pilot_cap_warned: set[str] = set()
@@ -4855,16 +4961,43 @@ class Fh_Report(Plugin):
         link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
         await self._reply_temporarily(interaction, f"✅ Report of **{name}** updated.{link}", ok=True)
 
+    async def _autocomplete_podium_date(self, interaction: discord.Interaction,
+                                        current: str) -> list[app_commands.Choice[str]]:
+        """Suggestions for date_from / date_to: what is typed (read as a date), then handy days."""
+        server_param = getattr(interaction.namespace, "server", None)
+        name, _ = self._resolve_server(interaction, server_param)
+        srv = self._server_by_key(name) if name else None
+        today = datetime.now(self._reset_tz(srv) if srv else timezone.utc).date()
+        typed = (current or "").strip()
+        choices, seen = [], set()
+
+        def add(label: str, d) -> None:
+            text = _fmt_date(d)
+            if text not in seen:
+                seen.add(text)
+                choices.append(app_commands.Choice(name=f"{label} ({text})" if label else text, value=text))
+        read = _parse_user_date(typed, today) if typed else None
+        if read:
+            add("", read)
+        for label, d in (("Today", today), ("Yesterday", today - timedelta(days=1)),
+                         ("7 days ago", today - timedelta(days=7)), ("30 days ago", today - timedelta(days=30)),
+                         ("First day of this month", today.replace(day=1))):
+            if not typed or typed.lower() in label.lower() or typed in _fmt_date(d):
+                add(label, d)
+        return choices[:25]
+
     @fh_report.command(name="podium", description="Show who held a given daily-history position between two dates.")
     @app_commands.describe(
-        date_from="Start date (YYYY-MM-DD)",
-        date_to="End date (YYYY-MM-DD)",
-        top="Show the top N positions for each day (1-50)",
+        date_from="Start date: dd-mm-yyyy, today, yesterday or 7d (default: date_to, or today)",
+        date_to="End date: dd-mm-yyyy, today, yesterday or 7d (default: today)",
+        top="Show the top N positions for each day (1-50, default 3)",
         _server="Which server — only needed if more than one is configured."
     )
+    @app_commands.autocomplete(date_from=_autocomplete_podium_date, date_to=_autocomplete_podium_date)
     @app_commands.rename(_server="server")
     async def podium(self, interaction: discord.Interaction,
-                     date_from: str, date_to: str, top: app_commands.Range[int, 1, 50],
+                     date_from: str | None = None, date_to: str | None = None,
+                     top: app_commands.Range[int, 1, 50] = 3,
                      _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
         # See player()'s comment above on why this is `_server` + rename,
         # not a plain `server` parameter.
@@ -4873,18 +5006,19 @@ class Fh_Report(Plugin):
             return
         server, srv, cfg, saves_dir, node, ephemeral = ctx
 
-        try:
-            d_from = datetime.strptime(date_from.strip(), "%Y-%m-%d").date()
-            d_to   = datetime.strptime(date_to.strip(), "%Y-%m-%d").date()
-        except ValueError:
-            await interaction.followup.send(
-                "❌ Invalid date format — use `YYYY-MM-DD` for both `date_from` and `date_to` "
-                "(e.g. `2026-08-01`).", ephemeral=True)
-            return
+        today = datetime.now(self._reset_tz(srv)).date()
+        for label, text in (("date_from", date_from), ("date_to", date_to)):
+            if (text or "").strip() and _parse_user_date(text, today) is None:
+                await interaction.followup.send(
+                    f"❌ I couldn't read `{text}` as `{label}`. Use `dd-mm-yyyy` (e.g. `25-12-2026`), "
+                    "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
+                return
+        given_from, given_to = (date_from or "").strip(), (date_to or "").strip()
+        d_to = _parse_user_date(given_to, today) if given_to else today
+        d_from = _parse_user_date(given_from, today) if given_from else d_to       # only a start: up to today
         if d_from > d_to:
-            await interaction.followup.send(
-                "❌ `date_from` must not be after `date_to`.", ephemeral=True)
-            return
+            d_from, d_to = d_to, d_from                      # typed the other way round: no need to refuse
+        shown = _fmt_date(d_from) if d_from == d_to else f"{_fmt_date(d_from)} → {_fmt_date(d_to)}"
 
         try:
             history = await self._load_daily_history(saves_dir, node)
@@ -4892,20 +5026,27 @@ class Fh_Report(Plugin):
             await interaction.followup.send(f"❌ Error reading daily history:\n```{e}```", ephemeral=True)
             return
 
-        # Filter to the requested [date_from, date_to] range (inclusive)
-        filtered_history = {}
+        # Filter to the requested [d_from, d_to] range (inclusive)
+        filtered_history, recorded = {}, []
         for date_str, events in history.items():
             try:
                 d = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
                 continue
+            recorded.append(d)
             if d_from <= d <= d_to:
                 filtered_history[date_str] = events
 
         if not filtered_history:
-            await interaction.followup.send(
-                f"No history found for **{self._public_server_name(server)}** between `{date_from}` and `{date_to}`.",
-                ephemeral=True)
+            name = self._public_server_name(server)
+            if recorded:
+                note = (f" The history of this server goes from `{_fmt_date(min(recorded))}` "
+                        f"to `{_fmt_date(max(recorded))}`.")
+                if d_to >= today:
+                    note += " A day is recorded when it closes, so today is not there yet."
+            else:
+                note = " Nothing has been recorded yet: a day is recorded when it closes."
+            await interaction.followup.send(f"No history found for **{name}** for `{shown}`.{note}", ephemeral=True)
             return
 
         # Need the current roster for live rank lookups, same as the main embed
@@ -4916,25 +5057,33 @@ class Fh_Report(Plugin):
         except Exception:
             players = {}
 
-        podium_lines = _build_podium_table(
+        blocks = _podium_blocks(
             filtered_history, players, days=0, top=top,
             strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")),
             name_to_ucid=_unpack_daily_snapshot(await self._load_daily_snapshot(saves_dir, node)).get("name_to_ucid") or {}
         )
-        if not podium_lines:
+        if not blocks:
             await interaction.followup.send(
-                f"No history found with data for the top **{top}** position(s) between "
-                f"`{date_from}` and `{date_to}`.", ephemeral=True)
+                f"No history found with data for the top **{top}** position(s) for `{shown}`.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title=f"👑 Daily Podium — Top {top}",
-            description=f"{date_from} → {date_to}",
-            color=0xF1C40F, timestamp=datetime.now(timezone.utc)
-        )
-        _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"{_version_text(self._where_tag(srv))} · Read-only historical report")
-        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        pages = _podium_pages(blocks)
+        footer = f"{_version_text(self._where_tag(srv))} · Read-only historical report"
+        embeds = []
+        for i, text in enumerate(pages, 1):
+            embed = discord.Embed(
+                title=f"👑 Daily Podium — Top {top}",
+                description=shown + (f" · page {i}/{len(pages)}" if len(pages) > 1 else ""),
+                color=0xF1C40F, timestamp=datetime.now(timezone.utc)
+            )
+            _add_podium_field(embed, "👑", text)
+            embed.set_footer(text=footer)
+            embeds.append(_trim_embed(embed))
+        if len(embeds) == 1:
+            await interaction.followup.send(embed=embeds[0], ephemeral=ephemeral)
+            return
+        view = _PodiumView(getattr(interaction.user, "id", None), embeds)
+        view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=ephemeral)
 
 
 async def setup(bot: DCSServerBot):

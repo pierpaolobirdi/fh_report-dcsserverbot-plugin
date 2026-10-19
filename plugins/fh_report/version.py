@@ -8,4 +8,4 @@ __version__ = "1.0"
 # /fh_report upgrade, install.cmd and external tools (Nova_Updates) all read it from here.
 # DCSServerBot does not look at it. Keep the line in this exact shape: install.cmd and the
 # upgrade read it with a pattern.
-PLUGIN_RELEASE = "14.6.4"
+PLUGIN_RELEASE = "14.6.5"

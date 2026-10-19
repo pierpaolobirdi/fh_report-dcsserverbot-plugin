@@ -1,3 +1,16 @@
+```
+/fh_report podium date_from:01-08-2026 date_to:22-08-2026 top:3
+```
+
+Returns an ephemeral report listing whoever held those positions on each day in that range. If you have more than one server configured, add `server:` — see [Multiple servers](#multiple-servers-server--commands_channel_id) above.
+
+Everything is optional and easy to type:
+
+- **Dates** are written `dd-mm-yyyy` (also `25/12/2026`, `25.12.2026`, `25122026`, `25-12-26`, `25-12` for this year, or the old `2026-12-25`). `today`, `yesterday` and `7d` (seven days ago) work too, and the date fields suggest these as you type.
+- `date_to` is **today** when left empty; `date_from` is the same day as `date_to` when left empty, so `/fh_report podium` alone asks for today. Dates typed the wrong way round are swapped. A day is recorded in the history when it closes, so today only appears from tomorrow; if nothing is found, the answer says which dates the history does cover.
+- `top` is **3** when left empty (1 to 50).
+- A long answer is split into pages with **◀ Previous** / **Next ▶** buttons (only the admin who asked can press them), so it never goes over Discord's 6000-character limit for an embed.
+
 # Fh_Report — DCSServerBot Plugin
 
 Automatically posts and keeps updated a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files. No database required.
