@@ -7,9 +7,9 @@ Returns an ephemeral report listing whoever held those positions on each day in 
 Everything is optional and easy to type:
 
 - **Dates** are written `dd-mm-yyyy` (also `25/12/2026`, `25.12.2026`, `25122026`, `25-12-26`, `25-12` for this year, or the old `2026-12-25`). `today`, `yesterday` and `7d` (seven days ago) work too, and the date fields suggest these as you type.
-- `date_to` is **today** when left empty; `date_from` is the same day as `date_to` when left empty, so `/fh_report podium` alone asks for today. Dates typed the wrong way round are swapped. A day is recorded in the history when it closes, so today only appears from tomorrow; if nothing is found, the answer says which dates the history does cover.
+- Leave **both dates empty** and you get the **latest day with data**. `date_to` is **today** when only `date_from` is typed; `date_from` is the same day as `date_to` when only `date_to` is typed. Dates typed the wrong way round are swapped. A day is recorded in the history when it closes, so today only appears from tomorrow; if nothing is found, the answer says which dates the history does cover.
 - `top` is **3** when left empty (1 to 50).
-- A long answer is split into pages with **◀ Previous** / **Next ▶** buttons (only the admin who asked can press them), so it never goes over Discord's 6000-character limit for an embed.
+- A long answer is split into pages with **◀ Previous** / **Next ▶** buttons that anyone who sees the message can press (in a public channel the page changes for everybody), so it never goes over Discord's 6000-character limit for an embed.
 
 # Fh_Report — DCSServerBot Plugin
 

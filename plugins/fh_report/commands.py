@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.5"
+FH_REPORT_RELEASE = "14.6.6"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1416,20 +1416,18 @@ def _podium_pages(blocks: list[list[str]], limit: int = PODIUM_PAGE_CHARS) -> li
 
 
 class _PodiumView(discord.ui.View):
-    """Previous / Next over the pages of a long Podium; only the admin who asked can press."""
+    """Previous / Next over the pages of a long Podium. Anyone who can see the message can press
+    the buttons (in a public channel the page changes for everybody)."""
 
-    def __init__(self, user_id: int, embeds: list):
+    def __init__(self, embeds: list):
         super().__init__(timeout=300)
-        self.user_id, self.embeds, self.index = user_id, embeds, 0
+        self.embeds, self.index = embeds, 0
         self.message = None              # the message that carries this view, set once sent
         self._sync()
 
     def _sync(self) -> None:
         self.previous.disabled = self.index <= 0
         self.next.disabled = self.index >= len(self.embeds) - 1
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return getattr(interaction.user, "id", None) == self.user_id
 
     async def _go(self, interaction: discord.Interaction, step: int) -> None:
         self.index = max(0, min(len(self.embeds) - 1, self.index + step))
@@ -5014,26 +5012,35 @@ class Fh_Report(Plugin):
                     "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
                 return
         given_from, given_to = (date_from or "").strip(), (date_to or "").strip()
-        d_to = _parse_user_date(given_to, today) if given_to else today
-        d_from = _parse_user_date(given_from, today) if given_from else d_to       # only a start: up to today
-        if d_from > d_to:
-            d_from, d_to = d_to, d_from                      # typed the other way round: no need to refuse
-        shown = _fmt_date(d_from) if d_from == d_to else f"{_fmt_date(d_from)} → {_fmt_date(d_to)}"
 
         try:
             history = await self._load_daily_history(saves_dir, node)
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading daily history:\n```{e}```", ephemeral=True)
             return
+        recorded = []
+        for date_str in history:
+            try:
+                recorded.append(datetime.strptime(date_str, "%Y-%m-%d").date())
+            except ValueError:
+                continue
+
+        if not given_from and not given_to:
+            d_from = d_to = max(recorded) if recorded else today                   # nothing typed: the latest day with data
+        else:
+            d_to = _parse_user_date(given_to, today) if given_to else today
+            d_from = _parse_user_date(given_from, today) if given_from else d_to    # only a start: up to today
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from                      # typed the other way round: no need to refuse
+        shown = _fmt_date(d_from) if d_from == d_to else f"{_fmt_date(d_from)} → {_fmt_date(d_to)}"
 
         # Filter to the requested [d_from, d_to] range (inclusive)
-        filtered_history, recorded = {}, []
+        filtered_history = {}
         for date_str, events in history.items():
             try:
                 d = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
                 continue
-            recorded.append(d)
             if d_from <= d <= d_to:
                 filtered_history[date_str] = events
 
@@ -5082,7 +5089,7 @@ class Fh_Report(Plugin):
         if len(embeds) == 1:
             await interaction.followup.send(embed=embeds[0], ephemeral=ephemeral)
             return
-        view = _PodiumView(getattr(interaction.user, "id", None), embeds)
+        view = _PodiumView(embeds)
         view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=ephemeral)
 
 

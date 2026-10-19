@@ -97,8 +97,10 @@ def test_the_paging_buttons_move_between_pages(saves_dir):
     assert shown[-1] is view.embeds[1] and not view.previous.disabled
     asyncio.run(view.previous(inter, None))
     assert shown[-1] is view.embeds[0] and view.previous.disabled
-    other = type("I", (), {"user": type("U", (), {"id": 7})()})()
-    assert asyncio.run(view.interaction_check(other)) is False and asyncio.run(view.interaction_check(inter)) is True
+    other = type("I", (), {"user": type("U", (), {"id": 7}), "response": R()})()    # somebody else can page too
+    asyncio.run(view.next(other, None))
+    assert shown[-1] is view.embeds[1]
+    assert not hasattr(view, "interaction_check")
 
 
 def test_a_short_answer_is_one_embed_without_buttons(saves_dir):
@@ -114,8 +116,13 @@ def test_one_day_is_shown_as_a_single_date_and_dates_typed_backwards_are_swapped
     assert sent[0][1].description == "01-09-2026 → 03-09-2026"
 
 
-def test_nothing_typed_means_today_and_says_what_history_exists(saves_dir):
+def test_nothing_typed_shows_the_latest_day_with_data(saves_dir):
     sent = _run(saves_dir, _history(3, top=5))
+    assert sent[0][1].description == "03-09-2026" and "Top 3" in sent[0][1].title
+
+
+def test_a_day_with_no_history_says_what_history_exists_and_that_today_is_not_closed(saves_dir):
+    sent = _run(saves_dir, _history(3, top=5), date_to="today")
     text = sent[0][0]
     assert "No history found" in text and "01-09-2026" in text and "03-09-2026" in text
     assert "today is not there yet" in text
