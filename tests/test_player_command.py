@@ -313,3 +313,34 @@ def test_the_embed_cards_need_show_bob_too():
         commands._bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card"))
     assert cond({"show_pilot_card": True}) and not cond({"show_pilot_card": True, "show_bob": False})
     assert not cond({})                                                  # no card at all: nothing to query
+
+
+def test_the_player_card_uses_the_same_player_data_as_the_report(saves_dir, monkeypatch):
+    seen = {}
+
+    class Adjust:
+        @staticmethod
+        def post_process(players, cfg, name, campaign_stats):
+            seen["name"], seen["campaign_stats"] = name, dict(campaign_stats)
+            for data in players.values():
+                data["credits"] = 987654
+            return players
+    monkeypatch.setattr(commands, "_fh_hook", Adjust)
+    monkeypatch.setattr(commands, "_HAS_HOOK", True)
+    d = saves_dir()
+    pool, followup = _Pool(), _Followup()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                         "instance": type("N", (), {"name": "inst"})()})()
+    plugin = make_plugin(apool=pool)
+    plugin._is_admin = lambda interaction, server: False
+
+    async def ctx(interaction, server_param):
+        return "inst", srv, {"saves_dir": d}, d, commands._UpdateReadCache(srv.node), True
+    plugin._command_context = ctx
+    plugin._public_server_name = lambda name: "Public"
+    interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
+    asyncio.run(plugin.player(interaction, None, None))
+    assert seen["name"] == "inst" and seen["campaign_stats"]          # the points of the save that was just read
+    assert followup.sent[0].title == "👤 Player — Zarpa"
+    card = "\n".join(f.name + f.value for f in followup.sent[0].fields)
+    assert "987,654" in card or "987654" in card                       # the adjusted value reaches the card

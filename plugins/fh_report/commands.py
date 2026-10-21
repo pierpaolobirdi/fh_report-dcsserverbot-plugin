@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.7"
+FH_REPORT_RELEASE = "14.6.8"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -4523,6 +4523,7 @@ class Fh_Report(Plugin):
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
             return
+        players = await self._report_players(srv, saves_dir, node, players, cfg, campaign_stats)
 
         last_seen = None
         if player_name:
@@ -4959,18 +4960,21 @@ class Fh_Report(Plugin):
         link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
         await self._reply_temporarily(interaction, f"✅ Report of **{name}** updated.{link}", ok=True)
 
-    async def _report_players(self, srv, saves_dir: str, node, players: dict, cfg: dict) -> dict:
+    async def _report_players(self, srv, saves_dir: str, node, players: dict, cfg: dict,
+                              campaign_stats: dict | None = None) -> dict:
         """The roster with the same adjustments the report applies to it (they need the campaign
-        points of the current save). The leading emoji of each line is left at its default."""
+        points of the current save, read here unless the caller already has them). The leading
+        emoji of each line is left at its default."""
         if not (players and _HAS_HOOK):
             return players
-        campaign_stats: dict = {}
-        try:
-            persistence_file = await find_persistence_file(saves_dir, node)
-            if persistence_file:
-                campaign_stats = (await parse_player_stats(persistence_file, node))[0]
-        except Exception as e:
-            self.log.debug(f"Fh_Report: campaign points not available for the roster: {e}")
+        if campaign_stats is None:
+            campaign_stats = {}
+            try:
+                persistence_file = await find_persistence_file(saves_dir, node)
+                if persistence_file:
+                    campaign_stats = (await parse_player_stats(persistence_file, node))[0]
+            except Exception as e:
+                self.log.debug(f"Fh_Report: campaign points not available for the roster: {e}")
         try:
             players = _fh_hook.post_process(players, cfg, srv.instance.name, campaign_stats)
         except Exception as e:
