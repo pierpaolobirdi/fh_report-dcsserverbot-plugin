@@ -61,7 +61,8 @@ def _run(saves_dir, history, **kw):
     with open(os.path.join(d, ".fhc", "fhr_daily_history.json"), "w") as f:
         json.dump(history, f)
     followup = _Followup()
-    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public"})()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                                  "instance": type("N", (), {"name": "inst"})()})()
     plugin = make_plugin()
 
     async def ctx(interaction, server_param):
@@ -144,3 +145,31 @@ def test_an_unreadable_date_gets_a_message_that_shows_the_formats(saves_dir):
 def test_an_empty_history_says_so(saves_dir):
     sent = _run(saves_dir, {}, date_from="01-09-2026", date_to="03-09-2026")
     assert "Nothing has been recorded yet" in sent[0][0]
+
+
+def test_the_podium_command_uses_the_same_player_data_as_the_report_but_keeps_the_default_medals(saves_dir, monkeypatch):
+    seen = {}
+
+    class Adjust:
+        @staticmethod
+        def post_process(players, cfg, name, campaign_stats):
+            seen["name"], seen["campaign_stats"] = name, dict(campaign_stats)
+            for data in players.values():
+                data["custom_rank"], data["custom_medal"] = "Adjusted Rank", "🦅"
+            return players
+    monkeypatch.setattr(commands, "_fh_hook", Adjust)
+    monkeypatch.setattr(commands, "_HAS_HOOK", True)
+    history = {"2026-09-02": [{"top": [{"name": "Zarpa", "points": 10}, {"name": "Nobody", "points": 5}]}],
+               "2026-09-01": [{"top": [{"name": "Zarpa", "points": 8}, {"name": "Nobody", "points": 4}]}]}
+    sent = _run(saves_dir, history, date_from="01-09-2026", date_to="02-09-2026", top=2)
+    body = "\n".join(f.value for f in sent[0][1].fields)
+    assert body.count("Adjusted Rank") == 2                       # the rank is the adjusted one on both days
+    assert "🦅" not in body and body.count("🥇") == 2             # the leading emoji stays the default one
+    assert seen["name"] == "inst" and seen["campaign_stats"]      # with the points of the current save
+
+
+def test_without_those_adjustments_the_podium_command_is_unchanged(saves_dir, monkeypatch):
+    monkeypatch.setattr(commands, "_HAS_HOOK", False)
+    history = {"2026-09-01": [{"top": [{"name": "Zarpa", "points": 8}]}]}
+    sent = _run(saves_dir, history, date_from="01-09-2026", date_to="01-09-2026", top=1)
+    assert "Adjusted" not in "\n".join(f.value for f in sent[0][1].fields)
