@@ -48,167 +48,636 @@ options:
     since: "4.0.0"
     required: true
     desc: Discord channel ID where the report is posted (one channel; a one-item list also works)
+    help: |-
+      #   channel_id     - Discord channel ID where the embed will be posted. A
+      #                    single value, either written directly or as a one-item
+      #                    YAML list (same two styles accepted by
+      #                    commands_channel_id below) — it's always one channel
   campaign_name:
     since: "4.0.0"
     required: true
     desc: Name shown in the title and footer of the report
+    help: |-
+      #   campaign_name  - Name displayed in the embed title and footer
   saves_dir:
     since: "4.0.0"
     desc: Foothold saves folder; leave empty to find it automatically from the instance
+    help: |-
+      #   saves_dir           - Override Foothold saves path (default: auto-resolved from instance home)
   commands_channel_id:
     since: "12.1.0"
     desc: Extra channel(s), besides channel_id, where /fh_report player and podium may be used
+    help: |-
+      #   commands_channel_id - Extra channel(s) (besides channel_id itself) where
+      #                         /fh_report player and /fh_report podium may be used
+      #                         for THIS server. Comma-separated list, or a YAML list.
+      #                         Two independent things, decided separately:
+      #                           - WHICH CHANNELS are allowed — governed purely by
+      #                             whether this is set for the server in question,
+      #                             regardless of how many servers you have
+      #                             configured overall:
+      #                               not set at all -> any channel is allowed
+      #                                                 (today's default)
+      #                               set            -> only channel_id itself, or
+      #                                                 one of these
+      #                           - WHETHER you must specify `server` on the
+      #                             command — only needed if you have MORE THAN
+      #                             ONE server available (configured here AND
+      #                             registered in DCSServerBot, i.e. the ones the
+      #                             `server` option lists). With several, leaving
+      #                             `server` empty works only in the channel that
+      #                             DCSServerBot assigns to one of them (the one
+      #                             the option pre-selects); anywhere else you
+      #                             must pick. With exactly one server available,
+      #                             `server` is never asked for — a leftover
+      #                             block of a server that is off or not
+      #                             registered does not count.
+      #                         Example:
+      #                           commands_channel_id:
+      #                             - 1234567890123456789
+      #                             - 1234567890123456780
   admin:
     since: "7.7.0"
     default: Admin
     desc: Discord role name(s) and/or username(s) allowed to look up other players, comma-separated or a list
+    help: |-
+      #   admin            - Who can query other players' stats with /fh_report player
+      #                      (default: "Admin"). Comma-separated list where each
+      #                      entry can be a Discord role name (as defined in DCSSB)
+      #                      or a specific username.
+      #                      Anyone not listed here can only view their own stats
+      #                      (Discord account must be linked via /linkme).
+      #                      Example:
+      #                        admin: Admin, SomeSpecificUser
   enable_updates:
     since: "14.2.0"
     default: true
     desc: false switches this instance off completely (no reads, no posts, no edits)
+    help: |-
+      #   enable_updates   - Switch Fh_Report on/off for this instance   (default: true)
+      #                      true  = normal operation
+      #                      false = this instance never reads, posts, or edits
+      #                              anything for this server — as if it weren't
+      #                              in the config at all (its settings stay in the
+      #                              file, so you can switch it back on later).
+      #                              Also useful when the same Foothold instance is
+      #                              reachable from more than one fh_report
+      #                              installation in the same cluster (e.g. one
+      #                              config per agent box) — set this to false on
+      #                              every duplicate copy except the one that should
+      #                              actually post.
+      #                              Can be set in DEFAULT (e.g. false) and turned on
+      #                              only for the instances that should have it.
   report_layout:
     since: "12.0.0"
     default: R
     desc: Tables to show, any order - D daily, P podium, S session, R rank; groups separated by commas rotate
     example: DPS
+    help: |-
+      #   report_layout    - Which leaderboard tables to show, and in what order (default: R)
+      #                      A string built from these letters, used in any order/subset:
+      #                        D = Daily Leaderboard (today's points)
+      #                        P = Daily Podium (historical closing events)
+      #                        S = Session Leaderboard (current session)
+      #                        R = Pilot Leaderboard (by Rank)
+      #                      Examples:
+      #                        R        = just the Rank table (default)
+      #                        DS       = Daily table, then Session table
+      #                        DPS      = Daily, Podium, then Session (no Rank table)
+      #                        DPSR     = Daily, Podium, Session, Rank (all four)
+      #                      P only makes sense combined with at least one of D/S/R —
+      #                      "P" alone shows just the Podium, nothing else.
+      #                      none     = no tables at all — just campaign progress and
+      #                                 the BLUE/RED bases (daily files are then not
+      #                                 read or written either). Can also be one of
+      #                                 the groups in a rotation, e.g. DPS, none
+      #                      Comma-separated = rotate between compositions, one step
+      #                      per update_interval, back to the first after the last —
+      #                      any number of groups is allowed. Example:
+      #                        report_layout: DP, SR
+      #                      shows "DP" one cycle, "SR" the next, "DP" again, and so
+      #                      on. Daily/Podium data is still kept up to date every
+      #                      cycle regardless of which group is currently showing.
+      #                      Rotation position isn't saved across a bot restart —
+      #                      it always starts at the first group again on load.
+      #                      points_detail_D/S/R (below) are NOT part of the
+      #                      rotation — they apply the same no matter which group
+      #                      is showing.
+      #                      The old points_order/compact_points values (from versions
+      #                      before v12.0.0) are NOT understood here any more — they
+      #                      are converted automatically, once, into report_layout/
+      #                      points_detail by the install/update process (which runs
+      #                      migrate_config.py against this file) — see CHANGELOG for
+      #                      the exact mapping used.
   points_detail_D:
     since: "12.0.0"
     desc: Values shown in the Daily table, in this order, from the letters D S R
+    help: |-
+      #   points_detail_D  - Exactly what the Daily table shows, in this order  (default: none)
   points_detail_S:
     since: "12.0.0"
     desc: Values shown in the Session table, in this order, from the letters D S R
+    help: |-
+      #   points_detail_S  - Exactly what the Session table shows, in this order (default: none)
   points_detail_R:
     since: "12.0.0"
     desc: Values shown in the Rank table, in this order, from the letters D S R
+    help: |-
+      #   points_detail_R  - Exactly what the Rank table shows, in this order   (default: none)
+      #                      Opt-in, like every other show_*-style feature below —
+      #                      a table with no points_detail_<its own letter> key at
+      #                      all shows only its own value, same as the old
+      #                      compact_points: true. There's no points_detail_P —
+      #                      Podium has no per-player value to show.
+      #                      Each is a string of the letters D, S, R, in the order
+      #                      you want them shown — nothing is added automatically,
+      #                      not even the table's own letter, so if you want a
+      #                      table to show its own value it has to be in its own
+      #                      string explicitly.
+      #                      Example: report_layout: DPSR
+      #                        points_detail_D: DSR   → Daily table:   (D: nnn · S: nnn · R: nnn)
+      #                        points_detail_S: R     → Session table: (R: nnn)               — own S value omitted on purpose
+      #                        (points_detail_R not set) → Rank table: (R: nnn)               — own value only
   max_pilots:
     since: "4.0.0"
     default: 20
     desc: Most pilots listed in each table (0 = no limit); a table's own max_pilots_X overrides it
+    help: |-
+      #   max_pilots       - Max pilots listed in each leaderboard table: Rank, Session,
+      #                      Daily (default: 20 here; without the line, no limit). A whole number
+      #                      of 1 or more; 0 = no limit. The 20 keeps a new install on a big
+      #                      community from listing everyone until you choose.
   max_pilots_R:
     since: "14.2.0"
     desc: Most pilots in the Rank table
+    help: |-
+      #   max_pilots_R     - Same, only for the Rank table       (default: max_pilots)
   max_pilots_S:
     since: "14.2.0"
     desc: Most pilots in the Session table
+    help: |-
+      #   max_pilots_S     - Same, only for the Session table    (default: max_pilots)
   max_pilots_D:
     since: "14.2.0"
     desc: Most pilots in the Daily table
+    help: |-
+      #   max_pilots_D     - Same, only for the Daily table      (default: max_pilots)
+      #                      Every table has its own limit, whatever report_layout is or
+      #                      rotates through: nothing is shared or moved between tables. The
+      #                      Podium has no limit here. What does not fit is cut with
+      #                      "+ N more pilots" (see show_all_pilots), and Discord's size
+      #                      limits still apply when you set none.
   show_all_pilots:
     since: "4.0.0"
     default: false
     desc: true splits what does not fit into more fields instead of cutting the list
+    help: |-
+      #   show_all_pilots  - Show all pilots beyond the field limit       (default: false)
+      #                      false = cut at limit, show "+ X more pilots"
+      #                      true  = split into multiple fields showing all pilots
   strip_callsign:
     since: "4.0.0"
     default: false
     desc: true removes the flight callsign prefix from pilot names (squadron tags like [MA] stay)
+    help: |-
+      #   strip_callsign   - Remove flight callsign prefix from pilot names (default: false)
+      #                      false = show names as-is
+      #                      true  = strip prefix. Squadron tags like [MA] are preserved.
   update_interval:
     since: "4.0.0"
     default: 300
     desc: Seconds between refreshes (not below 60; the shortest one in the file sets the pace)
+    help: |-
+      #   update_interval  - Seconds between embed refreshes              (default: 300)
+      #                          Not below 60: Foothold saves its file about every 60 s, so
+      #                          shorter times gain nothing.
+      #                          In DEFAULT it applies to every server. Written inside a server's
+      #                          block it applies to that server alone and DEFAULT's is ignored
+      #                          for it: a long interval saves reads on a remote node, a short
+      #                          one keeps a local server fresher. The shortest interval in the
+      #                          file sets the beat of the whole plugin; the others update every
+      #                          whole number of beats, rounded up (beat 60 + a server with 100:
+      #                          that one updates every 120). Use multiples of the shortest.
+      #                          Only a RUNNING mission is refreshed: a paused, loading or stopped
+      #                          server is skipped (its files do not change), apart from one
+      #                          refresh each time its status changes and one when its daily
+      #                          reset time passes (so the day closes on time).
   daily_reset_hour:
     since: "7.0.0"
     default: "0:00"
     desc: HH:MM when the daily points reset, in the server's Scheduler time zone (UTC without one)
+    help: |-
+      #   daily_reset_hour     - Time when the daily points counter resets, HH:MM  (default: 0:00)
+      #                          24-hour clock: 8:30, 08:30 and 15:30 are all valid. A plain
+      #                          number (4) still works and means 4:00. The counters are
+      #                          checked every update_interval, so the change shows in the
+      #                          first update after that time.
+      #                          The time is in the time zone of this server's `timezone` in
+      #                          DCSServerBot's Scheduler plugin (config/plugins/scheduler.yaml,
+      #                          for example `timezone: Europe/Madrid` on the instance; it follows
+      #                          summer/winter time by itself). Without one, or without the
+      #                          Scheduler plugin, the time is UTC. There is no separate setting
+      #                          here: change the Scheduler's timezone and the reset moves with it
+      #                          (one daily period is then longer or shorter than 24 hours, once).
+      #                          Manual reset (no commands in this plugin): delete
+      #                          saves_dir/.fhc/fhr_daily_snapshot.json (and the older
+      #                          daily_snapshot.json too, if it's still there) — the daily
+      #                          counter restarts cleanly at 0, it never retroactively counts
+      #                          everything accumulated up to that point.
+      #                          Campaign restart is also detected automatically: if both
+      #                          total points and total kills drop for common players,
+      #                          the daily snapshot resets on its own — no action needed.
   daily_reset_schedule:
     since: "7.0.0"
     desc: Reset time for specific weekdays (mon to sun), the days that differ from daily_reset_hour
+    help: |-
+      #   daily_reset_schedule - Optional: override the reset time for specific days of the week.
+      #                          Only define the days that differ from daily_reset_hour (same HH:MM format).
+      #                          Days: mon, tue, wed, thu, fri, sat, sun
+      #                          The days are the days in that same time zone.
+      #                          Example: reset at midnight except Thursday at 6:00 and Saturday at 7:30:
+      #                            daily_reset_schedule:
+      #                              thu: 6:00
+      #                              sat: 7:30
   show_map:
     since: "14.2.0"
     default: true
     desc: Show the mission's map on the second line of the title
+    help: |-
+      #   show_map         - Show the mission's map on a second line of the embed title  (default: true)
+      #                      The map is read from DCSServerBot (never configured here) and the
+      #                      last known one is kept while the bot runs; if none is known yet it
+      #                      is read once from the mission file. Nothing is shown until it is known.
+      #                      false = hide it
   bar_length:
     since: "4.0.0"
     default: 40
     desc: Number of squares of the progress bar
+    help: |-
+      #   bar_length       - Number of squares in the progress bar        (default: 40)
   bar_style_emoji:
     since: "6.0.0"
     default: false
     desc: false draws ANSI blocks (desktop only), true draws emoji blocks (also on mobile)
+    help: |-
+      #   bar_style_emoji  - Progress bar style                              (default: false)
+      #                      false = ANSI colored blocks (desktop/browser only)
+      #                      true  = emoji blocks 🟦🟥 (recommended for mobile compatibility)
+      #                              Note: emoji mode uses bar_length / 2 automatically
   max_zones:
     since: "4.0.0"
     default: 15
     desc: Most zones listed per column
+    help: |-
+      #   max_zones        - Max zones shown per column, omit = all       (default: 15)
   zone_name_length:
     since: "4.0.0"
     default: 16
     desc: Most characters of a zone name (8 to 24)
+    help: |-
+      #   zone_name_length - Max characters shown for zone names (8-24)   (default: 16)
+      #                      Values outside range are clamped automatically.
   slot_status:
     since: "4.0.0"
     default: false
     desc: true shows active against destroyed upgrade slots (first 5) instead of the maximum level
+    help: |-
+      #   slot_status      - Show upgrade slot damage per zone            (default: false)
+      #                      false = show max level slots, all filled
+      #                      true  = show active vs destroyed status per zone
+      #                              Checks all upgrade slots and shows up to 5 symbols,
+      #                              prioritizing active slots over their position — so a
+      #                              zone with active slots beyond position 5 still shows
+      #                              them as active rather than appearing fully destroyed.
+      #                              🔹/🔺 = active unit slot  ◇/△ = destroyed slot
   sort_zones_by_waypoint:
     since: "9.0.0"
     default: false
     desc: true orders zones by their mission waypoint number instead of level and damage
+    help: |-
+      #   sort_zones_by_waypoint - Order active zones by their mission waypoint
+      #                      number instead of level/damage           (default: false)
+      #                      false = current behavior (sort by level, then active
+      #                              slot count)
+      #                      true  = BLUE zones: highest waypoint number first
+      #                              (descending). RED zones: lowest waypoint
+      #                              number first (ascending). Zones with no
+      #                              waypoint assigned fall to the end of the
+      #                              active block (same secondary order as
+      #                              false), before suspended zones — which are
+      #                              always last regardless of this setting.
+      #                      Waypoint numbers come from Foothold's in-memory
+      #                      WaypointList table (set from the .miz's trigger zone
+      #                      flavorText) — never written to any save file on its
+      #                      own, so this requires a one-time hot-injection dump
+      #                      to a shared cache file (saves_dir/.fhc/fhc_waypoints.lua,
+      #                      also used by Fh_Control if installed). The dump is
+      #                      only triggered when that cache is missing, or when a
+      #                      campaign restart was just detected — never on every
+      #                      ordinary cycle, since the mapping is static for the
+      #                      life of a stable campaign. Requires the mission to
+      #                      be running at the time of the (re)trigger; falls
+      #                      back to the false behavior until a fresh cache is
+      #                      available.
   show_pilot_card:
     since: "7.5.0"
     default: false
     desc: true shows a career line under each pilot of the Rank table (needs Foothold 4.5 or later)
+    help: |-
+      #   show_pilot_card  - Show pilot career card below each pilot in the rank leaderboard
+      #                      (default: false). Requires Foothold v4.5 or later.
+      #                      Data sourced from Foothold_Ranks.lua — historical career totals only,
+      #                      not session or daily stats. Shown only on rank-ordered tables.
+      #                      Displays: fixed-wing hrs, helo hrs, kills, traps, refuels, deaths.
+      #                      Values of zero are omitted. If all values are zero the card is not shown.
   pilot_card_icon:
     since: "7.5.0"
     default: "\U0001F538"
     desc: Emoji at the start of the career line
+    help: |-
+      #   pilot_card_icon  - Emoji shown at the start of the pilot career card line (default: 🔸)
+      #                      Example output:
+      #                        🥇 `Pilot1` — Colonel (R: 241,500)
+      #                        ·　🔸 129h fixed · 13h helo · 47 kills · 23 traps · 12 refuels · 3 deaths
   show_session_card:
     since: "7.7.0"
     default: false
     desc: true shows a stats line under each pilot of the Session table
+    help: |-
+      #   show_session_card - Show session stats card below each pilot in the session leaderboard
+      #                      (default: false). Shown only on session-ordered tables.
+      #                      Data sourced from the campaign save file (playerStats) — current
+      #                      session kills and missions only, not career totals.
+      #                      "missions" counts only keys containing the word "mission"
+      #                      (CAP mission, SEAD mission, CAS mission, etc.)
+      #                      Displays up to 6 fields, priority order: missions, air, helo,
+      #                      SAM, ground, structure, infantry, deaths. Lowest-priority
+      #                      fields are dropped first if there are more than 6 with data.
+      #                      Deaths is always shown if > 0. Values of zero are omitted.
+      #                      If all values are zero the card is not shown.
   session_card_icon:
     since: "7.7.0"
     default: "\U0001F538"
     desc: Emoji at the start of the session stats line
+    help: |-
+      #   session_card_icon - Emoji shown at the start of the session stats card line (default: 🔸)
+      #                      Mirrors the pilot career card categories (flight time, total kills,
+      #                      refuels, deaths), computed from session data (playerStats) using
+      #                      Foothold's confirmed session↔career field correlation. Session data
+      #                      has no fixed-wing/helicopter time split and no carrier traps
+      #                      equivalent — Foothold does not track these per-session.
+      #                      Example output:
+      #                        🥇 `Pilot1` — Staff Sergeant (S: 11,357)
+      #                        ·　🔸 4h flight · 41 kills · 3 refuels · 1 death
   show_daily_card:
     since: "7.7.0"
     default: false
     desc: true shows a stats line under each pilot of the Daily table
+    help: |-
+      #   show_daily_card  - Show daily stats card below each pilot in the daily leaderboard
+      #                      (default: false). Shown only on daily-ordered tables.
+      #                      Same data and rules as show_session_card, but computed as the
+      #                      delta since the daily reset (daily_reset_hour / daily_reset_schedule)
+      #                      instead of full session totals.
   daily_card_icon:
     since: "7.7.0"
     default: "\U0001F538"
     desc: Emoji at the start of the daily stats line
+    help: |-
+      #   daily_card_icon  - Emoji shown at the start of the daily stats card line (default: 🔸)
+      #                      Example output:
+      #                        🥇 `Pilot1` — Staff Sergeant (D: 890)
+      #                        ·　🔸 1h flight · 8 kills · 1 refuel
   podium_days:
     since: "9.0.0"
     default: 7
     desc: Days shown when the layout is only P (0 = since the campaign started)
+    help: |-
+      #   podium_days      - Window of days shown when report_layout is JUST "P"
+      #                      (Podium alone, no other table)                (default: 7)
+      #                      0 = all available history (since campaign start)
+      #                      A positive number = only the most recent N calendar
+      #                      dates that have at least one recorded closing event.
+      #                      Only affects report_layout: P on its own. The Podium
+      #                      icon is fixed (👑) everywhere and not configurable.
   podium_top:
     since: "9.0.0"
     default: 1
     desc: Positions shown for each day when the layout is only P (1 to 50)
+    help: |-
+      #   podium_top       - Show the top N positions (1-50) for each closing
+      #                      event when report_layout is JUST "P"
+      #                      (default: 1) — e.g. 3 shows 1st, 2nd AND 3rd place,
+      #                      not just 3rd place alone.
+      #                      Only affects report_layout: P on its own — see
+      #                      podium_days above.
   podium_combined_days:
     since: "12.0.0"
     default: 7
     desc: Days shown when P is combined with other tables (0 = since the campaign started)
+    help: |-
+      #   podium_combined_days - Same as podium_days, but for the Podium table when
+      #                      "P" is combined with other letters in report_layout
+      #                      (e.g. DPSR, DPS, RPSD)                        (default: 7).
+      #                      Independent from podium_days — the two Podium
+      #                      displays can be configured differently.
   podium_combined_top:
     since: "12.0.0"
     default: 1
     desc: Positions shown for each day when P is combined with other tables (1 to 50)
+    help: |-
+      #   podium_combined_top - Same as podium_top (top N positions, 1-50), but for
+      #                      "P" combined with other letters (default: 1).
+      #                      Independent from podium_top.
   podium_combined_min3_latest_day:
     since: "12.0.0"
     default: false
     desc: true always shows at least the top 3 for the most recent day when P is combined
+    help: |-
+      #   podium_combined_min3_latest_day - Force at least the top 3 positions to show
+      #                      for the single most recent closing event(s) when "P"
+      #                      is combined with other letters, even if
+      #                      podium_combined_top is set lower (1 or 2)  (default: false)
+      #                      false = every day strictly follows podium_combined_top
+      #                      true  = the most recent date always shows at least
+      #                              3 positions (both closures if that day had
+      #                              two); all other days still follow
+      #                              podium_combined_top exactly. Has no effect if
+      #                              podium_combined_top is already 3 or higher.
+      #                      Only affects "P" combined with other letters — "P" on
+      #                      its own never uses this.
   excluded_ucids:
     since: "4.0.0"
     desc: UCIDs to hide from the tables
+    help: |-
+      #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
   show_unranked_pilots:
     since: "14.6.9"
     default: true
     desc: true also lists pilots that only the campaign save knows (no record in Foothold_Ranks.lua), without a rank
+    help: |-
+      #   show_unranked_pilots - Also list pilots that only the campaign save knows  (default: true)
+      #                      Foothold keeps no ranks when its config has RankingSystem = false
+      #                      (and a new pilot has none yet), so Foothold_Ranks.lua has no
+      #                      record of them although the campaign save holds their points
+      #                      and stats.
+      #                      false = only pilots with a record in Foothold_Ranks.lua
+      #                      true  = they are also listed in the Session and Daily tables,
+      #                              without a rank (the Rank table needs credits and skips
+      #                              them), and /fh_report player works for them.
   show_punishment:
     since: "4.0.0"
     default: false
     desc: true shows punishment badges under sanctioned pilots (needs the Punishment plugin of DCSServerBot)
+    help: |-
+      #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
+      #                      false = disabled
+      #                      true  = enabled (requires DCSServerBot punishment plugin)
+      #                      Reads from pu_events table. Thresholds:
+      #                      1pt 🧿 JAG's watch        11pt 🔍 JAG's investigation
+      #                      26pt ⚖️ JAG indictment    51pt ⛓️ Confined to quarters
+      #                      101pt 🔒 Brig time        200pt 💀 Dishonorably discharged
   show_bob:
     since: "14.2.0"
     default: true
     desc: Show blue-on-blue (friendly fire) counts, from the Mission Statistics plugin of DCSServerBot
+    help: |-
+      #   show_bob         - Show the Blue on Blue (BoB) friendly-fire counts  (default: true)
+      #                      Taken from the Mission Statistics plugin of DCSServerBot (never from
+      #                      Foothold): friendly units destroyed + damaged. Without that plugin
+      #                      nothing is shown and nothing breaks.
+      #                      false = hidden everywhere
+      #                      true  = shown: "n BoB" in the stats card (it also needs show_pilot_card,
+      #                              show_session_card and/or show_daily_card), and in /fh_report
+      #                              player the BoB row of the stats table, the Blue-on-Blue section
+      #                              and a line in Career Stats.
+      #                      A config without this line counts as true.
   show_player_cmd_hint:
     since: "8.0.0"
     default: true
     desc: true adds a footer line reminding players of /fh_report player
+    help: |-
+      #   show_player_cmd_hint - Show a reminder of /fh_report player in the embed
+      #                      footer                                        (default: true)
+      #                      false = disabled
+      #                      true  = adds a second line to the footer reminding
+      #                              players they can check their own stats.
   player_cmd_hint_text:
     since: "8.0.0"
     default: Type /fh_report player to see your own stats.
     desc: Text of that footer line
+    help: |-
+      #   player_cmd_hint_text - Customize the footer reminder text        (default:
+      #                      "Type /fh_report player to see your own stats.")
   show_new_release:
     since: "14.5.0"
     default: true
     default_only: true
     desc: true notes in the footers when a newer stable release exists (read from DEFAULT, applies to all servers)
+    help: |-
+      #   show_new_release - Note in the embed footers when a newer stable release
+      #                      of Fh_Report exists                           (default: true)
+      #                      false = never look for it, nothing is shown
+      #                      true  = adds "Ver. X.Y.Z available" after the version.
+      #                              Looked at only when the day closes and on
+      #                              /fh_report update; stable releases only.
+      #                              Read from DEFAULT; applies to every server.
+
+# The comment block at the top of fh_report.yaml (HEADER_COMMENT in migrate_config.py and the example
+# config/plugins/fh_report.yaml are written from it by tools/sync_option_docs.py): free text blocks and the
+# `help` of each option, in this order. The text is kept exactly as it appears in the file, # included.
+header:
+  - text: |-
+      # fh_report.yaml — Fh_Report Plugin Configuration
+      # Place this file in: config/plugins/fh_report.yaml
+      #
+      # SERVER IDENTIFICATION:
+      #   Each server block key must match the DCSServerBot instance name as defined in nodes.yaml.
+      #   The plugin resolves the Foothold saves directory automatically, including in multi-node
+      #   cluster setups where DCS instances run on remote agent nodes.
+      #   If Foothold saves are in a non-standard location, override with saves_dir.
+      #   Two forms are accepted, and they can be mixed in the same file:
+      #     - FLAT (the classic form): the block is named after the instance. Fine while instance
+      #       names are unique across your nodes:
+      #         DCS.otra:
+      #           channel_id: 1234567890123456781
+      #     - BY NODE: on a cluster instance names repeat from node to node (every node starts with
+      #       DCS.dcs_serverrelease), so write each block under its node, the way DCSServerBot's own
+      #       plugin configs do:
+      #         MyNode1:
+      #           DCS.dcs_serverrelease:
+      #             channel_id: 1234567890123456789
+      #             campaign_name: "Server A"
+      #         MyNode2:
+      #           DCS.dcs_serverrelease:
+      #             channel_id: 1234567890123456780
+      #             campaign_name: "Server B"
+      #   A `<node>:` entry wins over the flat one with the same instance name. A flat block whose
+      #   name is shared by instances of several nodes cannot say which one it is for: none of
+      #   them gets a report (a warning in the bot log says so).
+      #
+      # REQUIRED per server:
+  - option: channel_id
+  - option: campaign_name
+  - text: |-
+      #
+      # OPTIONAL per server:
+  - option: saves_dir
+  - option: commands_channel_id
+  - text: |-
+      #
+
+      # OPTIONAL - define in DEFAULT to apply to all servers,
+      #             or override per server block. Listed below in the same order
+      #             they appear in the DEFAULT block.
+      #
+  - option: admin
+  - option: report_layout
+  - option: points_detail_D
+  - option: points_detail_S
+  - option: points_detail_R
+  - option: update_interval
+  - option: daily_reset_hour
+  - option: daily_reset_schedule
+  - option: show_map
+  - option: bar_length
+  - option: bar_style_emoji
+  - option: max_zones
+  - option: zone_name_length
+  - option: slot_status
+  - option: sort_zones_by_waypoint
+  - option: strip_callsign
+  - option: max_pilots
+  - option: max_pilots_R
+  - option: max_pilots_S
+  - option: max_pilots_D
+  - option: show_all_pilots
+  - option: show_pilot_card
+  - option: pilot_card_icon
+  - option: show_session_card
+  - option: session_card_icon
+  - option: show_daily_card
+  - option: daily_card_icon
+  - option: podium_days
+  - option: podium_top
+  - option: podium_combined_days
+  - option: podium_combined_top
+  - option: podium_combined_min3_latest_day
+  - option: show_punishment
+  - option: show_bob
+  - option: excluded_ucids
+  - option: enable_updates
+  - option: show_player_cmd_hint
+  - option: player_cmd_hint_text
+  - option: show_new_release
+  - option: show_unranked_pilots
+  - text: |-
+      #
+      # ZONE DISPLAY NOTES:
+      #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
+      #   - Suspended zones are shown fully filled at the bottom of each column.
+      #   - Hidden zones (name starts with "hidden") are fully ignored.
+      #
+      # UPGRADE SLOT INDICATORS (when slot_status: true):
+      #   🔹 = active BLUE slot   ◇ = destroyed BLUE slot
+      #   🔺 = active RED slot    △ = destroyed RED slot

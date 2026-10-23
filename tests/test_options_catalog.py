@@ -48,9 +48,8 @@ def test_each_option_has_a_short_english_description_and_a_release_number():
 
 
 def test_the_schema_and_migrate_config_carry_the_catalog_descriptions():
-    schema, migrate = sync.synced()
-    assert schema == sync._read(sync.SCHEMA) and migrate == sync._read(sync.MIGRATE), \
-        "run: python tools/sync_option_docs.py"
+    for path, text in sync.synced().items():
+        assert text == sync._read(path), f"{os.path.relpath(path, ROOT)} is out of date: run python tools/sync_option_docs.py"
     with open(sync.SCHEMA, encoding="utf-8") as f:
         mapping = yaml.safe_load(f)["schema;element_schema"]["mapping"]
     for name, opt in _catalog()["options"].items():
@@ -64,3 +63,22 @@ def test_syncing_twice_changes_nothing_and_a_changed_description_is_replaced():
     changed = sync.described_schema(text, {**descs, "show_map": "Another text", "excluded_ucids": "Other list"})
     assert changed.count("desc: 'Another text'") == 1 and "desc: 'Other list'" in changed
     assert descs["show_map"] not in changed and descs["excluded_ucids"] not in changed
+
+
+def test_the_header_comment_comes_from_the_catalog_in_migrate_and_in_the_example_config():
+    header = sync.render_header(_catalog())
+    assert header == mc.HEADER_COMMENT
+    assert sync._read(sync.EXAMPLE).startswith(header.strip())
+
+
+def test_every_option_has_help_text_that_starts_with_its_own_name():
+    for name, opt in _catalog()["options"].items():
+        assert re.match(rf"#   {name}\s+- ", opt["help"]), name
+    listed = [b["option"] for b in _catalog()["header"] if "option" in b]
+    assert sorted(listed) == sorted(_catalog()["options"])
+
+
+def test_every_option_is_mentioned_in_the_readme():
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+    assert [name for name in _catalog()["options"] if f"`{name}`" not in readme] == []
