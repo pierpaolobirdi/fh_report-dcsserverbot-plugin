@@ -975,23 +975,24 @@ schema;element_schema:
   nullable: false
   mapping:
     # Required per server
-    channel_id: {type: any, nullable: false, func: int_or_list}
-    campaign_name: {type: str, nullable: false}
+    channel_id: {type: any, nullable: false, func: int_or_list, desc: 'Discord channel ID where the report is posted (one channel; a one-item list also works)'}
+    campaign_name: {type: str, nullable: false, desc: 'Name shown in the title and footer of the report'}
     # Optional per server
-    saves_dir: {type: str}   # an empty value means auto-resolve
-    commands_channel_id: {type: any, func: text_or_list}
-    admin: {type: any, nullable: false, func: str_or_list}
-    enable_updates: {type: bool, nullable: false}
+    saves_dir: {type: str, desc: 'Foothold saves folder; leave empty to find it automatically from the instance'}   # an empty value means auto-resolve
+    commands_channel_id: {type: any, func: text_or_list, desc: 'Extra channel(s), besides channel_id, where /fh_report player and podium may be used'}
+    admin: {type: any, nullable: false, func: str_or_list, desc: 'Discord role name(s) and/or username(s) allowed to look up other players, comma-separated or a list'}
+    enable_updates: {type: bool, nullable: false, desc: 'false switches this instance off completely (no reads, no posts, no edits)'}
     disable_updates: {type: any, func: deprecated, enum: ['Use "enable_updates" instead (the opposite value).']}
     # What the report shows
     # report_layout: letters D/P/S/R, or several such groups separated by commas (one per update cycle)
-    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRdpsr]{1,4}(\s*,\s*[DPSRdpsr]{1,4})*\s*$'}
-    points_detail_D: {type: str, pattern: '^[DSRdsr]*$'}
-    points_detail_S: {type: str, pattern: '^[DSRdsr]*$'}
-    points_detail_R: {type: str, pattern: '^[DSRdsr]*$'}
-    update_interval: {type: int, nullable: false, range: {min: 1}}
-    daily_reset_hour: {type: str, nullable: false}   # HH:MM (the migration turns a plain hour into HH:MM)
+    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRdpsr]{1,4}(\s*,\s*[DPSRdpsr]{1,4})*\s*$', desc: 'Tables to show, any order - D daily, P podium, S session, R rank; groups separated by commas rotate'}
+    points_detail_D: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Daily table, in this order, from the letters D S R'}
+    points_detail_S: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Session table, in this order, from the letters D S R'}
+    points_detail_R: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Rank table, in this order, from the letters D S R'}
+    update_interval: {type: int, nullable: false, range: {min: 1}, desc: 'Seconds between refreshes (not below 60; the shortest one in the file sets the pace)'}
+    daily_reset_hour: {type: str, nullable: false, desc: 'HH:MM when the daily points reset, in the server''s Scheduler time zone (UTC without one)'}   # HH:MM (the migration turns a plain hour into HH:MM)
     daily_reset_schedule:
+      desc: 'Reset time for specific weekdays (mon to sun), the days that differ from daily_reset_hour'
       type: map
       nullable: false
       mapping:
@@ -1002,40 +1003,41 @@ schema;element_schema:
         fri: {type: str, nullable: false}
         sat: {type: str, nullable: false}
         sun: {type: str, nullable: false}
-    show_map: {type: bool, nullable: false}
-    bar_length: {type: int, nullable: false, range: {min: 1}}
-    bar_style_emoji: {type: bool, nullable: false}
-    max_zones: {type: int, nullable: false, range: {min: 0}}
-    zone_name_length: {type: int, nullable: false, range: {min: 8, max: 24}}
-    slot_status: {type: bool, nullable: false}
-    sort_zones_by_waypoint: {type: bool, nullable: false}
-    strip_callsign: {type: bool, nullable: false}
-    max_pilots: {type: int, nullable: false, range: {min: 0}}
-    max_pilots_R: {type: int, nullable: false, range: {min: 0}}
-    max_pilots_S: {type: int, nullable: false, range: {min: 0}}
-    max_pilots_D: {type: int, nullable: false, range: {min: 0}}
-    show_all_pilots: {type: bool, nullable: false}
-    show_pilot_card: {type: bool, nullable: false}
-    pilot_card_icon: {type: str, nullable: false}
-    show_session_card: {type: bool, nullable: false}
-    session_card_icon: {type: str, nullable: false}
-    show_daily_card: {type: bool, nullable: false}
-    daily_card_icon: {type: str, nullable: false}
-    podium_days: {type: int, nullable: false, range: {min: 0}}
-    podium_top: {type: int, nullable: false, range: {min: 1, max: 50}}
-    podium_combined_days: {type: int, nullable: false, range: {min: 0}}
-    podium_combined_top: {type: int, nullable: false, range: {min: 1, max: 50}}
-    podium_combined_min3_latest_day: {type: bool, nullable: false}
-    show_punishment: {type: bool, nullable: false}
-    show_bob: {type: bool, nullable: false}
+    show_map: {type: bool, nullable: false, desc: 'Show the mission''s map on the second line of the title'}
+    bar_length: {type: int, nullable: false, range: {min: 1}, desc: 'Number of squares of the progress bar'}
+    bar_style_emoji: {type: bool, nullable: false, desc: 'false draws ANSI blocks (desktop only), true draws emoji blocks (also on mobile)'}
+    max_zones: {type: int, nullable: false, range: {min: 0}, desc: 'Most zones listed per column'}
+    zone_name_length: {type: int, nullable: false, range: {min: 8, max: 24}, desc: 'Most characters of a zone name (8 to 24)'}
+    slot_status: {type: bool, nullable: false, desc: 'true shows active against destroyed upgrade slots (first 5) instead of the maximum level'}
+    sort_zones_by_waypoint: {type: bool, nullable: false, desc: 'true orders zones by their mission waypoint number instead of level and damage'}
+    strip_callsign: {type: bool, nullable: false, desc: 'true removes the flight callsign prefix from pilot names (squadron tags like [MA] stay)'}
+    max_pilots: {type: int, nullable: false, range: {min: 0}, desc: 'Most pilots listed in each table (0 = no limit); a table''s own max_pilots_X overrides it'}
+    max_pilots_R: {type: int, nullable: false, range: {min: 0}, desc: 'Most pilots in the Rank table'}
+    max_pilots_S: {type: int, nullable: false, range: {min: 0}, desc: 'Most pilots in the Session table'}
+    max_pilots_D: {type: int, nullable: false, range: {min: 0}, desc: 'Most pilots in the Daily table'}
+    show_all_pilots: {type: bool, nullable: false, desc: 'true splits what does not fit into more fields instead of cutting the list'}
+    show_pilot_card: {type: bool, nullable: false, desc: 'true shows a career line under each pilot of the Rank table (needs Foothold 4.5 or later)'}
+    pilot_card_icon: {type: str, nullable: false, desc: 'Emoji at the start of the career line'}
+    show_session_card: {type: bool, nullable: false, desc: 'true shows a stats line under each pilot of the Session table'}
+    session_card_icon: {type: str, nullable: false, desc: 'Emoji at the start of the session stats line'}
+    show_daily_card: {type: bool, nullable: false, desc: 'true shows a stats line under each pilot of the Daily table'}
+    daily_card_icon: {type: str, nullable: false, desc: 'Emoji at the start of the daily stats line'}
+    podium_days: {type: int, nullable: false, range: {min: 0}, desc: 'Days shown when the layout is only P (0 = since the campaign started)'}
+    podium_top: {type: int, nullable: false, range: {min: 1, max: 50}, desc: 'Positions shown for each day when the layout is only P (1 to 50)'}
+    podium_combined_days: {type: int, nullable: false, range: {min: 0}, desc: 'Days shown when P is combined with other tables (0 = since the campaign started)'}
+    podium_combined_top: {type: int, nullable: false, range: {min: 1, max: 50}, desc: 'Positions shown for each day when P is combined with other tables (1 to 50)'}
+    podium_combined_min3_latest_day: {type: bool, nullable: false, desc: 'true always shows at least the top 3 for the most recent day when P is combined'}
+    show_punishment: {type: bool, nullable: false, desc: 'true shows punishment badges under sanctioned pilots (needs the Punishment plugin of DCSServerBot)'}
+    show_bob: {type: bool, nullable: false, desc: 'Show blue-on-blue (friendly fire) counts, from the Mission Statistics plugin of DCSServerBot'}
     excluded_ucids:
+      desc: 'UCIDs to hide from the tables'
       type: seq
       sequence:
         - {type: str, nullable: false, unique: true}
-    show_player_cmd_hint: {type: bool, nullable: false}
-    player_cmd_hint_text: {type: str, nullable: false}
-    show_new_release: {type: bool, nullable: false}
-    show_unranked_pilots: {type: bool, nullable: false}
+    show_player_cmd_hint: {type: bool, nullable: false, desc: 'true adds a footer line reminding players of /fh_report player'}
+    player_cmd_hint_text: {type: str, nullable: false, desc: 'Text of that footer line'}
+    show_new_release: {type: bool, nullable: false, desc: 'true notes in the footers when a newer stable release exists (read from DEFAULT, applies to all servers)'}
+    show_unranked_pilots: {type: bool, nullable: false, desc: 'true also lists pilots that only the campaign save knows (no record in Foothold_Ranks.lua), without a rank'}
 
 type: map
 func: check_main_structure

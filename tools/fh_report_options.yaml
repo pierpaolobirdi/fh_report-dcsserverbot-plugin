@@ -1,0 +1,214 @@
+# Catalog of the options of fh_report.yaml: sections, one-line descriptions, defaults and the release
+# each one appeared in. It is the source of the `desc` lines of
+# plugins/fh_report/schemas/fh_report_schema.yaml (tools/sync_option_docs.py writes them there and in
+# migrate_config.py; a test keeps them equal) and what the configuration editor groups its pages by.
+# `since` comes from the git history (first release that carried the option).
+# English only, like everything the plugin shows.
+
+sections:
+  - id: server
+    title: Server
+    intro: Which Discord channel gets the report and how the server is named. Set per server.
+    options: [channel_id, campaign_name, saves_dir, commands_channel_id, admin, enable_updates]
+  - id: layout
+    title: Report layout
+    intro: Which tables the report shows, in what order, and how long they may be.
+    options: [report_layout, points_detail_D, points_detail_S, points_detail_R, max_pilots, max_pilots_R,
+              max_pilots_S, max_pilots_D, show_all_pilots, strip_callsign]
+  - id: refresh
+    title: Refresh and daily reset
+    intro: How often the report is refreshed and when the daily points start again.
+    options: [update_interval, daily_reset_hour, daily_reset_schedule]
+  - id: map
+    title: Map and zones
+    intro: The front-status part of the report.
+    options: [show_map, bar_length, bar_style_emoji, max_zones, zone_name_length, slot_status,
+              sort_zones_by_waypoint]
+  - id: cards
+    title: Pilot cards
+    intro: The stats line shown under each pilot in the Rank, Session and Daily tables.
+    options: [show_pilot_card, pilot_card_icon, show_session_card, session_card_icon, show_daily_card,
+              daily_card_icon]
+  - id: podium
+    title: Podium
+    intro: The Daily Podium table of past days.
+    options: [podium_days, podium_top, podium_combined_days, podium_combined_top,
+              podium_combined_min3_latest_day]
+  - id: pilots
+    title: Pilots and sanctions
+    intro: Who is listed and what is shown next to them.
+    options: [excluded_ucids, show_unranked_pilots, show_punishment, show_bob]
+  - id: footer
+    title: Footer and notices
+    intro: The footer of every embed.
+    options: [show_player_cmd_hint, player_cmd_hint_text, show_new_release]
+
+options:
+  channel_id:
+    since: "4.0.0"
+    required: true
+    desc: Discord channel ID where the report is posted (one channel; a one-item list also works)
+  campaign_name:
+    since: "4.0.0"
+    required: true
+    desc: Name shown in the title and footer of the report
+  saves_dir:
+    since: "4.0.0"
+    desc: Foothold saves folder; leave empty to find it automatically from the instance
+  commands_channel_id:
+    since: "12.1.0"
+    desc: Extra channel(s), besides channel_id, where /fh_report player and podium may be used
+  admin:
+    since: "7.7.0"
+    default: Admin
+    desc: Discord role name(s) and/or username(s) allowed to look up other players, comma-separated or a list
+  enable_updates:
+    since: "14.2.0"
+    default: true
+    desc: false switches this instance off completely (no reads, no posts, no edits)
+  report_layout:
+    since: "12.0.0"
+    default: R
+    desc: Tables to show, any order - D daily, P podium, S session, R rank; groups separated by commas rotate
+    example: DPS
+  points_detail_D:
+    since: "12.0.0"
+    desc: Values shown in the Daily table, in this order, from the letters D S R
+  points_detail_S:
+    since: "12.0.0"
+    desc: Values shown in the Session table, in this order, from the letters D S R
+  points_detail_R:
+    since: "12.0.0"
+    desc: Values shown in the Rank table, in this order, from the letters D S R
+  max_pilots:
+    since: "4.0.0"
+    default: 20
+    desc: Most pilots listed in each table (0 = no limit); a table's own max_pilots_X overrides it
+  max_pilots_R:
+    since: "14.2.0"
+    desc: Most pilots in the Rank table
+  max_pilots_S:
+    since: "14.2.0"
+    desc: Most pilots in the Session table
+  max_pilots_D:
+    since: "14.2.0"
+    desc: Most pilots in the Daily table
+  show_all_pilots:
+    since: "4.0.0"
+    default: false
+    desc: true splits what does not fit into more fields instead of cutting the list
+  strip_callsign:
+    since: "4.0.0"
+    default: false
+    desc: true removes the flight callsign prefix from pilot names (squadron tags like [MA] stay)
+  update_interval:
+    since: "4.0.0"
+    default: 300
+    desc: Seconds between refreshes (not below 60; the shortest one in the file sets the pace)
+  daily_reset_hour:
+    since: "7.0.0"
+    default: "0:00"
+    desc: HH:MM when the daily points reset, in the server's Scheduler time zone (UTC without one)
+  daily_reset_schedule:
+    since: "7.0.0"
+    desc: Reset time for specific weekdays (mon to sun), the days that differ from daily_reset_hour
+  show_map:
+    since: "14.2.0"
+    default: true
+    desc: Show the mission's map on the second line of the title
+  bar_length:
+    since: "4.0.0"
+    default: 40
+    desc: Number of squares of the progress bar
+  bar_style_emoji:
+    since: "6.0.0"
+    default: false
+    desc: false draws ANSI blocks (desktop only), true draws emoji blocks (also on mobile)
+  max_zones:
+    since: "4.0.0"
+    default: 15
+    desc: Most zones listed per column
+  zone_name_length:
+    since: "4.0.0"
+    default: 16
+    desc: Most characters of a zone name (8 to 24)
+  slot_status:
+    since: "4.0.0"
+    default: false
+    desc: true shows active against destroyed upgrade slots (first 5) instead of the maximum level
+  sort_zones_by_waypoint:
+    since: "9.0.0"
+    default: false
+    desc: true orders zones by their mission waypoint number instead of level and damage
+  show_pilot_card:
+    since: "7.5.0"
+    default: false
+    desc: true shows a career line under each pilot of the Rank table (needs Foothold 4.5 or later)
+  pilot_card_icon:
+    since: "7.5.0"
+    default: "\U0001F538"
+    desc: Emoji at the start of the career line
+  show_session_card:
+    since: "7.7.0"
+    default: false
+    desc: true shows a stats line under each pilot of the Session table
+  session_card_icon:
+    since: "7.7.0"
+    default: "\U0001F538"
+    desc: Emoji at the start of the session stats line
+  show_daily_card:
+    since: "7.7.0"
+    default: false
+    desc: true shows a stats line under each pilot of the Daily table
+  daily_card_icon:
+    since: "7.7.0"
+    default: "\U0001F538"
+    desc: Emoji at the start of the daily stats line
+  podium_days:
+    since: "9.0.0"
+    default: 7
+    desc: Days shown when the layout is only P (0 = since the campaign started)
+  podium_top:
+    since: "9.0.0"
+    default: 1
+    desc: Positions shown for each day when the layout is only P (1 to 50)
+  podium_combined_days:
+    since: "12.0.0"
+    default: 7
+    desc: Days shown when P is combined with other tables (0 = since the campaign started)
+  podium_combined_top:
+    since: "12.0.0"
+    default: 1
+    desc: Positions shown for each day when P is combined with other tables (1 to 50)
+  podium_combined_min3_latest_day:
+    since: "12.0.0"
+    default: false
+    desc: true always shows at least the top 3 for the most recent day when P is combined
+  excluded_ucids:
+    since: "4.0.0"
+    desc: UCIDs to hide from the tables
+  show_unranked_pilots:
+    since: "14.6.9"
+    default: true
+    desc: true also lists pilots that only the campaign save knows (no record in Foothold_Ranks.lua), without a rank
+  show_punishment:
+    since: "4.0.0"
+    default: false
+    desc: true shows punishment badges under sanctioned pilots (needs the Punishment plugin of DCSServerBot)
+  show_bob:
+    since: "14.2.0"
+    default: true
+    desc: Show blue-on-blue (friendly fire) counts, from the Mission Statistics plugin of DCSServerBot
+  show_player_cmd_hint:
+    since: "8.0.0"
+    default: true
+    desc: true adds a footer line reminding players of /fh_report player
+  player_cmd_hint_text:
+    since: "8.0.0"
+    default: Type /fh_report player to see your own stats.
+    desc: Text of that footer line
+  show_new_release:
+    since: "14.5.0"
+    default: true
+    default_only: true
+    desc: true notes in the footers when a newer stable release exists (read from DEFAULT, applies to all servers)

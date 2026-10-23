@@ -12,6 +12,16 @@
 - The older upgrade also copies only the files it knows. Do not add files under `plugins/fh_report/`
   without reading the compatibility tests at the end of `tests/test_release_version.py`.
 
+## Describing an option (do not break)
+
+- Every option of `fh_report.yaml` is described once, in `tools/fh_report_options.yaml` (section, one
+  line, default, release it appeared in). Change a description there and run
+  `python tools/sync_option_docs.py`: it writes the `desc` lines of the schema and refreshes the copy of
+  the schema inside `migrate_config.py`. A test fails if they are out of date.
+- pykwalify refuses unknown keys in a schema rule (only `desc` and `example` are allowed), so sections and
+  release numbers live in the catalog only. Add a new option to the catalog, the schema, `migrate_config.py`
+  and the README together; the tests say which one is missing.
+
 ## Pending: retire the bridge line at the next major release (15.x.x)
 
 Decision of the owner (do it only when the owner publishes 15.x.x; ask first):
