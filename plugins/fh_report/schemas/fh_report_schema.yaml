@@ -71,6 +71,7 @@ schema;element_schema:
     show_player_cmd_hint: {type: bool, nullable: false}
     player_cmd_hint_text: {type: str, nullable: false}
     show_new_release: {type: bool, nullable: false}
+    show_unranked_pilots: {type: bool, nullable: false}
 
 type: map
 func: check_main_structure

@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.8"
+FH_REPORT_RELEASE = "14.6.9"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -754,6 +754,50 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+async def read_rank_identities(filepath: str, node) -> dict:
+    """{name: ucid} from the ucidToName table of Foothold_Ranks.lua, which Foothold keeps even when
+    it saves no ranked player ({} when the file cannot be read)."""
+    try:
+        content = (await node.read_file(filepath)).decode("utf-8", errors="replace")
+    except Exception:
+        return {}
+    return {name.strip(): ucid for ucid, name in _ucid_names(content)}
+
+
+def _show_unranked(cfg: dict) -> bool:
+    """show_unranked_pilots: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_unranked_pilots")
+    return True if raw is None else _bool_cfg(raw)
+
+
+def add_unranked_pilots(players: dict, campaign_stats: dict, session_stats_raw: dict,
+                        native_ucids: dict | None = None, identities: dict | None = None,
+                        excluded_ucids: list | None = None) -> list[str]:
+    """Add to `players`, in place, the pilots that have points or stats in the campaign save but no
+    record in Foothold_Ranks.lua (Foothold keeps no ranks with RankingSystem = false, or the pilot is
+    new). They get no credits and no rank: the Rank table skips them, the Session and Daily tables list
+    them without a rank. Returns the names added."""
+    native_ucids, identities = native_ucids or {}, identities or {}
+    excluded = set(excluded_ucids or [])
+    known_ucids = {d.get("ucid") for d in players.values() if d.get("ucid")}
+    known_base = {strip_callsign(n) for n in players}
+    added = []
+    for name in dict.fromkeys([*campaign_stats, *session_stats_raw]):
+        if name in players or strip_callsign(name) in known_base:
+            continue
+        ucid = native_ucids.get(name) or identities.get(name.strip())
+        if ucid and (ucid in known_ucids or ucid in excluded):
+            continue
+        if not (campaign_stats.get(name) or session_stats_raw.get(name)):
+            continue
+        players[name] = {"credits": 0.0, "ucid": ucid, "career": {}, "unranked": True, "hide_credits": True}
+        known_base.add(strip_callsign(name))
+        if ucid:
+            known_ucids.add(ucid)
+        added.append(name)
+    return added
+
+
 # Paths whose write failure was already logged at ERROR (then DEBUG until
 # a write to that path succeeds again).
 _dedup_write_warned: set[str] = set()
@@ -1273,7 +1317,7 @@ def _podium_blocks(history: dict, players: dict, days: int, top: int,
                 shown   = current_name or name
                 display = strip_callsign(shown) if strip_callsign_flag else shown
                 short   = _safe_code_span(display)
-                if player_data:
+                if player_data and not player_data.get("unranked"):
                     rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
                     rank = _fit_rank(f"{display} — ", rank, f" — {int(pts):,} pts")
                     rank_part = f" — **{rank}**"
@@ -2152,8 +2196,11 @@ def _render_layout_tables(
             parts = [metrics[c] for c in order if metrics.get(c)]
             pts_str = f"({'  ·  '.join(parts)})" if parts else ""
 
-            rank  = _fit_rank(f"{short_src} — ", rank, f" {pts_str}")
-            block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
+            if data.get("unranked"):          # only the campaign save knows this pilot: no rank to show
+                block = [f"{medal} {short} {pts_str}".rstrip()]
+            else:
+                rank  = _fit_rank(f"{short_src} — ", rank, f" {pts_str}")
+                block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
 
             if show_pilot_card and role == "R":
                 card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon,
@@ -3952,6 +3999,8 @@ class Fh_Report(Plugin):
                 players = _fh_hook.post_process(players, cfg, hook_name, campaign_stats)
             except Exception as e:
                 self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+        players = await self._with_unranked(players, cfg, campaign_stats, session_stats_raw,
+                                            name_to_ucid_native, ranks_file, node)
 
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
@@ -4524,6 +4573,8 @@ class Fh_Report(Plugin):
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
             return
         players = await self._report_players(srv, saves_dir, node, players, cfg, campaign_stats)
+        players = await self._with_unranked(players, cfg, campaign_stats, session_stats_raw,
+                                            name_to_ucid_native, ranks_file, node)
 
         last_seen = None
         if player_name:
@@ -4959,6 +5010,19 @@ class Fh_Report(Plugin):
         mid = self._message_ids.get(key)
         link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
         await self._reply_temporarily(interaction, f"✅ Report of **{name}** updated.{link}", ok=True)
+
+    async def _with_unranked(self, players: dict, cfg: dict, campaign_stats: dict, session_stats_raw: dict,
+                             native_ucids: dict, ranks_file: str, node) -> dict:
+        """`players` plus the pilots only the campaign save knows (see add_unranked_pilots), when
+        show_unranked_pilots is on."""
+        if not _show_unranked(cfg):
+            return players
+        identities = await read_rank_identities(ranks_file, node)
+        added = add_unranked_pilots(players, campaign_stats, session_stats_raw, native_ucids, identities,
+                                    cfg.get("excluded_ucids") or [])
+        if added:
+            self.log.debug(f"Fh_Report: {len(added)} pilot(s) listed without a rank (no record in Foothold_Ranks.lua)")
+        return players
 
     async def _report_players(self, srv, saves_dir: str, node, players: dict, cfg: dict,
                               campaign_stats: dict | None = None) -> dict:

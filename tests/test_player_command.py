@@ -344,3 +344,34 @@ def test_the_player_card_uses_the_same_player_data_as_the_report(saves_dir, monk
     assert followup.sent[0].title == "👤 Player — Zarpa"
     card = "\n".join(f.name + f.value for f in followup.sent[0].fields)
     assert "987,654" in card or "987654" in card                       # the adjusted value reaches the card
+
+
+def _unranked_player_cmd(saves_dir, cfg_extra=None):
+    """/fh_report player when Foothold_Ranks.lua holds no ranked pilot (RankingSystem = false)."""
+    import os
+    d = saves_dir(ranks=None)
+    with open(os.path.join(d, "Foothold_Ranks.lua"), "w") as f:
+        f.write('RankSave = {}\nRankSave["players"] = {\n}\nRankSave["ucidToName"] = {\n  ["%s"]="Zarpa",\n}\n' % A)
+    pool, followup = _Pool(), _Followup()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                         "instance": type("N", (), {"name": "inst"})()})()
+    plugin = make_plugin(apool=pool)
+    plugin._is_admin = lambda interaction, server: False
+
+    async def ctx(interaction, server_param):
+        return "inst", srv, {"saves_dir": d, **(cfg_extra or {})}, d, commands._UpdateReadCache(srv.node), True
+    plugin._command_context = ctx
+    plugin._public_server_name = lambda name: "Public"
+    interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
+    asyncio.run(plugin.player(interaction, None, None))
+    return followup.sent
+
+
+def test_player_works_for_a_pilot_only_the_campaign_save_knows(saves_dir):
+    sent = _unranked_player_cmd(saves_dir)
+    assert sent[0].title == "👤 Player — Zarpa"
+
+
+def test_player_says_no_stats_when_show_unranked_pilots_is_off(saves_dir):
+    sent = _unranked_player_cmd(saves_dir, {"show_unranked_pilots": False})
+    assert "No campaign stats found for you" in sent[0]

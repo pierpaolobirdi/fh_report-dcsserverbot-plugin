@@ -392,3 +392,44 @@ def test_the_punished_pilot_only_counts_in_the_table_that_carries_the_badges():
     rank, session = embed.fields[0].value, embed.fields[-1].value               # R carries the badges
     assert "Dee" in rank and "🔨" in rank
     assert "Ann" in session and "Dee" not in session
+
+
+# ── pilots only the campaign save knows (no record in Foothold_Ranks.lua) ───────────────────
+
+def test_unranked_pilots_are_added_from_the_save_with_their_ucid_and_without_credits():
+    players = {"Ann": {"credits": 500.0, "ucid": "ua", "career": {}}}
+    camp = {"Ann": 10, "Bob": 891, "Cy": 0, "Dee": 40, "Ann2": 5}
+    sess = {"Cy": {"Air": 1}, "Eve": {}}
+    added = commands.add_unranked_pilots(
+        players, camp, sess, native_ucids={"Dee": "ud"}, identities={"Bob": "ub", "Ann2": "ua"}, excluded_ucids=["ud"])
+    assert added == ["Bob", "Cy"]                         # Dee is excluded, Ann2 is Ann (same UCID), Eve has nothing
+    assert players["Bob"] == {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True, "hide_credits": True}
+    assert players["Ann"]["credits"] == 500.0 and "unranked" not in players["Ann"]
+    again = commands.add_unranked_pilots(
+        players, camp, sess, native_ucids={"Dee": "ud"}, identities={"Bob": "ub", "Ann2": "ua"}, excluded_ucids=["ud"])
+    assert again == []                                     # nothing new the second time
+
+
+def test_show_unranked_pilots_is_on_unless_switched_off():
+    assert commands._show_unranked({}) and commands._show_unranked({"show_unranked_pilots": True})
+    assert not commands._show_unranked({"show_unranked_pilots": False})
+    assert not commands._show_unranked({"show_unranked_pilots": "false"})
+
+
+def test_session_and_daily_list_an_unranked_pilot_without_a_rank_and_rank_skips_it():
+    players = {"Ann": {"credits": 500.0, "ucid": "ua", "career": {}, "session_points": 20},
+               "Bob": {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True, "hide_credits": True,
+                       "session_points": 891}}
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {}, "SR", {}, players, {"Ann": 5, "Bob": 7}, True, {}, None)
+    session, rank = embed.fields[0].value, embed.fields[1].value
+    assert "Bob" in session and "(S: 891)" in session and "Recruit" not in session.split("Bob")[1].split("\n")[0]
+    assert "**" not in session.split("Bob")[1].split("\n")[0]          # no bold rank after the name
+    assert "Bob" not in rank and "Ann" in rank
+
+
+def test_the_podium_shows_an_unranked_pilot_without_a_rank():
+    players = {"Bob": {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True}}
+    history = {"2026-09-01": [{"top": [{"name": "Bob", "points": 438, "ucid": "ub"}]}]}
+    text = commands._build_podium_table(history, players, days=0, top=1)
+    assert "Bob" in text and "438 pts" in text and "**" not in text

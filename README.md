@@ -102,6 +102,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `show_new_release` | `true` | `true` = the footers note when a newer stable release exists (see *The "new release" note*); `false` = never look for it. Read from `DEFAULT`, applies to every server |
+| `show_unranked_pilots` | `true` | `true` = pilots that only the campaign save knows (no record in `Foothold_Ranks.lua`) are also listed, without a rank. See [Pilots without a rank](#pilots-without-a-rank-show_unranked_pilots) |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 | `commands_channel_id` | none | *(per server only)* Extra channel(s) allowed to run `/fh_report player`/`podium` for this server, besides its own report channel — see [Multiple servers](#multiple-servers-server--commands_channel_id) below |
 
@@ -359,6 +360,19 @@ It is not an automatic updater: nothing happens unless an admin runs the command
 ### The "new release" note in the footers
 
 When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
+
+## Pilots without a rank (`show_unranked_pilots`)
+
+Foothold writes its ranking file, `Foothold_Ranks.lua`, only when the ranking system is on: `RankingSystem = true` in the mission's `Foothold_Config.lua` (with `false`, the default of that file, no pilot is saved there). A pilot who has just joined a campaign that has ranks has no record yet either. The leaderboards are built from that file, so without a record the pilot would not be listed, however many points the campaign save holds for them.
+
+With `show_unranked_pilots: true` (the default) those pilots are read from the campaign save (`playerStats`: points and stats) and:
+
+- are listed in the **Session** and **Daily** tables with their points and, if enabled, their stats cards, **without a rank** (there are no credits to rank them by);
+- are **not** in the **Rank** table, which needs credits;
+- appear in the Podium without a rank, as pilots unknown to the ranking always did;
+- can use `/fh_report player` when their UCID can be matched (from the save or from the `ucidToName` table of `Foothold_Ranks.lua`).
+
+`false` goes back to listing only the pilots that have a record in `Foothold_Ranks.lua`. Turning the ranking system on in Foothold is a gameplay decision of its own (shop and carrier restrictions, rank loss when killed): this option only makes the report useful when it is off.
 
 ## Settings in the DCSServerBot web console
 

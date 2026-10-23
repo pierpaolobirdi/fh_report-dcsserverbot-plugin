@@ -352,6 +352,15 @@
 #                              Looked at only when the day closes and on
 #                              /fh_report update; stable releases only.
 #                              Read from DEFAULT; applies to every server.
+#   show_unranked_pilots - Also list pilots that only the campaign save knows  (default: true)
+#                      Foothold keeps no ranks when its config has RankingSystem = false
+#                      (and a new pilot has none yet), so Foothold_Ranks.lua has no
+#                      record of them although the campaign save holds their points
+#                      and stats.
+#                      false = only pilots with a record in Foothold_Ranks.lua
+#                      true  = they are also listed in the Session and Daily tables,
+#                              without a rank (the Rank table needs credits and skips
+#                              them), and /fh_report player works for them.
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -400,6 +409,7 @@ DEFAULT:
   show_player_cmd_hint: true  # false = disabled  |  true = show /fh_report player reminder in footer
   player_cmd_hint_text: "Type /fh_report player to see your own stats."  # Text shown in the footer when show_player_cmd_hint is true
   show_new_release: true  # false = disabled  |  true = footer notes when a newer stable release exists
+  show_unranked_pilots: true  # false = only pilots with a record in Foothold_Ranks.lua  |  true = also list pilots only the campaign save knows
 #  excluded_ucids:
 
 DCS_Server:                             # instance name from nodes.yaml

@@ -364,6 +364,15 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                              Looked at only when the day closes and on
 #                              /fh_report update; stable releases only.
 #                              Read from DEFAULT; applies to every server.
+#   show_unranked_pilots - Also list pilots that only the campaign save knows  (default: true)
+#                      Foothold keeps no ranks when its config has RankingSystem = false
+#                      (and a new pilot has none yet), so Foothold_Ranks.lua has no
+#                      record of them although the campaign save holds their points
+#                      and stats.
+#                      false = only pilots with a record in Foothold_Ranks.lua
+#                      true  = they are also listed in the Session and Daily tables,
+#                              without a rank (the Rank table needs credits and skips
+#                              them), and /fh_report player works for them.
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -416,6 +425,7 @@ KNOWN_VARS = {
     "show_player_cmd_hint",
     "player_cmd_hint_text",
     "show_new_release",
+    "show_unranked_pilots",
     "saves_dir",
     "commands_channel_id",
     "channel_id",
@@ -455,6 +465,7 @@ DEFAULTS = {
     "show_player_cmd_hint":  True,
     "player_cmd_hint_text":  '"Type /fh_report player to see your own stats."',
     "show_new_release":      True,
+    "show_unranked_pilots":  True,
 }
 
 COMMENTS = {
@@ -488,6 +499,7 @@ COMMENTS = {
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
     "player_cmd_hint_text": "# Text shown in the footer when show_player_cmd_hint is true",
     "show_new_release": "# false = disabled  |  true = footer notes when a newer stable release exists",
+    "show_unranked_pilots": "# false = only pilots with a record in Foothold_Ranks.lua  |  true = also list pilots only the campaign save knows",
 }
 
 
@@ -1023,6 +1035,7 @@ schema;element_schema:
     show_player_cmd_hint: {type: bool, nullable: false}
     player_cmd_hint_text: {type: str, nullable: false}
     show_new_release: {type: bool, nullable: false}
+    show_unranked_pilots: {type: bool, nullable: false}
 
 type: map
 func: check_main_structure
@@ -1090,7 +1103,7 @@ def main():
     BOOL_VARS = {"bar_style_emoji", "slot_status", "strip_callsign", "sort_zones_by_waypoint",
                  "compact_points",
     "show_all_pilots", "show_punishment", "show_bob", "show_pilot_card", "compact_points",
-    "show_session_card", "show_daily_card", "show_player_cmd_hint", "show_new_release", "podium_4x_min3_latest_day",
+    "show_session_card", "show_daily_card", "show_player_cmd_hint", "show_new_release", "show_unranked_pilots", "podium_4x_min3_latest_day",
                  "show_map"}
     bool_converted = []
     for bvar in BOOL_VARS:
