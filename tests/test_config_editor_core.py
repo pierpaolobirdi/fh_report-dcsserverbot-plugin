@@ -48,7 +48,7 @@ def _file(text, model):
 
 # ── where the file is ───────────────────────────────────────────────────────────────────────
 
-def test_the_installation_is_found_from_its_folder_the_file_or_a_folder_inside(tmp_path):
+def test_the_installation_is_found_from_its_folder_the_file_or_a_folder_inside(tmp_path, tmp_path_factory):
     cfg = tmp_path / "config" / "plugins"
     cfg.mkdir(parents=True)
     (cfg / "fh_report.yaml").write_text("DEFAULT:\n")
@@ -59,10 +59,10 @@ def test_the_installation_is_found_from_its_folder_the_file_or_a_folder_inside(t
         found = core.find_installation(str(start))
         assert found.root == str(tmp_path) and found.config_file == str(cfg / "fh_report.yaml")
         assert found.schema_file == str(schema)
-    other = tmp_path / "elsewhere"
-    other.mkdir()
+    with pytest.raises(core.ConfigError):                                  # a folder with no installation above it
+        core.find_installation(str(tmp_path_factory.mktemp("nothing")))
     with pytest.raises(core.ConfigError):
-        core.find_installation(str(other))
+        core.find_installation(str(schema))                                 # a file, but not fh_report.yaml
 
 
 # ── what each option is ─────────────────────────────────────────────────────────────────────
