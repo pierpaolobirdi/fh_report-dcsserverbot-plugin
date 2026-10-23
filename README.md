@@ -374,6 +374,16 @@ With `show_unranked_pilots: true` (the default) those pilots are read from the c
 
 `false` goes back to listing only the pilots that have a record in `Foothold_Ranks.lua`. Turning the ranking system on in Foothold is a gameplay decision of its own (shop and carrier restrictions, rank loss when killed): this option only makes the report useful when it is off.
 
+## Configuration editor (`tools/fh_report_config.cmd`)
+
+A small window to change `fh_report.yaml` without editing the text: the options are grouped in tabs (Server, Layout, Refresh and reset, Map and zones, Pilot cards, Podium, Pilots, Footer), each with its explanation (the **?** button shows the full text from the file header), the release it appeared in, what applies now and where it comes from (this block, `DEFAULT` or the plugin's own default). You edit `DEFAULT` or one server at a time, and **Add server...** creates a new block.
+
+- The file keeps its comments and order; only the lines you change differ. Values are checked as you type (the reason appears under the field) and the whole file again when you save, with a list of **Problems** at the bottom; double-click one to go to it.
+- **Save** keeps the previous file next to it as `fh_report.yaml.<date>.bak` (the last ten are kept). DCSServerBot reads the file when it starts, so restart the bot afterwards.
+- If the file cannot be read (for example a key written twice, which stops the plugin from loading), the editor says which line and **File > Open the file in a text editor** lets you fix it.
+- It lives in `tools/` of the release (next to `install.cmd`), is run with `tools\fh_report_config.cmd [DCSServerBot folder]` and uses DCSServerBot's own Python (`%USERPROFILE%\.dcssb`), which already has PyYAML and ruamel.yaml; the last folder used is remembered. It is **not** installed or updated by `/fh_report upgrade`: use the copy that comes with the release you downloaded. It describes the options of the release it comes with and takes their types and limits from the schema of the installed plugin, so use the copy of the release you have installed.
+- Windows only for now.
+
 ## Settings in the DCSServerBot web console
 
 The plugin ships a schema (`plugins/fh_report/schemas/fh_report_schema.yaml`), so the web console's **Settings** page builds a form for `fh_report.yaml` (switches, numbers and text fields for every option, per `DEFAULT`, node or server block). The same schema is used by DCSServerBot to check the file when it loads. Notes:

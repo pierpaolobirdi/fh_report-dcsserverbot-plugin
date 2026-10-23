@@ -86,6 +86,7 @@ class OptionSpec:
     default: Any = None
     required: bool = False
     default_only: bool = False
+    server_only: bool = False
     example: str | None = None
     min: int | None = None
     max: int | None = None
@@ -131,6 +132,7 @@ class Model:
             name=name, section=section, kind=kind, desc=entry["desc"], since=entry["since"],
             help=plain_help(entry["help"], name), default=entry.get("default"),
             required=bool(entry.get("required")), default_only=bool(entry.get("default_only")),
+            server_only=bool(entry.get("server_only")),
             example=entry.get("example"), min=rng.get("min"), max=rng.get("max"),
             pattern=rule.get("pattern"), nullable=rule.get("nullable", True) is not False, func=func,
             schema_type=rule.get("type", "str"),

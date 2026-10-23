@@ -157,6 +157,7 @@ echo.
 echo Next steps:
 echo   1. Make sure 'fh_report' is listed under opt_plugins in config\main.yaml
 echo   2. Edit config\plugins\fh_report.yaml to configure your servers and channels
+echo      ^(or open tools\fh_report_config.cmd: every option explained, checked before it is saved^)
 echo   3. Restart DCSServerBot
 echo.
 pause

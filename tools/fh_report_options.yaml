@@ -11,12 +11,12 @@ sections:
     intro: Which Discord channel gets the report and how the server is named. Set per server.
     options: [channel_id, campaign_name, saves_dir, commands_channel_id, admin, enable_updates]
   - id: layout
-    title: Report layout
+    title: Layout
     intro: Which tables the report shows, in what order, and how long they may be.
     options: [report_layout, points_detail_D, points_detail_S, points_detail_R, max_pilots, max_pilots_R,
               max_pilots_S, max_pilots_D, show_all_pilots, strip_callsign]
   - id: refresh
-    title: Refresh and daily reset
+    title: Refresh and reset
     intro: How often the report is refreshed and when the daily points start again.
     options: [update_interval, daily_reset_hour, daily_reset_schedule]
   - id: map
@@ -35,11 +35,11 @@ sections:
     options: [podium_days, podium_top, podium_combined_days, podium_combined_top,
               podium_combined_min3_latest_day]
   - id: pilots
-    title: Pilots and sanctions
+    title: Pilots
     intro: Who is listed and what is shown next to them.
     options: [excluded_ucids, show_unranked_pilots, show_punishment, show_bob]
   - id: footer
-    title: Footer and notices
+    title: Footer
     intro: The footer of every embed.
     options: [show_player_cmd_hint, player_cmd_hint_text, show_new_release]
 
@@ -47,6 +47,7 @@ options:
   channel_id:
     since: "4.0.0"
     required: true
+    server_only: true
     desc: Discord channel ID where the report is posted (one channel; a one-item list also works)
     help: |-
       #   channel_id     - Discord channel ID where the embed will be posted. A
@@ -56,16 +57,19 @@ options:
   campaign_name:
     since: "4.0.0"
     required: true
+    server_only: true
     desc: Name shown in the title and footer of the report
     help: |-
       #   campaign_name  - Name displayed in the embed title and footer
   saves_dir:
     since: "4.0.0"
+    server_only: true
     desc: Foothold saves folder; leave empty to find it automatically from the instance
     help: |-
       #   saves_dir           - Override Foothold saves path (default: auto-resolved from instance home)
   commands_channel_id:
     since: "12.1.0"
+    server_only: true
     desc: Extra channel(s), besides channel_id, where /fh_report player and podium may be used
     help: |-
       #   commands_channel_id - Extra channel(s) (besides channel_id itself) where
