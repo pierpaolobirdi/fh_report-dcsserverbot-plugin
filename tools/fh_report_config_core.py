@@ -30,6 +30,7 @@ CATALOG_FILE = os.path.join(BUNDLE or TOOLS_DIR, "fh_report_options.yaml")
 SHIPPED_ROOT = BUNDLE or os.path.dirname(TOOLS_DIR)
 CONFIG_PARTS = ("config", "plugins", "fh_report.yaml")
 SCHEMA_PARTS = ("plugins", "fh_report", "schemas", "fh_report_schema.yaml")
+VERSION_PARTS = ("plugins", "fh_report", "version.py")
 RESERVED = {"DEFAULT", "commands", "chat_commands"}
 BACKUPS_KEPT = 10
 
@@ -38,6 +39,15 @@ UNSET = object()          # "take this option out of the block"
 
 class ConfigError(Exception):
     """Something the person using the editor has to read as it is."""
+
+
+def release() -> str:
+    """The Fh_Report release this editor comes with (read from version.py, packed inside the .exe)."""
+    try:
+        with open(os.path.join(SHIPPED_ROOT, *VERSION_PARTS), encoding="utf-8") as f:
+            return re.search(r'^PLUGIN_RELEASE\s*=\s*"([^"]+)"', f.read(), re.M).group(1)
+    except (OSError, AttributeError):
+        return "unknown"
 
 
 # ── Where things are ─────────────────────────────────────────────────────────────────────────

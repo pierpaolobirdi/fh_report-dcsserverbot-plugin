@@ -116,6 +116,11 @@ def test_the_window_is_dressed_in_the_dark_theme_and_shows_booleans_in_yaml_styl
     assert window.row("enable_updates").now.cget("text").startswith("Now: true")      # not Python's True
 
 
-def test_the_check_option_loads_the_option_list_without_a_window():
+def test_the_check_option_loads_the_option_list_without_a_window_and_reports_the_release(tmp_path):
     mod = _load_window()
     assert mod.check() == 0
+    report = tmp_path / "report.txt"
+    assert mod.check(str(report)) == 0
+    first = report.read_text(encoding="utf-8").splitlines()[0]
+    assert first == f"OK Ver. {sys.modules['fh_report_config_core'].release()}"
+    assert first.endswith(open(os.path.join(ROOT, "plugins", "fh_report", "version.py")).read().split('PLUGIN_RELEASE = "')[1].split('"')[0])

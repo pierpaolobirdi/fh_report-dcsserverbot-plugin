@@ -6,3 +6,5 @@ plugins/fh_report/.latest_release.json
 tools/dist/
 tools/build/
 tools/__pycache__/
+build/
+dist/

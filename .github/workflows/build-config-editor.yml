@@ -1,76 +1,147 @@
-# Builds the configuration editor (tools/fh_report_config.pyw) into Fh_Report_Config.exe and attaches it to the
-# GitHub release. It runs when a release is published, or by hand from the Actions tab (Run workflow) for an
-# existing tag. The .exe is never committed to the repository.
+# Builds Fh_Report_Config.exe (the configuration editor, tools/fh_report_config.pyw) on GitHub (Windows)
+# and keeps it downloadable. Same method as Nova_Update.
+#
+# Every push to `dev` that touches the editor, its option list or this workflow (and every manual run):
+#   1. runs the tests (Linux, with a virtual display for the window tests),
+#   2. builds the exe on a Windows runner with PyInstaller,
+#   3. RUNS it with --check (a build that compiles but dies on launch must not get published)
+#      and checks its embedded version,
+#   4. saves it as a workflow artifact (30 days), and
+#   5. publishes it to the `builds` branch of this repository, which always holds just the
+#      latest exe (one commit, overwritten each time).
+# It never creates a Release or a tag: those are made by hand.
 name: Build configuration editor
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [dev]
+    paths:
+      - 'tools/**'
+      - 'plugins/fh_report/schemas/**'
+      - '.github/workflows/build-config-editor.yml'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to attach the .exe to (leave empty to only build it and keep it as an artifact)"
-        required: false
-        default: ""
+
+concurrency:
+  group: build-config-editor-${{ github.ref }}
+  cancel-in-progress: false      # never cancel a run that is publishing the exe
 
 permissions:
-  contents: write          # to attach the files to the release
+  contents: read
 
 jobs:
-  exe:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # System Python + Tk + a virtual display: the window tests need a real Tk.
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk python3-pytest python3-yaml python3-ruamel.yaml
+      - run: xvfb-run -a python3 -m pytest -q
+
+  build:
+    needs: test
     runs-on: windows-latest
-    env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    permissions:
+      contents: write            # needed to push the exe to the `builds` branch
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG || github.ref }}
-
+          fetch-depth: 50        # the notes list the latest commits that touched the editor
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install --upgrade pip pyinstaller ruamel.yaml pywin32
 
-      - name: Install what the build needs
-        run: python -m pip install --upgrade pip pyinstaller ruamel.yaml pytest
+      - name: Version and change notes
+        id: info
+        run: python tools/ci/release_info.py
 
-      - name: Tests of the editor
-        run: python -m pytest tests/test_config_editor_core.py tests/test_options_catalog.py -q
-
-      - name: Build Fh_Report_Config.exe
+      - name: Build exe
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name Fh_Report_Config `
+            --version-file "$PWD\build\version_info.txt" `
             --paths "$PWD\tools" `
             --add-data "$PWD\tools\fh_report_options.yaml;." `
+            --add-data "$PWD\plugins\fh_report\version.py;plugins\fh_report" `
             --add-data "$PWD\plugins\fh_report\schemas\fh_report_schema.yaml;plugins\fh_report\schemas" `
-            --distpath "$PWD\dist" --workpath "$PWD\build" --specpath "$PWD\build" `
+            --distpath "$PWD\dist" --workpath "$PWD\build\work" --specpath "$PWD\build" `
             "$PWD\tools\fh_report_config.pyw"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Check that the packed program starts and reads its option list
+      # The exe is windowed (no console), so it reports through a file. If PyInstaller shows an error
+      # dialog at startup the process just waits for a click, hence the timeout.
+      - name: Self-test the exe (it must really start)
         shell: pwsh
+        env:
+          EXPECTED: OK Ver. ${{ steps.info.outputs.version }}
         run: |
-          $p = Start-Process -FilePath "$PWD\dist\Fh_Report_Config.exe" -ArgumentList "--check" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "The packed program failed its self-check (exit code $($p.ExitCode))" }
+          $exe     = Join-Path $PWD 'dist\Fh_Report_Config.exe'
+          $report  = Join-Path $PWD 'selftest.txt'
+          $timeout = 90
+          Remove-Item $report -ErrorAction SilentlyContinue
 
-      - name: Checksum
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash "$PWD\dist\Fh_Report_Config.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  Fh_Report_Config.exe" | Out-File -Encoding ascii "$PWD\dist\Fh_Report_Config.exe.sha256"
-          Get-Content "$PWD\dist\Fh_Report_Config.exe.sha256"
+          $p = Start-Process -FilePath $exe -ArgumentList @('--check', "`"$report`"") -PassThru
+          $null = $p.Handle                          # keep the handle so ExitCode stays readable
+          $finished = $p.WaitForExit($timeout * 1000)
+          if (-not $finished) {
+            taskkill /F /T /PID $p.Id | Out-Null     # kill the exe and its children (onefile = 2 processes)
+          }
 
-      - name: Keep the files of this run
+          $text = '<no report file was written>'
+          if (Test-Path $report) { $text = ((Get-Content $report -Raw) + '').Trim() }
+          $first = ($text -split "`r?`n")[0]           # the 2nd line says which Python and Tk the exe uses
+
+          if (-not $finished) {
+            Write-Host "::error::The exe did not finish within $timeout s (hung, probably on a startup error dialog)."
+            Write-Host "--- selftest.txt ---"; Write-Host $text
+            exit 1
+          }
+          if ($p.ExitCode -ne 0 -or $first -ne $env:EXPECTED) {
+            Write-Host "::error::Self-test failed (exit code $($p.ExitCode), expected '$($env:EXPECTED)')."
+            Write-Host "--- selftest.txt ---"; Write-Host $text
+            exit 1
+          }
+          Write-Host "Self-test passed:"; Write-Host $text
+
+      - name: Keep the selftest output when it fails
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Fh_Report_Config
+          name: selftest-output
+          path: selftest.txt
+          if-no-files-found: ignore
+
+      - name: Check the exe's embedded version
+        run: python tools/ci/check_exe_version.py dist/Fh_Report_Config.exe
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          sha256sum Fh_Report_Config.exe > Fh_Report_Config.exe.sha256
+          cat Fh_Report_Config.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fh_Report_Config-Ver.${{ steps.info.outputs.version }}
           path: |
             dist/Fh_Report_Config.exe
             dist/Fh_Report_Config.exe.sha256
+          retention-days: 30
 
-      - name: Attach them to the release
-        if: ${{ env.TAG != '' }}
-        shell: pwsh
+      - name: Publish exe to the builds branch
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$env:TAG" dist/Fh_Report_Config.exe dist/Fh_Report_Config.exe.sha256 --clobber
+          VERSION: ${{ steps.info.outputs.version }}
+        run: |
+          bash tools/ci/publish_exe.sh \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "$VERSION" "$GITHUB_SHA" build/release_notes.md dist
+          {
+            echo "### Ver. $VERSION"
+            echo "Download: https://github.com/${GITHUB_REPOSITORY}/blob/builds/Fh_Report_Config.exe"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -6,7 +6,7 @@ is saved and a copy of the old one is kept. All the work is in fh_report_config_
 
 Run it with the Python of DCSServerBot (fh_report_config.cmd does):
     pythonw fh_report_config.pyw [path to DCSServerBot, or to fh_report.yaml]
-    fh_report_config.pyw --check     (no window: exit code 0 when its option list loads)
+    fh_report_config.pyw --check [report file]   (no window: exit code 0 when its option list loads)
 """
 import json
 import os
@@ -213,6 +213,7 @@ class App:
         heading.pack(fill="x")
         ttk.Label(heading, text="Fh_Report", style="Title.TLabel").pack(side="left")
         ttk.Label(heading, text="  configuration", style="Muted.TLabel").pack(side="left", pady=(7, 0))
+        ttk.Label(heading, text=f"editor Ver. {core.release()}", style="Muted.TLabel").pack(side="right", pady=(7, 0))
         self.where = ttk.Label(top, style="Muted.TLabel")
         self.where.pack(anchor="w", pady=(2, 0))
         pick = ttk.Frame(top)
@@ -420,18 +421,26 @@ class App:
         self.root.destroy()
 
 
-def check() -> int:
-    """--check: load the option catalog and the schema without opening a window (the build runs it on the packed program)."""
+def check(report: str | None = None) -> int:
+    """--check [report file]: load the option catalog and the schema without opening a window. The first line
+    of the report is `OK Ver. x.y.z` (the build runs this on the packed program) or `FAILED ...`."""
     try:
         model = core.Model()
-    except Exception:
-        return 1
-    return 0 if model.options and model.sections else 1
+        ok = bool(model.options and model.sections)
+        text = (f"OK Ver. {core.release()}" if ok else "FAILED: no options") + \
+            f"\nPython {sys.version.split()[0]}, Tk {tk.TkVersion}"
+    except Exception as e:  # noqa: BLE001 - whatever it is, the build must see it
+        ok, text = False, f"FAILED: {e!r}"
+    if report:
+        with open(report, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+    return 0 if ok else 1
 
 
 def main() -> None:
     if "--check" in sys.argv:
-        sys.exit(check())
+        i = sys.argv.index("--check")
+        sys.exit(check(sys.argv[i + 1] if len(sys.argv) > i + 1 else None))
     root = tk.Tk()
     App(root, sys.argv[1] if len(sys.argv) > 1 else None)
     root.mainloop()
