@@ -433,3 +433,44 @@ def test_the_podium_shows_an_unranked_pilot_without_a_rank():
     history = {"2026-09-01": [{"top": [{"name": "Bob", "points": 438, "ucid": "ub"}]}]}
     text = commands._build_podium_table(history, players, days=0, top=1)
     assert "Bob" in text and "438 pts" in text and "**" not in text
+
+
+# ── the punishment badge ──────────────────────────────────────────────────────────────────────
+
+def test_a_custom_icon_replaces_the_hammers_instead_of_being_repeated():
+    assert commands.get_punishment_badge(30) .endswith("🔨🔨🔨")                              # level 3 = three hammers
+    assert commands.get_punishment_badge(30, "", "🍹🍹").endswith("(30 p.p.) 🍹🍹")        # exactly what was written
+    assert commands.get_punishment_badge(0) is None
+    plain = commands.get_punishment_badge(0, "", "🔨🔨🔨", "Late", "🥁", show_points=False)
+    assert plain == "·　🥁 Late 🔨🔨🔨" and "p.p." not in plain
+    assert commands.get_punishment_badge(0, show_points=False) == "·　🧿 JAG's watch 🔨"      # the lowest level
+
+
+def test_the_badge_of_a_pilot_follows_its_points_and_its_own_look():
+    f = commands.punishment_for
+    assert f({}, 0) == (None, 0.0) and f({"punishment_icon": ""}, 0) == (None, 0.0)
+    assert f({}, 2)[0] == "·　🧿 JAG's watch (2 p.p.) 🔨"
+    own = {"punishment_pre_icon": "🥁", "punishment_label": "Rowdy", "punishment_icon": "🔨🔨🔨"}
+    assert f(own, 0) == ("·　🥁 Rowdy 🔨🔨🔨", 0.0)                                           # a look of its own is enough
+    assert f(own, 30)[0] == "·　🥁 Rowdy (30 p.p.) 🔨🔨🔨"                                   # with real points, they show
+    assert f({**own, "hook_punishment": 0}, 30) == (None, 0.0)                              # 0 = forced to none
+    assert f({**own, "hook_punishment": 12}, 0)[0] == "·　🥁 Rowdy (12 p.p.) 🔨🔨🔨"         # a points value of its own
+    for yes in (True, "x", "yes"):
+        assert f({**own, "hook_punishment": yes}, 0) == ("·　🥁 Rowdy 🔨🔨🔨", 0.0)            # no number: shown without points
+    for no in (False, "no", "off"):
+        assert f({**own, "hook_punishment": no}, 30) == (None, 0.0)
+    assert f({**own, "hook_punishment": ""}, 5)[0].endswith("(5 p.p.) 🔨🔨🔨")                # empty = real points
+
+
+def test_the_table_shows_the_badge_of_a_pilot_with_a_look_of_its_own_and_no_points():
+    own = {"punishment_pre_icon": "🥁", "punishment_label": "Rowdy", "punishment_icon": "🔨🔨🔨"}
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 20, **own), _pilot("Cy", 10)])
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "S", {}, players, {}, False, {}, None)
+    text = embed.fields[0].value
+    assert text.count("🥁 Rowdy 🔨🔨🔨") == 1 and "p.p." not in text
+    assert text.index("Bob") < text.index("🥁") < text.index("Cy")                           # under Bob, not under others
+    zero = dict([_pilot("Ann", 50), _pilot("Dee", 0, **own)])                                # with nothing scored it is listed too
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "S", {}, zero, {}, False, {}, None)
+    assert "Dee" in embed.fields[0].value and "🥁 Rowdy" in embed.fields[0].value

@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.10"
+FH_REPORT_RELEASE = "14.6.11"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1204,18 +1204,59 @@ PUNISHMENT_THRESHOLDS = [
 ]
 
 def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
-                         custom_label: str = "", pre_icon: str = "") -> str | None:
-    """Returns indented badge line for a given punishment points total, or None."""
-    for min_pts, icon, label, hammers in PUNISHMENT_THRESHOLDS:
-        if points >= min_pts:
-            prefix     = f"`{name}` " if name else ""
-            used_pre   = pre_icon if pre_icon else icon
-            hammer     = custom_icon if custom_icon else "🔨"
-            gravity    = hammer * hammers
-            used_label = custom_label if custom_label else label
-            pts_str = f"({int(points)} p.p.) "
-            return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
-    return None
+                         custom_label: str = "", pre_icon: str = "", show_points: bool = True) -> str | None:
+    """Returns indented badge line for a given punishment points total, or None.
+    A custom icon is shown exactly as written (it replaces the severity hammers, it is not repeated).
+    show_points=False leaves the "(n p.p.)" out and, below the first level, still gives the badge (of the
+    lowest level) instead of None."""
+    level = next((t for t in PUNISHMENT_THRESHOLDS if points >= t[0]), None)
+    if level is None:
+        if show_points:
+            return None
+        level = PUNISHMENT_THRESHOLDS[-1]
+    _min_pts, icon, label, hammers = level
+    prefix     = f"`{name}` " if name else ""
+    used_pre   = pre_icon if pre_icon else icon
+    gravity    = custom_icon if custom_icon else "🔨" * hammers
+    used_label = custom_label if custom_label else label
+    pts_str = f"({int(points)} p.p.) " if show_points else ""
+    return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
+
+
+def _is_number(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def punishment_for(data: dict, real_points: float = 0) -> tuple[str | None, float]:
+    """(badge line, points) of one pilot. `real_points` are the ones the Punishment plugin holds.
+    A pilot's data may carry a look of its own (punishment_icon, punishment_label, punishment_pre_icon): it
+    changes the badge, and with any of them present the badge appears even with no points, without the
+    "(n p.p.)". A points value of its own replaces the real ones (0 = no badge); a yes or any text instead
+    of a number shows the badge without points."""
+    icon = data.get("punishment_icon") or ""
+    label = data.get("punishment_label") or ""
+    pre = data.get("punishment_pre_icon") or ""
+    forced = data.get("hook_punishment")
+    if forced is None or (isinstance(forced, str) and not forced.strip()):
+        points = float(real_points or 0)
+    elif not _is_number(forced):
+        shown = bool(forced) and str(forced).strip().lower() not in ("false", "no", "off")
+        return (get_punishment_badge(0, "", icon, label, pre, show_points=False) if shown else None), 0.0
+    else:
+        points = float(forced)
+        if points == 0:
+            return None, 0.0
+    if points >= 1:
+        return get_punishment_badge(points, "", icon, label, pre), points
+    if icon or label or pre:
+        return get_punishment_badge(0, "", icon, label, pre, show_points=False), 0.0
+    return None, 0.0
 
 
 def _num(v) -> float:
@@ -2109,10 +2150,8 @@ def _render_layout_tables(
 
     pp = punishment_points or {}
 
-    def _pp_points(data: dict) -> float:
+    def _real_points(data: dict) -> float:
         ucid = data.get("ucid")
-        if "hook_punishment" in data:
-            return data["hook_punishment"]
         return pp.get(ucid, 0) if (pp and ucid) else 0
 
     for letter in layout:
@@ -2153,9 +2192,9 @@ def _render_layout_tables(
                 if n in listed:
                     continue
                 bob = (d.get("bnb") or {}).get("session", 0) if show_session_card else 0
-                pun = _pp_points(d) if (show_punishment and role == badge_role and not badge_role_done) else 0
-                if bob > 0 or get_punishment_badge(pun, "", d.get("punishment_icon", ""),
-                                                   d.get("punishment_label", ""), d.get("punishment_pre_icon", "")):
+                badge, pun = (punishment_for(d, _real_points(d))
+                              if (show_punishment and role == badge_role and not badge_role_done) else (None, 0))
+                if bob > 0 or badge:
                     extras.append((n, d, pun, bob))
             extras.sort(key=lambda x: (-x[2], -x[3]))
             items += [(n, d) for n, d, _, _ in extras]
@@ -2219,11 +2258,7 @@ def _render_layout_tables(
                     block.append(d_card)
 
             if show_punishment and role == badge_role and not badge_role_done:
-                pts = _pp_points(data)
-                badge = get_punishment_badge(
-                    pts, "", data.get("punishment_icon", ""),
-                    data.get("punishment_label", ""), data.get("punishment_pre_icon", "")
-                )
+                badge, _pts = punishment_for(data, _real_points(data))
                 if badge:
                     block.append(badge)
 
