@@ -23,6 +23,15 @@ STATE_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), 
 NOT_SET = "(not set)"
 
 
+def set_icon(root: tk.Tk) -> None:
+    """The window and taskbar icon (Windows reads the .ico; elsewhere the call is simply refused)."""
+    ico = os.path.join(core.BUNDLE or os.path.dirname(os.path.abspath(__file__)), "fh_report_config.ico")
+    try:
+        root.iconbitmap(default=ico)
+    except tk.TclError:
+        pass
+
+
 def _remembered() -> str | None:
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -205,6 +214,7 @@ class App:
         root.geometry("960x760")
         root.minsize(760, 560)
         theme.apply(root)
+        set_icon(root)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         self._menu()
         top = ttk.Frame(root, padding=(16, 12, 16, 8))

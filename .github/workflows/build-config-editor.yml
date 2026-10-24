@@ -62,9 +62,11 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name Fh_Report_Config `
+            --icon "$PWD\tools\fh_report_config.ico" `
             --version-file "$PWD\build\version_info.txt" `
             --paths "$PWD\tools" `
             --add-data "$PWD\tools\fh_report_options.yaml;." `
+            --add-data "$PWD\tools\fh_report_config.ico;." `
             --add-data "$PWD\plugins\fh_report\version.py;plugins\fh_report" `
             --add-data "$PWD\plugins\fh_report\schemas\fh_report_schema.yaml;plugins\fh_report\schemas" `
             --distpath "$PWD\dist" --workpath "$PWD\build\work" --specpath "$PWD\build" `

@@ -16,9 +16,11 @@ if exist "%USERPROFILE%\.dcssb\Scripts\python.exe" set "PY=%USERPROFILE%\.dcssb\
 pushd "%ROOT%"
 "%PY%" tools\ci\release_info.py || (echo release_info failed & popd & pause & exit /b 1)
 "%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name Fh_Report_Config ^
+    --icon "%HERE%fh_report_config.ico" ^
     --version-file "%ROOT%\build\version_info.txt" ^
     --paths "%HERE%." ^
     --add-data "%HERE%fh_report_options.yaml;." ^
+    --add-data "%HERE%fh_report_config.ico;." ^
     --add-data "%ROOT%\plugins\fh_report\version.py;plugins\fh_report" ^
     --add-data "%ROOT%\plugins\fh_report\schemas\fh_report_schema.yaml;plugins\fh_report\schemas" ^
     --distpath "%HERE%dist" --workpath "%ROOT%\build\work" --specpath "%ROOT%\build" ^

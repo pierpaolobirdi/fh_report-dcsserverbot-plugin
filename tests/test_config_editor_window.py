@@ -124,3 +124,11 @@ def test_the_check_option_loads_the_option_list_without_a_window_and_reports_the
     first = report.read_text(encoding="utf-8").splitlines()[0]
     assert first == f"OK Ver. {sys.modules['fh_report_config_core'].release()}"
     assert first.endswith(open(os.path.join(ROOT, "plugins", "fh_report", "version.py")).read().split('PLUGIN_RELEASE = "')[1].split('"')[0])
+
+
+def test_the_icon_is_a_real_multi_size_ico_and_a_computer_that_cannot_use_it_is_not_bothered(window):
+    ico = os.path.join(ROOT, "tools", "fh_report_config.ico")
+    data = open(ico, "rb").read()
+    assert data[:4] == b"\x00\x00\x01\x00" and int.from_bytes(data[4:6], "little") >= 5      # ICO header, several sizes
+    assert os.path.getsize(ico) < 200_000
+    sys.modules["fh_report_config_window"].set_icon(window.root)                              # no exception (Linux refuses it)
