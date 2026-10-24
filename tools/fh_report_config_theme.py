@@ -83,10 +83,12 @@ def apply(root) -> ttk.Style:
     style.configure("TScrollbar", background=PANEL_2, troughcolor=BG, bordercolor=BG, arrowcolor=MUTED)
     style.map("TScrollbar", background=[("active", BORDER)])
 
-    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
-    style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 8), borderwidth=0)
+    # small tabs; the selected one grows (taller, wider, bold) instead of shrinking
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 8, 0, 0))
+    style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(11, 4), borderwidth=0, font=FONT)
     style.map("TNotebook.Tab", background=[("selected", PANEL_2), ("active", PANEL_2)],
-              foreground=[("selected", ACCENT), ("active", TEXT)])
+              foreground=[("selected", ACCENT), ("active", TEXT)],
+              padding=[("selected", (18, 8))], font=[("selected", FONT_BOLD)])
     return style
 
 

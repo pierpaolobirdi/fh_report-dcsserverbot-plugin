@@ -6,6 +6,7 @@ is saved and a copy of the old one is kept. All the work is in fh_report_config_
 
 Run it with the Python of DCSServerBot (fh_report_config.cmd does):
     pythonw fh_report_config.pyw [path to DCSServerBot, or to fh_report.yaml]
+    fh_report_config.pyw --check     (no window: exit code 0 when its option list loads)
 """
 import json
 import os
@@ -419,7 +420,18 @@ class App:
         self.root.destroy()
 
 
+def check() -> int:
+    """--check: load the option catalog and the schema without opening a window (the build runs it on the packed program)."""
+    try:
+        model = core.Model()
+    except Exception:
+        return 1
+    return 0 if model.options and model.sections else 1
+
+
 def main() -> None:
+    if "--check" in sys.argv:
+        sys.exit(check())
     root = tk.Tk()
     App(root, sys.argv[1] if len(sys.argv) > 1 else None)
     root.mainloop()

@@ -114,3 +114,8 @@ def test_the_window_is_dressed_in_the_dark_theme_and_shows_booleans_in_yaml_styl
     assert window.root.cget("background") == theme.BG
     assert window.problems.cget("background") == theme.FIELD
     assert window.row("enable_updates").now.cget("text").startswith("Now: true")      # not Python's True
+
+
+def test_the_check_option_loads_the_option_list_without_a_window():
+    mod = _load_window()
+    assert mod.check() == 0
