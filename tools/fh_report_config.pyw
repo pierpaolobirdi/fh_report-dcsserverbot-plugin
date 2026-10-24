@@ -15,11 +15,11 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fh_report_config_core as core  # noqa: E402
+import fh_report_config_theme as theme  # noqa: E402
 
 TITLE = "Fh_Report configuration"
 STATE_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Fh_Report", "config_editor.json")
 NOT_SET = "(not set)"
-BAD, MUTED = "#b00020", "#666666"
 
 
 def _remembered() -> str | None:
@@ -49,22 +49,22 @@ class Row:
         self.frame.columnconfigure(1, weight=1)
         title = ttk.Frame(self.frame)
         title.grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(title, text=spec.name, font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(title, text=spec.name, style="Name.TLabel").pack(side="left")
         if spec.required:
-            ttk.Label(title, text="  required", foreground=BAD).pack(side="left")
-        ttk.Label(title, text=f"  since {spec.since}", foreground=MUTED).pack(side="left")
-        ttk.Label(self.frame, text=spec.desc, foreground=MUTED, wraplength=720, justify="left").grid(
+            ttk.Label(title, text="  required", style="Bad.TLabel").pack(side="left")
+        ttk.Label(title, text=f"  since {spec.since}", style="Muted.TLabel").pack(side="left")
+        ttk.Label(self.frame, text=spec.desc, style="Muted.TLabel", wraplength=720, justify="left").grid(
             row=1, column=0, columnspan=3, sticky="w")
         self.var = tk.StringVar()
         self.field = self._make_field()
         self.field.grid(row=2, column=0, columnspan=2, sticky="we", pady=(3, 0))
-        self.help_button = ttk.Button(self.frame, text="?", width=3, command=self._toggle_help)
+        self.help_button = ttk.Button(self.frame, text="?", width=3, style="Help.TButton", command=self._toggle_help)
         self.help_button.grid(row=2, column=2, padx=(6, 0), pady=(3, 0))
-        self.now = ttk.Label(self.frame, foreground=MUTED)
+        self.now = ttk.Label(self.frame, style="Accent.TLabel")
         self.now.grid(row=3, column=0, columnspan=3, sticky="w")
-        self.error = ttk.Label(self.frame, foreground=BAD, wraplength=720, justify="left")
+        self.error = ttk.Label(self.frame, style="Bad.TLabel", wraplength=720, justify="left")
         self.error.grid(row=4, column=0, columnspan=3, sticky="w")
-        self.help = ttk.Label(self.frame, text=spec.help, wraplength=720, justify="left", background="#f3f3f3")
+        self.help = ttk.Label(self.frame, text=spec.help, wraplength=700, justify="left", style="Help.TLabel")
         self._help_shown = False
         ttk.Separator(self.frame).grid(row=6, column=0, columnspan=3, sticky="we", pady=(6, 0))
         self.load()
@@ -79,7 +79,7 @@ class Row:
             self.var.trace_add("write", lambda *_a: self.changed())
             return box
         if spec.kind == "list":
-            self.text = tk.Text(self.frame, height=4, width=60, wrap="none")
+            self.text = tk.Text(self.frame, height=4, width=60, wrap="none", **theme.text_options())
             self.text.bind("<KeyRelease>", lambda _e: self.changed())
             return self.text
         if spec.kind == "weekdays":
@@ -137,6 +137,8 @@ class Row:
     def refresh_now(self) -> None:
         value, origin = self.app.config.get(self.app.target, self.spec.name)
         shown = core.value_to_input(self.spec, value)
+        if isinstance(shown, bool):
+            shown = "true" if shown else "false"
         if isinstance(shown, dict):
             shown = ", ".join(f"{d} {t}" for d, t in shown.items())
         shown = str(shown).replace("\n", ", ") or "nothing"
@@ -168,7 +170,7 @@ class Page(ttk.Frame):
 
     def __init__(self, parent, app: "App", section: dict):
         super().__init__(parent)
-        canvas = tk.Canvas(self, highlightthickness=0)
+        canvas = tk.Canvas(self, **theme.canvas_options())
         bar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas, padding=(12, 8))
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -178,7 +180,7 @@ class Page(ttk.Frame):
         bar.pack(side="right", fill="y")
         canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", lambda ev: canvas.yview_scroll(-int(ev.delta / 120), "units")))
         canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
-        ttk.Label(inner, text=section["intro"], wraplength=720, justify="left", font=("Segoe UI", 10, "italic")).pack(
+        ttk.Label(inner, text=section["intro"], wraplength=720, justify="left", style="Note.TLabel").pack(
             anchor="w", pady=(0, 4))
         self.rows: dict[str, Row] = {}
         for spec in app.model.in_section(section["id"]):
@@ -199,32 +201,38 @@ class App:
         self.dirty = False
         self.pages: dict[str, Page] = {}
         root.title(TITLE)
-        root.geometry("900x720")
+        root.geometry("960x760")
+        root.minsize(760, 560)
+        theme.apply(root)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         self._menu()
-        top = ttk.Frame(root, padding=(10, 8))
+        top = ttk.Frame(root, padding=(16, 12, 16, 8))
         top.pack(fill="x")
-        self.where = ttk.Label(top, foreground=MUTED)
-        self.where.pack(anchor="w")
+        heading = ttk.Frame(top)
+        heading.pack(fill="x")
+        ttk.Label(heading, text="Fh_Report", style="Title.TLabel").pack(side="left")
+        ttk.Label(heading, text="  configuration", style="Muted.TLabel").pack(side="left", pady=(7, 0))
+        self.where = ttk.Label(top, style="Muted.TLabel")
+        self.where.pack(anchor="w", pady=(2, 0))
         pick = ttk.Frame(top)
-        pick.pack(fill="x", pady=(6, 0))
+        pick.pack(fill="x", pady=(10, 0))
         ttk.Label(pick, text="Editing:").pack(side="left")
         self.target_var = tk.StringVar()
         self.target_box = ttk.Combobox(pick, textvariable=self.target_var, state="readonly", width=44)
         self.target_box.pack(side="left", padx=6)
         self.target_box.bind("<<ComboboxSelected>>", lambda _e: self._pick_target())
         ttk.Button(pick, text="Add server...", command=self.add_server).pack(side="left")
-        ttk.Button(pick, text="Save", command=self.save).pack(side="right")
+        ttk.Button(pick, text="Save", style="Accent.TButton", command=self.save).pack(side="right")
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill="both", expand=True, padx=10)
-        bottom = ttk.Frame(root, padding=(10, 6))
+        self.notebook.pack(fill="both", expand=True, padx=16)
+        bottom = ttk.Frame(root, padding=(16, 8))
         bottom.pack(fill="x")
-        ttk.Label(bottom, text="Problems").pack(anchor="w")
-        self.problems = tk.Listbox(bottom, height=5, activestyle="none")
+        ttk.Label(bottom, text="Problems", style="Muted.TLabel").pack(anchor="w", pady=(0, 3))
+        self.problems = tk.Listbox(bottom, height=5, activestyle="none", **theme.listbox_options())
         self.problems.pack(fill="x")
         self.problems.bind("<Double-Button-1>", lambda _e: self._jump())
         self._problem_list: list[core.Problem] = []
-        self.status = ttk.Label(root, anchor="w", padding=(10, 2))
+        self.status = ttk.Label(root, anchor="w", padding=(16, 4, 16, 8), style="Muted.TLabel")
         self.status.pack(fill="x")
         root.bind("<Control-s>", lambda _e: self.save())
         if self.open(start or _remembered()) == "nofile":

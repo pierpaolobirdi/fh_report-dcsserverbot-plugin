@@ -107,3 +107,10 @@ def test_a_broken_file_is_explained_and_does_not_open(window, tmp_path):
     assert window.open(str(tmp_path / "bad")) == "broken"
     assert window.shown[-1][0] == "showerror" and "line 3" in window.shown[-1][1][1]
     assert window.open(str(tmp_path)) == "nofile"
+
+
+def test_the_window_is_dressed_in_the_dark_theme_and_shows_booleans_in_yaml_style(window):
+    theme = sys.modules["fh_report_config_theme"]
+    assert window.root.cget("background") == theme.BG
+    assert window.problems.cget("background") == theme.FIELD
+    assert window.row("enable_updates").now.cget("text").startswith("Now: true")      # not Python's True

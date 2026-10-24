@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import sys
 import tempfile
 import textwrap
 from dataclasses import dataclass, field
@@ -22,7 +23,11 @@ from ruamel.yaml.constructor import DuplicateKeyError
 from ruamel.yaml.error import MarkedYAMLError
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-CATALOG_FILE = os.path.join(TOOLS_DIR, "fh_report_options.yaml")
+# Packed with PyInstaller (the .exe) the catalog and the schema travel inside it, unpacked under sys._MEIPASS;
+# otherwise they are the repository's: the catalog next to this file, the schema in plugins/.
+BUNDLE = getattr(sys, "_MEIPASS", None)
+CATALOG_FILE = os.path.join(BUNDLE or TOOLS_DIR, "fh_report_options.yaml")
+SHIPPED_ROOT = BUNDLE or os.path.dirname(TOOLS_DIR)
 CONFIG_PARTS = ("config", "plugins", "fh_report.yaml")
 SCHEMA_PARTS = ("plugins", "fh_report", "schemas", "fh_report_schema.yaml")
 RESERVED = {"DEFAULT", "commands", "chat_commands"}
@@ -68,7 +73,7 @@ def _schema_in(root: str) -> str | None:
     installed = os.path.join(root, *SCHEMA_PARTS)
     if os.path.isfile(installed):
         return installed
-    shipped = os.path.join(os.path.dirname(TOOLS_DIR), *SCHEMA_PARTS)
+    shipped = os.path.join(SHIPPED_ROOT, *SCHEMA_PARTS)
     return shipped if os.path.isfile(shipped) else None
 
 
@@ -115,7 +120,7 @@ class Model:
 
     def __init__(self, schema_file: str | None = None, catalog_file: str = CATALOG_FILE):
         catalog = _load_plain(catalog_file)
-        schema = _load_plain(schema_file or os.path.join(os.path.dirname(TOOLS_DIR), *SCHEMA_PARTS))
+        schema = _load_plain(schema_file or os.path.join(SHIPPED_ROOT, *SCHEMA_PARTS))
         self.rules: dict = schema["schema;element_schema"]["mapping"]
         self.sections: list[dict] = catalog["sections"]
         section_of = {name: s["id"] for s in self.sections for name in s["options"]}
