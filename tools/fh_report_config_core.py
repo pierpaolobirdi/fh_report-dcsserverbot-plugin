@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.constructor import DuplicateKeyError
@@ -105,15 +104,18 @@ def plain_help(help_text: str, name: str) -> str:
     return (first.rstrip() + ("\n" + rest if rest else "")).strip()
 
 
+def _load_plain(path: str) -> Any:
+    """A YAML file as plain dicts and lists (ruamel.yaml only: DCSServerBot always has it)."""
+    with open(path, encoding="utf-8") as f:
+        return YAML(typ="safe").load(f)
+
+
 class Model:
     """The catalog (sections, texts) together with the schema (types, ranges)."""
 
     def __init__(self, schema_file: str | None = None, catalog_file: str = CATALOG_FILE):
-        with open(catalog_file, encoding="utf-8") as f:
-            catalog = yaml.safe_load(f)
-        schema_file = schema_file or os.path.join(os.path.dirname(TOOLS_DIR), *SCHEMA_PARTS)
-        with open(schema_file, encoding="utf-8") as f:
-            schema = yaml.safe_load(f)
+        catalog = _load_plain(catalog_file)
+        schema = _load_plain(schema_file or os.path.join(os.path.dirname(TOOLS_DIR), *SCHEMA_PARTS))
         self.rules: dict = schema["schema;element_schema"]["mapping"]
         self.sections: list[dict] = catalog["sections"]
         section_of = {name: s["id"] for s in self.sections for name in s["options"]}

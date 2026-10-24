@@ -20,10 +20,14 @@ if "%PY%"=="" (
     exit /b 1
 )
 
-"%PY%" -c "import yaml, ruamel.yaml, tkinter" >nul 2>&1
-if errorlevel 1 (
-    echo This Python lacks PyYAML, ruamel.yaml or tkinter: %PY%
-    echo DCSServerBot's own Python has the first two; tkinter comes with the python.org installer.
+set "MISSING="
+"%PY%" -c "import ruamel.yaml" >nul 2>&1 || set "MISSING=%MISSING% ruamel.yaml"
+"%PY%" -c "import tkinter" >nul 2>&1 || set "MISSING=%MISSING% tkinter"
+if defined MISSING (
+    echo The Python found is missing:%MISSING%
+    echo   Python: %PY%
+    echo ruamel.yaml comes with DCSServerBot ^(%PY% -m pip install ruamel.yaml^).
+    echo tkinter comes with the python.org installer ^(Modify the installation and tick "tcl/tk and IDLE"^).
     pause
     exit /b 1
 )
