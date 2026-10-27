@@ -6,7 +6,8 @@
 #   2. builds the exe on a Windows runner with PyInstaller,
 #   3. RUNS it with --check (a build that compiles but dies on launch must not get published)
 #      and checks its embedded version,
-#   4. saves it as a workflow artifact (30 days), and
+#   4. saves it as a workflow artifact (3 days: a convenience copy, the delivery is the `builds` branch;
+#      the artifact storage quota is shared by all the repositories, so only the newest 10 are kept), and
 #   5. publishes it to the `builds` branch of this repository, which always holds just the
 #      latest exe (one commit, overwritten each time).
 # It never creates a Release or a tag: those are made by hand.
@@ -45,6 +46,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write            # needed to push the exe to the `builds` branch
+      actions: write             # needed to delete old artifacts (last step)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,11 +112,13 @@ jobs:
 
       - name: Keep the selftest output when it fails
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: selftest-output
           path: selftest.txt
           if-no-files-found: ignore
+          retention-days: 3
 
       - name: Check the exe's embedded version
         run: python tools/ci/check_exe_version.py dist/Fh_Report_Config.exe
@@ -126,13 +130,16 @@ jobs:
           sha256sum Fh_Report_Config.exe > Fh_Report_Config.exe.sha256
           cat Fh_Report_Config.exe.sha256
 
+      # Only a convenience copy: the real delivery is the `builds` branch below, so a full artifact
+      # quota must not stop the build before it publishes.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: Fh_Report_Config-Ver.${{ steps.info.outputs.version }}
           path: |
             dist/Fh_Report_Config.exe
             dist/Fh_Report_Config.exe.sha256
-          retention-days: 30
+          retention-days: 3
 
       - name: Publish exe to the builds branch
         shell: bash
@@ -147,3 +154,16 @@ jobs:
             echo "### Ver. $VERSION"
             echo "Download: https://github.com/${GITHUB_REPOSITORY}/blob/builds/Fh_Report_Config.exe"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep only the newest artifacts
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: "10"
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq ".artifacts[${KEEP}:][].id" \
+            | tr -d '\r' | while read -r id; do
+                [ -n "$id" ] && gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" > /dev/null && echo "deleted artifact $id"
+              done
+          echo "done"
