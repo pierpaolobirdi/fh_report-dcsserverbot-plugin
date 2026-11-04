@@ -95,6 +95,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
 | `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
+| `campaign_history_count` / `campaign_history_latest_top` / `campaign_history_top` / `campaign_history_min_points` | `3` / `3` / `1` / `200` | The `H` block of finished campaigns — see [Campaign History](#campaign-history) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `show_bob` | `true` | `false` = hide every Blue on Blue (`BoB`) count, taken from DCSServerBot's Mission Statistics plugin — see [Blue-on-blue](#blue-on-blue-bob) |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
@@ -167,7 +168,7 @@ Only the first 5 upgrade slots are shown. Higher-numbered slots serve other purp
 
 ### Report layout (`report_layout`)
 
-Which leaderboard tables to show, and in what order, is built from four letters — use any subset, in any order:
+Which leaderboard tables to show, and in what order, is built from five letters — use any subset, in any order:
 
 | Letter | Table | Sorted by |
 |---|---|---|
@@ -175,6 +176,7 @@ Which leaderboard tables to show, and in what order, is built from four letters 
 | `P` | Daily Podium — historical closing events, see [Daily Podium](#daily-podium) | — |
 | `S` | Session Leaderboard | Current session points |
 | `R` | Pilot Leaderboard | Career rank |
+| `H` | Campaign History — the finished campaigns, see [Campaign History](#campaign-history) | — |
 
 Examples:
 
@@ -433,7 +435,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start, and `fhr_campaign_history.json` with the finished campaigns); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
@@ -737,6 +739,29 @@ Returns an ephemeral report listing whoever held those positions on each day in 
 | `podium_combined_min3_latest_day` | `false` | Force at least the top 3 for the most recent day when `P` is combined with other letters, even if `podium_combined_top` is lower |
 
 ---
+
+## Campaign History
+
+The plugin records every campaign, so the report can show who won the last ones. A campaign is the life of one Foothold save: it **ends when the map changes** (the save file changes, finished or not) or when the same save is **reset** (its points and kills fall back to zero). When it ends, the season points (`Points` of the campaign save) of **every** pilot are kept in `Saves\.fhc\fhr_campaign_history.json`, so the result survives Foothold emptying the file. Coming back to a map whose points did not fall is the same campaign, not a new one: its entry is reopened and updated when it ends again.
+
+Add `H` to `report_layout` to show the finished campaigns, newest on top. It looks like the Daily Podium: the most recent campaign lists its first places with its start and end dates, the older ones one line each with their end date, the champion and the map.
+
+```yaml
+report_layout: DPSRH
+campaign_history_count: 3         # campaigns listed (0 = every one recorded)
+campaign_history_latest_top: 3    # positions of the most recent one (1-3)
+campaign_history_top: 1           # positions of each older one (1-3)
+campaign_history_min_points: 200  # recorded only if all its pilots add up to at least this many points
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `campaign_history_count` | `3` | Finished campaigns listed by `H` (`0` = every one recorded) |
+| `campaign_history_latest_top` | `3` | Positions shown for the most recent campaign (1-3) |
+| `campaign_history_top` | `1` | Positions shown for each older campaign (1-3) |
+| `campaign_history_min_points` | `200` | A campaign whose pilots add up to fewer season points is not recorded (`0` = record all) |
+
+A campaign that was already running when Fh_Report first looked has an estimated start date (marked with `~`). Campaigns that ended before this was installed are not recorded.
 
 ## Zone ordering by mission waypoint (`sort_zones_by_waypoint`)
 

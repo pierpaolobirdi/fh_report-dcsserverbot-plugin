@@ -114,3 +114,65 @@ def test_the_history_survives_a_bot_restart(tmp_path, monkeypatch):
 def test_the_excluded_pilots_are_not_in_the_table():
     table = commands._campaign_table({"a": 100, "b": 5, "c": 0}, {"a": "A"}, ["b"])
     assert table == {"a": {"name": "A", "points": 100}}
+
+
+# ── the H block ────────────────────────────────────────────────────────────────
+
+def _entry(file, start, end, table, kind="detected", map_name="", open_=False):
+    players = {pid: {"name": name, "points": pts} for pid, name, pts in table}
+    return {"id": f"{file}@{start}", "file": file, "map": map_name, "start": start, "start_kind": kind, "session": start,
+            "end": end, "closed_by": "map", "open": open_, "players": players,
+            "total": sum(pts for _, _, pts in table)}
+
+
+HISTORY = {"campaigns": [
+    _entry("foothold_syria.lua", "2026-09-01T10:00:00", "2026-09-20T10:00:00", [("a", "Zarpa", 28400), ("b", "Viper", 900)], kind="first_seen", map_name="Syria"),
+    _entry("foothold_caucasus.lua", "2026-09-20T10:00:00", "2026-10-12T10:00:00", [("b", "Viper", 35900), ("a", "Zarpa", 100)], map_name="Caucasus"),
+    _entry("foothold_syria.lua", "2026-10-12T10:00:00", "2026-11-03T10:00:00",
+           [("a", "Zarpa", 41230), ("b", "Viper", 30110), ("c", "Excl", 22004), ("d", "Fourth", 5)], map_name="Syria"),
+    _entry("foothold_syria.lua", "2026-11-03T10:00:00", None, [("a", "Zarpa", 7)], map_name="Syria", open_=True),
+]}
+
+
+def test_the_newest_campaign_lists_its_places_and_the_older_ones_one_line(tmp_path):
+    blocks = commands._campaign_blocks(HISTORY, {}, count=3, latest_top=3, top=1)
+    assert len(blocks) == 3                                            # the running campaign is not listed
+    newest, middle, oldest = blocks
+    assert newest[0].endswith("· Syria") and "→" in newest[0] and len(newest) == 4
+    assert newest[1] == "🥇 `Zarpa` — 41,230 pts" and newest[3] == "🥉 `Excl` — 22,004 pts"
+    assert len(middle) == 1 and middle[0].endswith("`Viper` — 35,900 pts · Caucasus") and "→" not in middle[0]
+    assert len(oldest) == 1 and "`Zarpa` — 28,400 pts · Syria" in oldest[0]
+
+
+def test_count_and_places_follow_the_options():
+    assert len(commands._campaign_blocks(HISTORY, {}, count=2, latest_top=1, top=1)) == 2
+    assert len(commands._campaign_blocks(HISTORY, {}, count=0, latest_top=1, top=1)) == 3
+    only_champions = commands._campaign_blocks(HISTORY, {}, count=3, latest_top=1, top=1)
+    assert all(len(b) == 1 for b in only_champions)
+    two_each = commands._campaign_blocks(HISTORY, {}, count=3, latest_top=2, top=2)
+    assert [len(b) for b in two_each] == [3, 3, 3]
+
+
+def test_an_estimated_start_is_marked_and_a_pilot_found_by_ucid_shows_the_current_name_and_rank():
+    history = {"campaigns": [_entry("foothold_syria.lua", "2026-09-01T10:00:00", "2026-09-20T10:00:00",
+                                    [("u1", "OldName", 28400), ("u2", "Gone", 100)], kind="first_seen", map_name="Syria")]}
+    players = {"NewName": {"ucid": "u1", "credits": 5000}}
+    [[head, first, second]] = commands._campaign_blocks(history, players, count=3, latest_top=2, top=1)
+    assert head.startswith("__~<t:")
+    assert first.startswith("🥇 `NewName` — **") and first.endswith("— 28,400 pts")
+    assert second == "🥈 `Gone` — 100 pts"                           # not in the ranks: as recorded, no rank
+
+
+def test_the_block_is_a_field_of_the_embed_and_nothing_is_shown_without_campaigns():
+    cfg = {"report_layout": "RH", "campaign_history_count": 2}
+    embed = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, cfg, report_layout="RH",
+                                 campaign_history=HISTORY)
+    [field] = [f for f in embed.fields if "Campaign History" in f.name]
+    assert field.name.startswith("🏁") and field.value.count("\n") == 4
+    bare = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, cfg, report_layout="RH")
+    assert not [f for f in bare.fields if "Campaign History" in f.name]
+
+
+def test_a_map_name_is_made_from_the_file_when_dcssb_never_reported_one():
+    assert commands._campaign_map({"file": "foothold_afghanistan.lua"}) == "Afghanistan"
+    assert commands._campaign_map({"file": "x.lua", "map": "Syria"}) == "Syria"

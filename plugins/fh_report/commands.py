@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.15"
+FH_REPORT_RELEASE = "14.6.16"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1346,6 +1346,13 @@ def punishment_for(data: dict, real_points: float = 0) -> tuple[str | None, floa
     return None, 0.0
 
 
+def _int_cfg(cfg: dict, key: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(cfg.get(key) if cfg.get(key) is not None else default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _num(v) -> float:
     try:
         return float(v)
@@ -1471,6 +1478,72 @@ def _podium_blocks(history: dict, players: dict, days: int, top: int,
     return blocks
 
 
+def _discord_date(iso: str | None) -> str:
+    """A Discord date (<t:...:d>, shown in each reader's own format) from a stored UTC time; "" if unreadable."""
+    dt = _parse_utc(iso)
+    return f"<t:{int(dt.replace(tzinfo=timezone.utc).timestamp())}:d>" if dt else ""
+
+
+def _campaign_map(entry: dict) -> str:
+    """The map of a campaign: the one DCSServerBot reported, else what its save file name says."""
+    if entry.get("map"):
+        return str(entry["map"])
+    stem = os.path.splitext(entry.get("file") or "")[0]
+    return re.sub(r"(?i)^foothold_", "", stem).replace("_", " ").title() or "?"
+
+
+def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, top: int,
+                     strip_callsign_flag: bool = False) -> list[list[str]]:
+    """The History block: the finished campaigns, newest first, each a list of lines. The most recent shows
+    `latest_top` positions under "start → end · map" (the start is marked ~ when it is an estimate), the
+    older ones `top` positions; one position goes on one line, "end · champion · map", like the Daily
+    Podium. `count` = 0 lists every one recorded. Pilots are shown with their current name and rank when
+    they can be found (by UCID, then name), else as recorded, without a rank. [] if nothing to show."""
+    closed = sorted((c for c in (history or {}).get("campaigns", []) if not c.get("open") and c.get("end")),
+                    key=lambda c: c["end"], reverse=True)
+    if count and count > 0:
+        closed = closed[:count]
+    medals = ["🥇", "🥈", "🥉"]
+    ucid_to_current = {d.get("ucid"): (n, d) for n, d in players.items() if d.get("ucid")}
+    players_by_base = _stripped_index(players)
+    blocks: list[list[str]] = []
+    for idx, entry in enumerate(closed):
+        lines: list[tuple[str, str]] = []
+        for pos, row in enumerate(campaign_ranking(entry)[:max(1, latest_top if idx == 0 else top)]):
+            current_name, data = None, None
+            if row["id"] in ucid_to_current:
+                current_name, data = ucid_to_current[row["id"]]
+            if not data and row["name"] in players:
+                current_name, data = row["name"], players[row["name"]]
+            if not data:
+                found = players_by_base.get(strip_callsign(row["name"]))
+                if found is not None:
+                    current_name, data = found, players[found]
+            marker = medals[pos] if pos < 3 else "🎖️"
+            if idx > 0 and data and data.get("custom_medal"):
+                marker = data["custom_medal"]
+            shown = current_name or row["name"]
+            display = strip_callsign(shown) if strip_callsign_flag else shown
+            pts = row["points"]
+            if data and not data.get("unranked"):
+                rank = data.get("custom_rank") or get_rank(float(data.get("credits", 0)))
+                rank = _fit_rank(f"{display} — ", rank, f" — {pts:,} pts")
+                rank_part = f" — **{rank}**"
+            else:
+                rank_part = ""
+            lines.append((marker, f"{_safe_code_span(display)}{rank_part} — {pts:,} pts"))
+        if not lines:
+            continue
+        end, where = _discord_date(entry["end"]), _campaign_map(entry)
+        if len(lines) == 1:
+            blocks.append([f"__{end}__ {lines[0][0]} {lines[0][1]} · {where}"])
+        else:
+            estimate = "~" if entry.get("start_kind") == "first_seen" else ""
+            blocks.append([f"__{estimate}{_discord_date(entry.get('start'))} → {end}__ · {where}"]
+                          + [f"{m} {body}" for m, body in lines])
+    return blocks
+
+
 def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
     """Group lines into chunks whose newline-joined length stays within
     `limit` (Discord's per-field cap), never splitting a line. A single line
@@ -1488,7 +1561,7 @@ def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
     return chunks
 
 
-def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None:
+def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str, name: str = "Daily Podium") -> None:
     """Add the Podium text as one or more fields (1024-char field limit),
     respecting Discord's 25-fields-per-embed cap: if it doesn't fit, the
     listing is truncated with a "+ N more" note, keeping room for the
@@ -1497,8 +1570,8 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
     MAX_EMBED_FIELDS    = DISCORD_MAX_FIELDS
     RESERVED_FOR_TRAILER = 2
 
-    title = f"{icon} __Daily Podium__"
-    cont_title = f"{icon} __Daily Podium (cont.)__"
+    title = f"{icon} __{name}__"
+    cont_title = f"{icon} __{name} (cont.)__"
     FIELD_LIMIT = 1020
     chunks = ["\n".join(c) for c in _chunk_lines(podium_text.split("\n"), FIELD_LIMIT)]
 
@@ -2202,6 +2275,7 @@ def _render_layout_tables(
     embed: discord.Embed, cfg: dict, report_layout: str, points_detail: dict,
     players: dict, dp: dict, has_daily: bool, punishment_points: dict | None,
     daily_history: dict | None, name_to_ucid: dict | None = None,
+    campaign_history: dict | None = None,
 ) -> None:
     """Render every table/Podium named in report_layout, in order, onto
     embed (table options read from `cfg`). `points_detail` is a dict
@@ -2242,6 +2316,16 @@ def _render_layout_tables(
         return pp.get(ucid, 0) if (pp and ucid) else 0
 
     for letter in layout:
+        if letter == "H":
+            blocks = _campaign_blocks(
+                campaign_history or {}, players,
+                count=_int_cfg(cfg, "campaign_history_count", 3, 0, 1000),
+                latest_top=_int_cfg(cfg, "campaign_history_latest_top", 3, 1, 3),
+                top=_int_cfg(cfg, "campaign_history_top", 1, 1, 3),
+                strip_callsign_flag=strip_callsign_flag)
+            if blocks:
+                _add_podium_field(embed, "🏁", "\n".join("\n".join(b) for b in blocks), "Campaign History")
+            continue
         if letter == "P":
             if layout == "P":
                 p_lines = _build_podium_table(
@@ -2409,6 +2493,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 daily_stats_raw: dict | None = None,
                 punishment_points: dict | None = None,
                 daily_history: dict | None = None,
+                campaign_history: dict | None = None,
                 waypoint_map: dict | None = None,
                 name_to_ucid: dict | None = None,
                 map_name: str | None = None,
@@ -2510,7 +2595,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
 
     _render_layout_tables(
         embed, cfg, report_layout, points_detail, players, dp, has_daily,
-        punishment_points, daily_history, name_to_ucid,
+        punishment_points, daily_history, name_to_ucid, campaign_history,
     )
 
     return _finish_embed(embed, cfg, where)
@@ -4218,6 +4303,11 @@ class Fh_Report(Plugin):
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
         daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
                               if "P" in current_layout else None)
+        campaign_history_data = None
+        if "H" in current_layout:
+            cached = self._campaign_cache.get(_saves_key(source_node, saves_dir))
+            campaign_history_data = (cached or {}).get("hist") or await _read_json(
+                source_node, _fhr_path(saves_dir, "campaign_history.json"))
 
         # Waypoint ordering: dump WaypointList (in-memory only) via hot injection
         # when the shared cache is missing or a campaign restart was detected —
@@ -4256,6 +4346,7 @@ class Fh_Report(Plugin):
             daily_stats_raw   = _by_display_name(daily_stats, players, names_by_id, u2rn),
             punishment_points = punishment_points,
             daily_history     = daily_history_data,
+            campaign_history  = campaign_history_data,
             waypoint_map      = waypoint_map,
             # Full name -> UCID map for this cycle (every past name each
             # player has had, plus current ones) — lets the Podium identify

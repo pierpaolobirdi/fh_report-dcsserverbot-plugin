@@ -34,6 +34,11 @@ sections:
     intro: The Daily Podium table of past days.
     options: [podium_days, podium_top, podium_combined_days, podium_combined_top,
               podium_combined_min3_latest_day]
+  - id: history
+    title: Campaign history
+    intro: The History block (letter H) with the finished campaigns, newest first.
+    options: [campaign_history_count, campaign_history_latest_top, campaign_history_top,
+              campaign_history_min_points]
   - id: pilots
     title: Pilots
     intro: Who is listed and what is shown next to them.
@@ -135,7 +140,7 @@ options:
   report_layout:
     since: "12.0.0"
     default: R
-    desc: Tables to show, any order - D daily, P podium, S session, R rank; groups separated by commas rotate
+    desc: Tables to show, any order - D daily, P podium, S session, R rank, H campaign history; groups separated by commas rotate
     example: DPS
     help: |-
       #   report_layout    - Which leaderboard tables to show, and in what order (default: R)
@@ -144,6 +149,7 @@ options:
       #                        P = Daily Podium (historical closing events)
       #                        S = Session Leaderboard (current session)
       #                        R = Pilot Leaderboard (by Rank)
+      #                        H = Campaign History (the finished campaigns)
       #                      Examples:
       #                        R        = just the Rank table (default)
       #                        DS       = Daily table, then Session table
@@ -510,6 +516,39 @@ options:
       #                              podium_combined_top is already 3 or higher.
       #                      Only affects "P" combined with other letters — "P" on
       #                      its own never uses this.
+  campaign_history_count:
+    since: "14.6.16"
+    default: 3
+    desc: Finished campaigns listed by the H block (0 = every one recorded)
+    help: |-
+      #   campaign_history_count - How many finished campaigns the H block of report_layout
+      #                      lists, newest first                           (default: 3)
+      #                      0 = every campaign recorded. A campaign is the life of one
+      #                      Foothold save: it ends when the map changes (finished or not)
+      #                      or when the same save is reset. Its final season points are
+      #                      recorded, so each one shows its best pilots.
+  campaign_history_latest_top:
+    since: "14.6.16"
+    default: 3
+    desc: Positions shown for the most recent campaign in the H block (1 to 3)
+    help: |-
+      #   campaign_history_latest_top - Positions shown for the most recent campaign of the
+      #                      H block, with its start and end dates        (default: 3)
+  campaign_history_top:
+    since: "14.6.16"
+    default: 1
+    desc: Positions shown for each older campaign in the H block (1 to 3)
+    help: |-
+      #   campaign_history_top - Positions shown for each older campaign of the H block
+      #                      (default: 1). 1 gives one line each: end date, champion, map.
+  campaign_history_min_points:
+    since: "14.6.16"
+    default: 200
+    desc: A campaign whose pilots add up to fewer season points is not recorded (0 records all)
+    help: |-
+      #   campaign_history_min_points - Season points all the pilots of a campaign must add
+      #                      up to for it to be recorded when it ends     (default: 200)
+      #                      Keeps out a map that was loaded for a moment. 0 = record all.
   excluded_ucids:
     since: "4.0.0"
     desc: UCIDs to hide from the tables
@@ -667,6 +706,10 @@ header:
   - option: podium_combined_days
   - option: podium_combined_top
   - option: podium_combined_min3_latest_day
+  - option: campaign_history_count
+  - option: campaign_history_latest_top
+  - option: campaign_history_top
+  - option: campaign_history_min_points
   - option: show_punishment
   - option: show_bob
   - option: excluded_ucids
