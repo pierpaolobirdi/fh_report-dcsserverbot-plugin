@@ -12,6 +12,15 @@
 - The older upgrade also copies only the files it knows. Do not add files under `plugins/fh_report/`
   without reading the compatibility tests at the end of `tests/test_release_version.py`.
 
+## Commit titles and GitHub Actions (do not break)
+
+- Start the first line of every commit with the release it carries: `14.6.25 · what changed`. That line is
+  the title of the run in the Actions list and the end of a long one is cut off, so the version must come
+  first, never in brackets at the end.
+- The jobs of `build-config-editor.yml` carry the version too (`Tests (Ver. x)`, `Build exe (Ver. x)`, read from
+  `PLUGIN_RELEASE`); that only shows inside a run. The workflow runs only for commits that touch `tools/`, the
+  schema or the workflow itself.
+
 ## Describing an option (do not break)
 
 - Every option of `fh_report.yaml` is described once, in `tools/fh_report_options.yaml` (section, one
