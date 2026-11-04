@@ -10,6 +10,7 @@ set -euo pipefail
 
 remote=$1 version=$2 sha=$3 notes=$4 exe_dir=$5
 work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 cp "$exe_dir/Fh_Report_Config.exe" "$exe_dir/Fh_Report_Config.exe.sha256" "$work/"
 cp "$notes" "$work/CHANGES.md"

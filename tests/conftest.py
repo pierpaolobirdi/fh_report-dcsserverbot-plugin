@@ -8,6 +8,7 @@ After an intentional output change, regenerate them with:
 
     FH_UPDATE_GOLDEN=1 python -m pytest tests
 """
+import atexit
 import enum
 import glob
 import hashlib
@@ -17,6 +18,15 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
+
+# One temporary folder for the whole run (pytest's own tmp_path folders and the ones the scripts under
+# test create included), removed when the run ends, so nothing is left behind in the system temp folder.
+_RUN_TMP = tempfile.mkdtemp(prefix="fhr-tests-")
+atexit.register(shutil.rmtree, _RUN_TMP, ignore_errors=True)
+tempfile.tempdir = _RUN_TMP
+for _var in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_var] = _RUN_TMP
 
 import pytest
 

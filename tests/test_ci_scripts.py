@@ -62,3 +62,21 @@ def test_publishing_leaves_one_commit_on_the_builds_branch_with_the_exe_and_its_
     readme = git("show", "builds:README.md")
     assert "Ver. 1.2.4" in readme and "deadbeef" in readme and "abc123" in readme
     assert git("log", "-1", "--format=%s", "builds").strip() == "Ver. 1.2.4 (build of deadbeef)"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("git") is None, reason="needs bash and git")
+def test_publishing_removes_its_working_folder(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    exe_dir = tmp_path / "dist"
+    exe_dir.mkdir()
+    (exe_dir / "Fh_Report_Config.exe").write_bytes(b"MZ-fake")
+    (exe_dir / "Fh_Report_Config.exe.sha256").write_text("abc123  Fh_Report_Config.exe\n")
+    notes = tmp_path / "notes.md"
+    notes.write_text("Ver. 1.2.3\n")
+    script = os.path.join(ROOT, "tools", "ci", "publish_exe.sh")
+    subprocess.run(["bash", script, str(remote), "1.2.3", "deadbeef", str(notes), str(exe_dir)], check=True,
+                   capture_output=True, env={**os.environ, "TMPDIR": str(scratch)})
+    assert list(scratch.iterdir()) == []
