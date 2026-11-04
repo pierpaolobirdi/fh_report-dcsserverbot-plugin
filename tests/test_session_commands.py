@@ -255,3 +255,15 @@ def test_every_text_of_the_session_commands_fits_discords_100_characters():
         if "session=" in m.group(1):
             texts += re.findall(r'\w+="([^"]+)"', m.group(1))
     assert texts and all(len(t) <= 100 for t in texts), [t for t in texts if len(t) > 100]
+
+
+def test_every_autocomplete_callback_takes_exactly_self_interaction_current():
+    """discord.py refuses (TypeError when the plugin is loaded, so no slash command at all) an autocomplete
+    callback with any other parameter; the stand-in of discord used by the tests does not check it."""
+    import inspect
+    found = [name for name in dir(commands.Fh_Report) if name.startswith("_autocomplete_")]
+    assert len(found) >= 5
+    for name in found:
+        func = getattr(commands.Fh_Report, name)
+        assert inspect.iscoroutinefunction(func), name
+        assert list(inspect.signature(func).parameters) == ["self", "interaction", "current"], name

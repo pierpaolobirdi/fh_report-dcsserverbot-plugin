@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.20"
+FH_REPORT_RELEASE = "14.6.21"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -5732,8 +5732,8 @@ class Fh_Report(Plugin):
                 for pid, n in sorted(names.items(), key=lambda kv: kv[1].lower())
                 if current.lower() in n.lower()][:25]
 
-    async def _autocomplete_campaign(self, interaction: discord.Interaction, current: str,
-                                     closed_only: bool = False) -> list[app_commands.Choice[str]]:
+    async def _campaign_choices(self, interaction: discord.Interaction, current: str,
+                                closed_only: bool) -> list[app_commands.Choice[str]]:
         tz = timezone.utc
         try:
             name, _ = self._resolve_server(interaction, getattr(interaction.namespace, "server", None))
@@ -5744,6 +5744,15 @@ class Fh_Report(Plugin):
                         if not (closed_only and c.get("open"))), key=lambda c: c.get("start") or "", reverse=True)
         return [app_commands.Choice(name=_campaign_label(c, tz)[:100], value=c["id"][:100]) for c in found
                 if current.lower() in _campaign_label(c, tz).lower()][:25]
+
+    # discord.py wants an autocomplete callback to take exactly (self, interaction, current): no extra parameter.
+    async def _autocomplete_campaign(self, interaction: discord.Interaction,
+                                     current: str) -> list[app_commands.Choice[str]]:
+        return await self._campaign_choices(interaction, current, closed_only=False)
+
+    async def _autocomplete_session_closed(self, interaction: discord.Interaction,
+                                           current: str) -> list[app_commands.Choice[str]]:
+        return await self._campaign_choices(interaction, current, closed_only=True)
 
     async def _send_campaign_pages(self, interaction: discord.Interaction, srv, title: str, description: str,
                                    pages: list[str], field_name: str) -> None:
@@ -5881,10 +5890,6 @@ class Fh_Report(Plugin):
         await self._send_campaign_pages(interaction, srv, f"🏁 Campaigns — {name}",
                                         f"{len(found)} campaign(s) · {shown} · {order} first",
                                         _podium_pages(blocks), "Campaign History")
-
-    async def _autocomplete_session_closed(self, interaction: discord.Interaction,
-                                           current: str) -> list[app_commands.Choice[str]]:
-        return await self._autocomplete_campaign(interaction, current, closed_only=True)
 
     # ── session_close / session_delete / session_reopen / session_edit ──────────────────────────────
     # What an admin does by hand to the campaign history. They change the same data the updater keeps, so
