@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.23"
+FH_REPORT_RELEASE = "14.6.24"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -678,11 +678,22 @@ _LEGACY_SESSION_HISTORY_FILE = "campaign_history.json"  # its name in 14.6.15 to
 _CAMPAIGN_FLUSH_EVERY = _SESSION_SEEN_EVERY      # how often a changed table is written while the campaign runs
 
 
+def _session_history_dict(raw) -> dict:
+    """The history as the code uses it, {"sessions": [...]}: the files of 14.6.15 to 14.6.23 call the list
+    "campaigns"."""
+    if isinstance(raw, dict):
+        if isinstance(raw.get("sessions"), list):
+            return raw
+        if isinstance(raw.get("campaigns"), list):
+            return {**{k: v for k, v in raw.items() if k != "campaigns"}, "sessions": raw["campaigns"]}
+    return {"sessions": []}
+
+
 async def _read_session_history(node, saves_dir: str) -> dict:
-    """The session history file of a Saves folder ({} when there is none), reading the file it was called
-    before when the new one does not exist yet."""
-    return (await _read_json(node, _fhr_path(saves_dir, SESSION_HISTORY_FILE))
-            or await _read_json(node, _fhr_path(saves_dir, _LEGACY_SESSION_HISTORY_FILE)))
+    """The session history of a Saves folder (an empty one when there is none), reading the file it was
+    called before when the new one does not exist yet."""
+    return _session_history_dict(await _read_json(node, _fhr_path(saves_dir, SESSION_HISTORY_FILE))
+                                 or await _read_json(node, _fhr_path(saves_dir, _LEGACY_SESSION_HISTORY_FILE)))
 
 
 def _campaign_min_points(cfg: dict | None) -> int:
@@ -725,11 +736,11 @@ def _same_campaign(prev: dict, cur: dict) -> bool:
 
 def campaign_history_update(hist: dict, *, file: str, session: str, kind: str, now: str, table: dict,
                             map_name: str | None, min_points: int, pending: bool = False) -> tuple[bool, bool]:
-    """Bring `hist` ({"campaigns": [...]}, oldest first) up to date with one reading of the save `file`,
+    """Bring `hist` ({"sessions": [...]}, oldest first) up to date with one reading of the save `file`,
     tracked by the session start `session` (ISO text). Returns (structural, dirty): an entry was opened,
     closed, reopened or dropped (worth writing at once) / the pilots' table changed. While `pending` (a
     reset looks likely but is not confirmed) the table is left alone, so the last intact one is kept."""
-    campaigns = hist.setdefault("campaigns", [])
+    campaigns = hist.setdefault("sessions", [])
     structural = dirty = False
     cur = next((c for c in campaigns if c.get("open")), None)
     if cur and not (cur.get("file") == file and cur.get("session") == session):
@@ -1523,7 +1534,7 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
     `latest_top` positions under "start → end MAP" (the start is marked ~ when it is an estimate), the
     older ones `top` positions; one position goes on one line, "end MAP champion", like the Daily Podium. `count` = 0 lists every one recorded. Pilots are shown with their current name and rank when
     they can be found (by UCID, then name), else as recorded, without a rank. [] if nothing to show."""
-    closed = sorted((c for c in (history or {}).get("campaigns", []) if not c.get("open") and c.get("end")),
+    closed = sorted((c for c in (history or {}).get("sessions", []) if not c.get("open") and c.get("end")),
                     key=lambda c: c["end"], reverse=True)
     if count and count > 0:
         closed = closed[:count]
@@ -1588,7 +1599,7 @@ def _campaign_pilot_ids(entry: dict, text: str) -> list[str]:
 # Each one raises ValueError with the sentence to show the admin when it cannot be done.
 
 def _history_entry(hist: dict, cid: str) -> dict:
-    entry = next((c for c in hist.get("campaigns", []) if c.get("id") == cid), None)
+    entry = next((c for c in hist.get("sessions", []) if c.get("id") == cid), None)
     if entry is None:
         raise ValueError("That session is not in the history (it may have been deleted already).")
     return entry
@@ -1597,7 +1608,7 @@ def _history_entry(hist: dict, cid: str) -> dict:
 def campaign_close_now(hist: dict, now: str) -> dict:
     """End the running session by hand: it gets `now` as its end and is final, so it is not reopened by
     itself when the save has not been reset; the next reading starts another one."""
-    entry = next((c for c in hist.get("campaigns", []) if c.get("open")), None)
+    entry = next((c for c in hist.get("sessions", []) if c.get("open")), None)
     if entry is None:
         raise ValueError("There is no running session to close.")
     entry.update(open=False, end=now if now >= entry.get("start", "") else entry["start"], closed_by="manual", final=True)
@@ -1610,7 +1621,7 @@ def campaign_remove(hist: dict, cid: str) -> dict:
     if entry.get("open"):
         raise ValueError("That is the session running now: close it first (session_close); a running one "
                          "would be recorded again at the next update.")
-    hist["campaigns"].remove(entry)
+    hist["sessions"].remove(entry)
     return entry
 
 
@@ -1624,9 +1635,9 @@ def campaign_reopen(hist: dict, cid: str, file: str, session: str) -> tuple[dict
     if entry.get("file") != file:
         raise ValueError(f"The save being played now is `{file}`, and that session belongs to "
                          f"`{entry.get('file')}`: a session can only be reopened while its own map is running.")
-    dropped = next((c for c in hist["campaigns"] if c.get("open")), None)
+    dropped = next((c for c in hist["sessions"] if c.get("open")), None)
     if dropped is not None:
-        hist["campaigns"].remove(dropped)
+        hist["sessions"].remove(dropped)
         merged = dict(entry.get("players") or {})
         for pid, p in (dropped.get("players") or {}).items():
             if pid not in merged or p.get("points", 0) > merged[pid].get("points", 0):
@@ -1668,7 +1679,7 @@ def campaign_filter(history: dict, *, map_name: str = "", date_from=None, date_t
     between two dates (inclusive, in the time zone `tz`), and with this pilot in them."""
     wanted_map = (map_name or "").strip().lower()
     out = []
-    for c in (history or {}).get("campaigns", []):
+    for c in (history or {}).get("sessions", []):
         if c.get("open") or not c.get("end"):
             continue
         if wanted_map and wanted_map not in _campaign_map(c).lower():
@@ -1688,10 +1699,10 @@ def campaign_champions(campaigns: list[dict]) -> list[dict]:
     stats: dict = {}
     for c in sorted(campaigns, key=lambda c: c.get("end") or ""):
         for pos, row in enumerate(campaign_ranking(c), 1):
-            s = stats.setdefault(row["id"], {"id": row["id"], "name": row["name"], "campaigns": 0, "wins": 0,
+            s = stats.setdefault(row["id"], {"id": row["id"], "name": row["name"], "played": 0, "wins": 0,
                                              "podiums": 0, "best": 0, "best_map": ""})
             s["name"] = row["name"]
-            s["campaigns"] += 1
+            s["played"] += 1
             s["wins"] += pos == 1
             s["podiums"] += pos <= 3
             if row["points"] > s["best"]:
@@ -1749,7 +1760,7 @@ def _record_text(r: dict) -> str:
     def n(count: int, word: str) -> str:
         return f"{count} {word}{'s' * (count != 1)}"
     return (f"**{r['wins']}** win{'s' * (r['wins'] != 1)} · {n(r['podiums'], 'podium')} · "
-            f"{n(r['campaigns'], 'session')} · best {r['best']:,} pts ({r['best_map']})")
+            f"{n(r['played'], 'session')} · best {r['best']:,} pts ({r['best_map']})")
 
 
 def _champion_lines(rows: list[dict], top: int) -> list[str]:
@@ -4279,8 +4290,6 @@ class Fh_Report(Plugin):
         cache = self._campaign_cache.get(saves_key)
         if cache is None:
             hist = await _read_session_history(source_node, saves_dir)
-            if not isinstance(hist.get("campaigns"), list):
-                hist = {"campaigns": []}
             cache = self._campaign_cache[saves_key] = {"hist": hist, "flushed": None, "dirty": False}
         return cache
 
@@ -5710,7 +5719,7 @@ class Fh_Report(Plugin):
         if cached:
             return cached["hist"]
         hist = await _read_session_history(srv.node, saves_dir)
-        return hist if isinstance(hist.get("campaigns"), list) else {"campaigns": []}
+        return hist
 
     async def _campaigns_for_autocomplete(self, interaction: discord.Interaction) -> list[dict]:
         """The recorded sessions, for the suggestions of /fh_report sessions (admins only)."""
@@ -5720,7 +5729,7 @@ class Fh_Report(Plugin):
             if srv is None or not self._is_admin(interaction, name):
                 return []
             saves_dir = await _resolve_saves_dir(srv, self._merged_cfg(name))
-            return (await self._campaign_history_of(srv, saves_dir)).get("campaigns", [])
+            return (await self._campaign_history_of(srv, saves_dir)).get("sessions", [])
         except Exception:
             return []
 
@@ -5844,7 +5853,7 @@ class Fh_Report(Plugin):
         name = self._public_server_name(key)
 
         if view == "detail":
-            entries = [c for c in history.get("campaigns", []) if session and c.get("id") == session]
+            entries = [c for c in history.get("sessions", []) if session and c.get("id") == session]
             entry = entries[0] if entries else (None if session else (found[-1] if found else None))
             if entry is None:
                 await interaction.followup.send(
@@ -5861,7 +5870,7 @@ class Fh_Report(Plugin):
             return
 
         if not found:
-            recorded = [c for c in history.get("campaigns", []) if not c.get("open") and c.get("end")]
+            recorded = [c for c in history.get("sessions", []) if not c.get("open") and c.get("end")]
             note = (f" {len(recorded)} session(s) are recorded; none matches the filters." if recorded else
                     " Nothing has been recorded yet: a session is recorded when it ends (the map changes "
                     "or the save is reset) with at least `session_history_min_points` points.")
@@ -5891,7 +5900,7 @@ class Fh_Report(Plugin):
         except Exception:
             players = {}
         players = await self._report_players(srv, saves_dir, _UpdateReadCache(srv.node), players, cfg)
-        blocks = _campaign_blocks({"campaigns": found}, players, count=0, latest_top=top or 3, top=top or 3,
+        blocks = _campaign_blocks({"sessions": found}, players, count=0, latest_top=top or 3, top=top or 3,
                                   strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")))
         if order == "oldest":
             blocks.reverse()
@@ -5953,7 +5962,7 @@ class Fh_Report(Plugin):
         key, srv, cfg, saves_dir, tz = ctx
         node, saves_key = srv.node, _saves_key(srv.node, saves_dir)
         async with self._update_lock(srv):
-            running = next((c for c in (await self._campaign_cache_for(node, saves_dir))["hist"]["campaigns"]
+            running = next((c for c in (await self._campaign_cache_for(node, saves_dir))["hist"]["sessions"]
                             if c.get("open")), None)
         if running is None:
             await interaction.followup.send("There is no running session to close (nothing has been recorded "

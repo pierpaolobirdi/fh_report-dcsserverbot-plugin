@@ -24,7 +24,7 @@ class _Hist(_Game):
             _Server(), str(self.dir), self.source, points, NAMES, {"session_history_min_points": min_points}, map_name))
 
     def history(self):
-        return json.loads((self.dir / ".fhc" / "fhr_session_history.json").read_text())["campaigns"]
+        return json.loads((self.dir / ".fhc" / "fhr_session_history.json").read_text())["sessions"]
 
     def restart_bot(self):
         self.plugin = make_plugin(apool=self.pool)
@@ -125,7 +125,7 @@ def _entry(file, start, end, table, kind="detected", map_name="", open_=False):
             "total": sum(pts for _, _, pts in table)}
 
 
-HISTORY = {"campaigns": [
+HISTORY = {"sessions": [
     _entry("foothold_syria.lua", "2026-09-01T10:00:00", "2026-09-20T10:00:00", [("a", "Zarpa", 28400), ("b", "Viper", 900)], kind="first_seen", map_name="Syria"),
     _entry("foothold_caucasus.lua", "2026-09-20T10:00:00", "2026-10-12T10:00:00", [("b", "Viper", 35900), ("a", "Zarpa", 100)], map_name="Caucasus"),
     _entry("foothold_syria.lua", "2026-10-12T10:00:00", "2026-11-03T10:00:00",
@@ -154,7 +154,7 @@ def test_count_and_places_follow_the_options():
 
 
 def test_an_estimated_start_is_marked_and_a_pilot_found_by_ucid_shows_the_current_name_and_rank():
-    history = {"campaigns": [_entry("foothold_syria.lua", "2026-09-01T10:00:00", "2026-09-20T10:00:00",
+    history = {"sessions": [_entry("foothold_syria.lua", "2026-09-01T10:00:00", "2026-09-20T10:00:00",
                                     [("u1", "OldName", 28400), ("u2", "Gone", 100)], kind="first_seen", map_name="Syria")]}
     players = {"NewName": {"ucid": "u1", "credits": 5000}}
     [[head, first, second]] = commands._campaign_blocks(history, players, count=3, latest_top=2, top=1)
@@ -208,7 +208,7 @@ def test_the_filters_combine_and_the_answer_is_oldest_first():
 
 
 def test_the_dates_are_those_of_the_servers_time_zone():
-    late = {"campaigns": [_entry("foothold_syria.lua", "2026-10-01T10:00:00", "2026-10-31T23:30:00", [("a", "Z", 500)])]}
+    late = {"sessions": [_entry("foothold_syria.lua", "2026-10-01T10:00:00", "2026-10-31T23:30:00", [("a", "Z", 500)])]}
     madrid = commands._tz_from_name("Europe/Madrid")
     assert commands.campaign_filter(late, date_to=date(2026, 10, 31), tz=UTC)
     assert not commands.campaign_filter(late, date_to=date(2026, 10, 31), tz=madrid)        # already 1 November there
@@ -217,7 +217,7 @@ def test_the_dates_are_those_of_the_servers_time_zone():
 def test_the_champions_table_counts_wins_podiums_and_the_best_score():
     rows = commands.campaign_champions(commands.campaign_filter(HISTORY))
     zarpa, viper = rows[0], rows[1]
-    assert (zarpa["name"], zarpa["wins"], zarpa["podiums"], zarpa["campaigns"], zarpa["best"]) == ("Zarpa", 2, 3, 3, 41230)
+    assert (zarpa["name"], zarpa["wins"], zarpa["podiums"], zarpa["played"], zarpa["best"]) == ("Zarpa", 2, 3, 3, 41230)
     assert zarpa["best_map"] == "SYRIA"
     assert (viper["name"], viper["wins"], viper["podiums"], viper["best"], viper["best_map"]) == ("Viper", 1, 3, 35900, "CAUCASUS")
     assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 sessions · best 41,230 pts (SYRIA)")
@@ -297,7 +297,7 @@ def test_detail_picks_the_latest_finished_campaign_or_the_one_asked_for(tmp_path
     [(_, embed, _v, _e)] = _command(tmp_path, view="detail", top=3).followup.sent
     assert "SYRIA · 12-10-2026 → 03-11-2026" in embed.description and "4 pilots" in embed.description
     assert "ended by map change" in embed.description
-    running = HISTORY["campaigns"][-1]["id"]
+    running = HISTORY["sessions"][-1]["id"]
     [(_, embed, _v, _e)] = _command(tmp_path, view="detail", session=running).followup.sent
     assert "running" in embed.description
     [(content, *_)] = _command(tmp_path, view="detail", session="nope").followup.sent
@@ -317,7 +317,7 @@ def test_a_bad_date_or_no_match_is_explained(tmp_path):
     assert "couldn't read `31-02-2026`" in content
     [(content, *_)] = _command(tmp_path, map_name="Nevada").followup.sent
     assert "none matches the filters" in content
-    [(content, *_)] = _command(tmp_path, history={"campaigns": []}).followup.sent
+    [(content, *_)] = _command(tmp_path, history={"sessions": []}).followup.sent
     assert "Nothing has been recorded yet" in content
 
 
@@ -339,7 +339,7 @@ def test_a_long_rank_is_cut_so_the_whole_line_stays_under_78_characters():
     long_rank = "PILOTO POR INSTINTO DE COMBATE MUY LARGO Y MAS"
     players = {"Eskuvy": {"ucid": "a", "credits": 5000, "custom_rank": long_rank},
                "Pier_Paolo": {"ucid": "b", "credits": 5000, "custom_rank": long_rank}}
-    history = {"campaigns": [
+    history = {"sessions": [
         _entry("old.lua", "2026-01-01T00:00:00", "2026-09-01T10:00:00", [("a", "Eskuvy", 28731)], map_name="PersianGulf"),
         _entry("new.lua", "2026-01-01T00:00:00", "2026-11-03T10:00:00", [("a", "Eskuvy", 28731), ("b", "Pier_Paolo", 25245)],
                map_name="PersianGulf")]}

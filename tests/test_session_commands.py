@@ -12,9 +12,9 @@ from test_campaign_history import HISTORY, _entry
 from test_session import IDS
 
 UTC = commands.timezone.utc
-RUNNING = HISTORY["campaigns"][-1]                 # Syria, running
-FINISHED = HISTORY["campaigns"][-2]                # Syria, ended 03-11-2026
-OTHER = HISTORY["campaigns"][1]                    # Caucasus
+RUNNING = HISTORY["sessions"][-1]                 # Syria, running
+FINISHED = HISTORY["sessions"][-2]                # Syria, ended 03-11-2026
+OTHER = HISTORY["sessions"][1]                    # Caucasus
 
 
 # ── what is done to the history (pure) ─────────────────────────────────────────────────────────
@@ -34,16 +34,16 @@ def test_a_campaign_closed_by_hand_is_not_reopened_by_the_points_of_the_same_sav
     hist = copy.deepcopy(HISTORY)
     commands.campaign_close_now(hist, "2026-11-10T09:00:00")
     commands.campaign_history_update(hist, session="2026-11-10T09:00:00", **kwargs)
-    assert len(hist["campaigns"]) == 5 and hist["campaigns"][-1]["open"]            # a new one
+    assert len(hist["sessions"]) == 5 and hist["sessions"][-1]["open"]            # a new one
     auto = copy.deepcopy(HISTORY)
-    auto["campaigns"][-1].update(open=False, end="2026-11-10T09:00:00")             # the same, closed by the plugin
+    auto["sessions"][-1].update(open=False, end="2026-11-10T09:00:00")             # the same, closed by the plugin
     commands.campaign_history_update(auto, session="2026-11-10T09:00:00", **kwargs)
-    assert len(auto["campaigns"]) == 4 and auto["campaigns"][-1]["open"]            # reopened, not duplicated
+    assert len(auto["sessions"]) == 4 and auto["sessions"][-1]["open"]            # reopened, not duplicated
 
 
 def test_only_a_finished_campaign_can_be_deleted():
     hist = copy.deepcopy(HISTORY)
-    assert commands.campaign_remove(hist, OTHER["id"])["map"] == "Caucasus" and len(hist["campaigns"]) == 3
+    assert commands.campaign_remove(hist, OTHER["id"])["map"] == "Caucasus" and len(hist["sessions"]) == 3
     with pytest.raises(ValueError, match="close it first"):
         commands.campaign_remove(hist, RUNNING["id"])
     with pytest.raises(ValueError, match="not in the history"):
@@ -52,11 +52,11 @@ def test_only_a_finished_campaign_can_be_deleted():
 
 def test_reopening_follows_the_save_being_played_and_merges_the_running_one_in():
     hist = copy.deepcopy(HISTORY)
-    hist["campaigns"][-1]["players"]["z"] = {"name": "New", "points": 40}             # the running one has a pilot more
-    hist["campaigns"][-1]["players"]["a"] = {"name": "Zarpa", "points": 99999}        # and a higher score
+    hist["sessions"][-1]["players"]["z"] = {"name": "New", "points": 40}             # the running one has a pilot more
+    hist["sessions"][-1]["players"]["a"] = {"name": "Zarpa", "points": 99999}        # and a higher score
     entry, dropped = commands.campaign_reopen(hist, FINISHED["id"], "foothold_syria.lua", "2026-11-03T10:00:00")
     assert entry["open"] and entry["end"] is None and entry["session"] == "2026-11-03T10:00:00"
-    assert dropped["id"] == RUNNING["id"] and len(hist["campaigns"]) == 3
+    assert dropped["id"] == RUNNING["id"] and len(hist["sessions"]) == 3
     assert entry["players"]["a"]["points"] == 99999 and entry["players"]["z"]["points"] == 40 \
         and entry["players"]["b"]["points"] == 30110
     assert entry["total"] == sum(p["points"] for p in entry["players"].values()) and "final" not in entry
@@ -68,7 +68,7 @@ def test_reopening_follows_the_save_being_played_and_merges_the_running_one_in()
 
 def test_editing_corrects_the_map_and_the_dates_and_an_exact_start_loses_its_tilde():
     hist = copy.deepcopy(HISTORY)
-    first = hist["campaigns"][0]                                                      # start is an estimate
+    first = hist["sessions"][0]                                                      # start is an estimate
     entry, changes = commands.campaign_edit(hist, first["id"], map_name="sinaimap", start="2026-08-01T00:00:00",
                                             end="2026-09-21T10:00:00")
     assert changes == ["map SYRIA → SINAI", "start date", "end date"]
@@ -135,7 +135,7 @@ def _setup(tmp_path, history=HISTORY, admin=True, state=True):
 
 def _stored(d):
     with open(os.path.join(d, ".fhc", "fhr_session_history.json")) as f:
-        return json.load(f)["campaigns"]
+        return json.load(f)["sessions"]
 
 
 def _press(view, button, user_id=42):
@@ -151,7 +151,7 @@ def test_the_commands_are_for_admins_and_private(tmp_path):
         plugin, inter, d, _ = _setup(tmp_path, admin=False)
         asyncio.run(getattr(plugin, name)(inter, **kw))
         assert inter.response.deferred is True and inter.followup.sent[0][0].startswith("❌ Only admins")
-        assert _stored(d) == HISTORY["campaigns"]
+        assert _stored(d) == HISTORY["sessions"]
 
 
 def test_close_asks_first_and_only_the_one_who_asked_can_confirm(tmp_path):
@@ -159,10 +159,10 @@ def test_close_asks_first_and_only_the_one_who_asked_can_confirm(tmp_path):
     asyncio.run(plugin.session_close(inter))
     [(question, view, ephemeral)] = inter.followup.sent
     assert ephemeral is True and "SYRIA" in question and "starts another session from now" in question
-    assert _stored(d) == HISTORY["campaigns"]                                          # nothing yet
+    assert _stored(d) == HISTORY["sessions"]                                          # nothing yet
     assert asyncio.run(view.interaction_check(type("I", (), {"user": type("U", (), {"id": 7})()})())) is False
     [edit] = _press(view, "cancel")
-    assert "nothing was changed" in edit["content"] and _stored(d) == HISTORY["campaigns"] and not audited
+    assert "nothing was changed" in edit["content"] and _stored(d) == HISTORY["sessions"] and not audited
 
 
 def test_confirming_the_close_ends_the_campaign_and_starts_a_new_session(tmp_path):
@@ -179,7 +179,7 @@ def test_confirming_the_close_ends_the_campaign_and_starts_a_new_session(tmp_pat
 
 
 def test_there_is_nothing_to_close_without_a_running_campaign(tmp_path):
-    plugin, inter, d, _ = _setup(tmp_path, history={"campaigns": HISTORY["campaigns"][:3]})
+    plugin, inter, d, _ = _setup(tmp_path, history={"sessions": HISTORY["sessions"][:3]})
     asyncio.run(plugin.session_close(inter))
     assert inter.followup.sent[0][0].startswith("There is no running session") and inter.followup.sent[0][1] is None
 
@@ -192,7 +192,7 @@ def test_delete_shows_what_goes_and_removes_it_on_confirmation(tmp_path):
     assert len(_stored(d)) == 4
     [edit] = _press(view, "confirm")
     assert edit["content"].startswith("✅ Deleted") and [c["id"] for c in _stored(d)] == [
-        c["id"] for c in HISTORY["campaigns"] if c["id"] != OTHER["id"]] and len(audited) == 1
+        c["id"] for c in HISTORY["sessions"] if c["id"] != OTHER["id"]] and len(audited) == 1
 
 
 def test_delete_refuses_the_running_campaign_and_unknown_ones(tmp_path):
@@ -240,7 +240,7 @@ def test_edit_explains_what_it_cannot_do(tmp_path):
         plugin, inter, d, _ = _setup(tmp_path)
         asyncio.run(plugin.session_edit(inter, **{"session": FINISHED["id"], **kw}))
         assert words in inter.followup.sent[0][0], (kw, inter.followup.sent[0][0])
-        assert _stored(d) == HISTORY["campaigns"]
+        assert _stored(d) == HISTORY["sessions"]
     plugin, inter, d, _ = _setup(tmp_path)
     asyncio.run(plugin.session_edit(inter, session=RUNNING["id"], end="01-12-2026"))
     assert "no end yet" in inter.followup.sent[0][0]
@@ -275,10 +275,24 @@ def test_the_history_is_read_from_the_file_it_had_before_until_the_new_one_exist
     node = FileNode()
     old = os.path.join(d, ".fhc", "fhr_campaign_history.json")
     new = os.path.join(d, ".fhc", "fhr_session_history.json")
-    assert asyncio.run(commands._read_session_history(node, d)) == {}
+    assert asyncio.run(commands._read_session_history(node, d)) == {"sessions": []}
     with open(old, "w") as f:
-        json.dump({"campaigns": [{"id": "old"}]}, f)
-    assert asyncio.run(commands._read_session_history(node, d)) == {"campaigns": [{"id": "old"}]}
+        json.dump({"version": 1, "campaigns": [{"id": "old"}]}, f)
+    assert asyncio.run(commands._read_session_history(node, d)) == {"version": 1, "sessions": [{"id": "old"}]}
     with open(new, "w") as f:
-        json.dump({"campaigns": [{"id": "new"}]}, f)
-    assert asyncio.run(commands._read_session_history(node, d)) == {"campaigns": [{"id": "new"}]}
+        json.dump({"version": 1, "sessions": [{"id": "new"}]}, f)
+    assert asyncio.run(commands._read_session_history(node, d)) == {"version": 1, "sessions": [{"id": "new"}]}
+
+
+def test_a_list_still_called_campaigns_is_read_and_written_back_as_sessions(tmp_path):
+    """The files of 14.6.15 to 14.6.23 call the list "campaigns"."""
+    plugin, inter, d, _ = _setup(tmp_path)
+    path = os.path.join(d, ".fhc", "fhr_session_history.json")
+    with open(path, "w") as f:
+        json.dump({"version": 1, "campaigns": HISTORY["sessions"]}, f)
+    node = FileNode()
+    assert asyncio.run(commands._read_session_history(node, d))["sessions"] == HISTORY["sessions"]
+    asyncio.run(plugin.session_edit(inter, session=OTHER["id"], map_name="Kola"))
+    with open(path) as f:
+        stored = json.load(f)
+    assert "campaigns" not in stored and len(stored["sessions"]) == 4 and stored["version"] == 1
