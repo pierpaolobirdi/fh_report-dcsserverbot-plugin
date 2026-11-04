@@ -28,9 +28,9 @@ def test_report_layout_pattern_takes_letters_and_comma_separated_groups():
     import re
     with open(SCHEMA, encoding="utf-8") as f:
         pat = yaml.safe_load(f)["schema;element_schema"]["mapping"]["report_layout"]["pattern"]
-    for ok in ("R", "DPSR", "RD", "DP, SR", "dp,sr", "DP,SR,R"):
+    for ok in ("R", "DPSR", "DPSRH", "RD", "DP, SR", "dp,sr", "DP,SR,R", "H"):
         assert re.match(pat, ok), ok
-    for bad in ("", "XYZ", "DPSRD", "DP,", ",R", "D P"):
+    for bad in ("", "XYZ", "DPSRHD", "DP,", ",R", "D P"):
         assert not re.match(pat, bad), bad
 
 

@@ -8,6 +8,7 @@ After an intentional output change, regenerate them with:
 
     FH_UPDATE_GOLDEN=1 python -m pytest tests
 """
+import atexit
 import enum
 import glob
 import hashlib
@@ -17,6 +18,15 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
+
+# One temporary folder for the whole run (pytest's own tmp_path folders and the ones the scripts under
+# test create included), removed when the run ends, so nothing is left behind in the system temp folder.
+_RUN_TMP = tempfile.mkdtemp(prefix="fhr-tests-")
+atexit.register(shutil.rmtree, _RUN_TMP, ignore_errors=True)
+tempfile.tempdir = _RUN_TMP
+for _var in ("TMPDIR", "TMP", "TEMP"):
+    os.environ[_var] = _RUN_TMP
 
 import pytest
 
@@ -88,6 +98,7 @@ def make_plugin(**attrs):
     p._message_ids, p._layout_cycle_index, p._cycle_punishment = {}, {}, None
     p._last_maps, p._map_probed = {}, set()
     p._campaign_absent, p._campaign_watch = set(), {}
+    p._session_state, p._campaign_cache = {}, {}
     p._base_interval, p._beat, p._beats_left, p._last_status = 300, 300, {}, {}
     p._reset_handled = {}
     p.locals = {}
@@ -99,7 +110,7 @@ def make_plugin(**attrs):
 def embed_dump(embed) -> list:
     """Embed content, minus the current time and the release number."""
     import re
-    footer = embed.footer.text.replace(commands.FH_REPORT_RELEASE, "X") if embed.footer else None
+    footer = embed.footer.text.replace(commands.PLUGIN_RELEASE, "X") if embed.footer else None
     return ([embed.title, re.sub(r"<t:\d+:f>", "T", embed.description or "")]
             + [[f.name, f.value, f.inline] for f in embed.fields] + [footer])
 

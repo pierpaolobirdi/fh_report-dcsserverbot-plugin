@@ -124,5 +124,9 @@ class app_commands:
         return lambda f: f
 
     @staticmethod
+    def choices(**_):
+        return lambda f: f
+
+    @staticmethod
     def autocomplete(**_):
         return lambda f: f

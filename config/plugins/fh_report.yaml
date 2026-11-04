@@ -83,6 +83,7 @@
 #                        P = Daily Podium (historical closing events)
 #                        S = Session Leaderboard (current session)
 #                        R = Pilot Leaderboard (by Rank)
+#                        H = Session History (the finished sessions)
 #                      Examples:
 #                        R        = just the Rank table (default)
 #                        DS       = Daily table, then Session table
@@ -306,6 +307,19 @@
 #                              podium_combined_top is already 3 or higher.
 #                      Only affects "P" combined with other letters — "P" on
 #                      its own never uses this.
+#   session_history_count - How many finished sessions the H block of report_layout
+#                      lists, newest first                           (default: 3)
+#                      0 = every session recorded. A session is the life of one
+#                      Foothold save: it ends when the map changes (finished or not)
+#                      or when the same save is reset. Its final season points are
+#                      recorded, so each one shows its best pilots.
+#   session_history_latest_top - Positions shown for the most recent session of the
+#                      H block, with its start and end dates        (default: 3)
+#   session_history_top - Positions shown for each older session of the H block
+#                      (default: 1). 1 gives one line each: end date, map, champion.
+#   session_history_min_points - Season points all the pilots of a session must add
+#                      up to for it to be recorded when it ends     (default: 200)
+#                      Keeps out a map that was loaded for a moment. 0 = record all.
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
 #                      false = disabled
 #                      true  = enabled (requires DCSServerBot punishment plugin)
@@ -318,7 +332,7 @@
 #                      Foothold): friendly units destroyed + damaged. Without that plugin
 #                      nothing is shown and nothing breaks.
 #                      false = hidden everywhere
-#                      true  = shown: "BoB: n" in the stats card (it also needs show_pilot_card,
+#                      true  = shown: "n BoB" in the stats card (it also needs show_pilot_card,
 #                              show_session_card and/or show_daily_card), and in /fh_report
 #                              player the BoB row of the stats table, the Blue-on-Blue section
 #                              and a line in Career Stats.
@@ -352,6 +366,15 @@
 #                              Looked at only when the day closes and on
 #                              /fh_report update; stable releases only.
 #                              Read from DEFAULT; applies to every server.
+#   show_unranked_pilots - Also list pilots that only the campaign save knows  (default: true)
+#                      Foothold keeps no ranks when its config has RankingSystem = false
+#                      (and a new pilot has none yet), so Foothold_Ranks.lua has no
+#                      record of them although the campaign save holds their points
+#                      and stats.
+#                      false = only pilots with a record in Foothold_Ranks.lua
+#                      true  = they are also listed in the Session and Daily tables,
+#                              without a rank (the Rank table needs credits and skips
+#                              them), and /fh_report player works for them.
 #
 # ZONE DISPLAY NOTES:
 #   - Neutral zones are counted in the progress bar as ⬜ but not listed.
@@ -395,11 +418,16 @@ DEFAULT:
   podium_combined_days: 7  # Same as podium_days, but when "P" is combined with other letters
   podium_combined_top: 1  # Same as podium_top, but when "P" is combined with other letters
   podium_combined_min3_latest_day: false  # false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day
+  session_history_count: 3  # Finished sessions the H block lists, newest first (0 = every one recorded)
+  session_history_latest_top: 3  # 1-3, positions shown for the most recent session of the H block
+  session_history_top: 1  # 1-3, positions shown for each older session of the H block
+  session_history_min_points: 200  # A session whose pilots add up to fewer season points is not recorded (0 = record all)
   show_punishment: false  # false = disabled  |  true = show punishment badges in leaderboard
   show_bob: true  # false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics
   show_player_cmd_hint: true  # false = disabled  |  true = show /fh_report player reminder in footer
   player_cmd_hint_text: "Type /fh_report player to see your own stats."  # Text shown in the footer when show_player_cmd_hint is true
   show_new_release: true  # false = disabled  |  true = footer notes when a newer stable release exists
+  show_unranked_pilots: true  # false = only pilots with a record in Foothold_Ranks.lua  |  true = also list pilots only the campaign save knows
 #  excluded_ucids:
 
 DCS_Server:                             # instance name from nodes.yaml

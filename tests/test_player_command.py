@@ -313,3 +313,90 @@ def test_the_embed_cards_need_show_bob_too():
         commands._bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card"))
     assert cond({"show_pilot_card": True}) and not cond({"show_pilot_card": True, "show_bob": False})
     assert not cond({})                                                  # no card at all: nothing to query
+
+
+def test_the_player_card_uses_the_same_player_data_as_the_report(saves_dir, monkeypatch):
+    seen = {}
+
+    class Adjust:
+        @staticmethod
+        def post_process(players, cfg, name, campaign_stats):
+            seen["name"], seen["campaign_stats"] = name, dict(campaign_stats)
+            for data in players.values():
+                data["credits"] = 987654
+            return players
+    monkeypatch.setattr(commands, "_fh_hook", Adjust)
+    monkeypatch.setattr(commands, "_HAS_HOOK", True)
+    d = saves_dir()
+    pool, followup = _Pool(), _Followup()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                         "instance": type("N", (), {"name": "inst"})()})()
+    plugin = make_plugin(apool=pool)
+    plugin._is_admin = lambda interaction, server: False
+
+    async def ctx(interaction, server_param):
+        return "inst", srv, {"saves_dir": d}, d, commands._UpdateReadCache(srv.node), True
+    plugin._command_context = ctx
+    plugin._public_server_name = lambda name: "Public"
+    interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
+    asyncio.run(plugin.player(interaction, None, None))
+    assert seen["name"] == "inst" and seen["campaign_stats"]          # the points of the save that was just read
+    assert followup.sent[0].title == "👤 Player — Zarpa"
+    card = "\n".join(f.name + f.value for f in followup.sent[0].fields)
+    assert "987,654" in card or "987654" in card                       # the adjusted value reaches the card
+
+
+def _unranked_player_cmd(saves_dir, cfg_extra=None):
+    """/fh_report player when Foothold_Ranks.lua holds no ranked pilot (RankingSystem = false)."""
+    import os
+    d = saves_dir(ranks=None)
+    with open(os.path.join(d, "Foothold_Ranks.lua"), "w") as f:
+        f.write('RankSave = {}\nRankSave["players"] = {\n}\nRankSave["ucidToName"] = {\n  ["%s"]="Zarpa",\n}\n' % A)
+    pool, followup = _Pool(), _Followup()
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                         "instance": type("N", (), {"name": "inst"})()})()
+    plugin = make_plugin(apool=pool)
+    plugin._is_admin = lambda interaction, server: False
+
+    async def ctx(interaction, server_param):
+        return "inst", srv, {"saves_dir": d, **(cfg_extra or {})}, d, commands._UpdateReadCache(srv.node), True
+    plugin._command_context = ctx
+    plugin._public_server_name = lambda name: "Public"
+    interaction = type("I", (), {"followup": followup, "user": type("U", (), {"id": 42})()})()
+    asyncio.run(plugin.player(interaction, None, None))
+    return followup.sent
+
+
+def test_player_works_for_a_pilot_only_the_campaign_save_knows(saves_dir):
+    sent = _unranked_player_cmd(saves_dir)
+    assert sent[0].title == "👤 Player — Zarpa"
+
+
+def test_player_says_no_stats_when_show_unranked_pilots_is_off(saves_dir):
+    sent = _unranked_player_cmd(saves_dir, {"show_unranked_pilots": False})
+    assert "No campaign stats found for you" in sent[0]
+
+
+def test_punishment_points_are_summed_before_the_positive_filter():
+    """A forgiven pilot has negative rows offsetting the positive ones: the total decides, not each row."""
+    seen = []
+
+    class Cur:
+        async def execute(self, sql, *a): seen.append(" ".join(sql.split()))
+        async def fetchall(self): return [("u1", 4.0)]
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Conn:
+        def cursor(self): return Cur()
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Pool:
+        def connection(self): return Conn()
+
+    import asyncio
+    cog = commands.Fh_Report.__new__(commands.Fh_Report)
+    cog.apool = Pool()
+    assert asyncio.run(cog._fetch_punishment_points()) == {"u1": 4.0}
+    assert "HAVING SUM(points) > 0" in seen[0] and "WHERE points" not in seen[0]

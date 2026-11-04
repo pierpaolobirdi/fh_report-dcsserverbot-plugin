@@ -1,3 +1,16 @@
+```
+/fh_report podium date_from:01-08-2026 date_to:22-08-2026 top:3
+```
+
+Returns an ephemeral report listing whoever held those positions on each day in that range. If you have more than one server configured, add `server:` — see [Multiple servers](#multiple-servers-server--commands_channel_id) above.
+
+Everything is optional and easy to type:
+
+- **Dates** are written `dd-mm-yyyy` (also `25/12/2026`, `25.12.2026`, `25122026`, `25-12-26`, `25-12` for this year, or the old `2026-12-25`). `today`, `yesterday` and `7d` (seven days ago) work too, and the date fields suggest these as you type.
+- Leave **both dates empty** and you get the **latest day with data**. `date_to` is **today** when only `date_from` is typed; `date_from` is the same day as `date_to` when only `date_to` is typed. Dates typed the wrong way round are swapped. A day is recorded in the history when it closes, so today only appears from tomorrow; if nothing is found, the answer says which dates the history does cover.
+- `top` is **3** when left empty (1 to 50).
+- A long answer is split into pages with **◀ Previous** / **Next ▶** buttons that anyone who sees the message can press (in a public channel the page changes for everybody), so it never goes over Discord's 6000-character limit for an embed.
+
 # Fh_Report — DCSServerBot Plugin
 
 Automatically posts and keeps updated a Discord embed with the current Foothold campaign status — front line progress, zone control, and pilot leaderboard — reading directly from the Foothold save files. No database required.
@@ -13,10 +26,22 @@ On a configurable interval the plugin reads the Foothold `.lua` save files and u
 - **Progress bar** showing the balance of zone control between BLUE and RED
 - **BLUE and RED zone columns** with zone levels and optional upgrade slot indicators, sorted by level and damage state
 - **Pilot leaderboard** with rank, session, daily points, optional career card, and optional punishment status
+- **Daily Podium** of the best pilots of past days, and a **Session History** of the finished sessions (one per map played) with the best pilots of each
 
 The embed is always **edited in place** — it never spams new messages.
 
 Multiple server instances are supported — each can have its own channel, campaign name, and display settings.
+
+### Slash commands
+
+| Command | Who | What it does |
+|---|---|---|
+| `/fh_report player` | everyone (admins can look up anyone) | a pilot's rank, session and career stats — see [personal stats](#fh_report-player--personal-stats-command) |
+| `/fh_report podium` | everyone | who held the top places of the Daily Podium over a range of days — see [Daily Podium](#daily-podium) |
+| `/fh_report sessions` | admins | the recorded sessions, with filters, per-session tables and a champions table — see [Session History](#fh_report-sessions--look-through-the-records-admins) |
+| `/fh_report session_close`, `session_delete`, `session_reopen`, `session_edit` | admins | correct the session history by hand — see [Correcting the history](#correcting-the-history-by-hand-admins) |
+| `/fh_report update` | admins | refresh the report now — see [update](#fh_report-update--refresh-the-report-now-admins) |
+| `/fh_report upgrade` | admins | update the plugin from GitHub — see [upgrade](#fh_report-upgrade--update-from-discord-admins) |
 
 ---
 
@@ -82,6 +107,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `daily_card_icon` | `🔸` | Emoji shown at the start of the daily stats card line |
 | `podium_days` / `podium_top` | `7` / `1` | Daily Podium settings when `report_layout` is `P` on its own — see [Daily Podium](#daily-podium) below |
 | `podium_combined_days` / `podium_combined_top` / `podium_combined_min3_latest_day` | `7` / `1` / `false` | Daily Podium settings when `P` is combined with other letters — see [Daily Podium](#daily-podium) below |
+| `session_history_count` / `session_history_latest_top` / `session_history_top` / `session_history_min_points` | `3` / `3` / `1` / `200` | The `H` block of finished sessions — see [Session History](#session-history) below |
 | `show_punishment` | `false` | `true` = show punishment badges |
 | `show_bob` | `true` | `false` = hide every Blue on Blue (`BoB`) count, taken from DCSServerBot's Mission Statistics plugin — see [Blue-on-blue](#blue-on-blue-bob) |
 | `excluded_ucids` | none | List of UCIDs to hide from the leaderboard |
@@ -89,6 +115,7 @@ Listed in the same order they appear in `fh_report.yaml` itself:
 | `show_player_cmd_hint` | `true` | `true` = add a footer reminder pointing players to `/fh_report player` |
 | `player_cmd_hint_text` | `Type /fh_report player to see your own stats.` | Customize the footer reminder text |
 | `show_new_release` | `true` | `true` = the footers note when a newer stable release exists (see *The "new release" note*); `false` = never look for it. Read from `DEFAULT`, applies to every server |
+| `show_unranked_pilots` | `true` | `true` = pilots that only the campaign save knows (no record in `Foothold_Ranks.lua`) are also listed, without a rank. See [Pilots without a rank](#pilots-without-a-rank-show_unranked_pilots) |
 | `saves_dir` | auto | *(per server only)* Override Foothold saves path. Only needed for non-standard locations |
 | `commands_channel_id` | none | *(per server only)* Extra channel(s) allowed to run `/fh_report player`/`podium` for this server, besides its own report channel — see [Multiple servers](#multiple-servers-server--commands_channel_id) below |
 
@@ -153,7 +180,7 @@ Only the first 5 upgrade slots are shown. Higher-numbered slots serve other purp
 
 ### Report layout (`report_layout`)
 
-Which leaderboard tables to show, and in what order, is built from four letters — use any subset, in any order:
+Which leaderboard tables to show, and in what order, is built from five letters — use any subset, in any order:
 
 | Letter | Table | Sorted by |
 |---|---|---|
@@ -161,6 +188,7 @@ Which leaderboard tables to show, and in what order, is built from four letters 
 | `P` | Daily Podium — historical closing events, see [Daily Podium](#daily-podium) | — |
 | `S` | Session Leaderboard | Current session points |
 | `R` | Pilot Leaderboard | Career rank |
+| `H` | Session History — the finished sessions, see [Session History](#session-history) | — |
 
 Examples:
 
@@ -263,7 +291,7 @@ Stats shown:
 
 `show_bob` (default `true`; a config without the line counts as `true`) switches all of this on or off. `false` hides every `BoB` below and skips its database queries; the penalties in force of `/fh_report player` stay under `show_punishment`.
 
-`BoB: n` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
+`n BoB` appears in the stats card of a pilot (rank, session and daily cards), always as the second-to-last entry, right before Deaths, and it is never dropped when a card is cut to its maximum size. It is the friendly fire DCS actually reported, read from the DCSServerBot **Mission Statistics** plugin (`missionstats`): a player's hit or kill on a unit of their own coalition. **BoB = destroyed + damaged.** Without that plugin (or with its persistence off) there is no data and `BoB` is simply left out.
 
 - *Destroyed*: every kill of a friendly unit.
 - *Damaged*: DCS reports every single hit as an event, so hits are grouped into one incident per attacker, victim and minute. A group is not counted when a kill of that victim type happened in that same minute, so a kill never counts twice.
@@ -347,6 +375,30 @@ It is not an automatic updater: nothing happens unless an admin runs the command
 
 When a newer **stable release** exists (pre-releases and the development branch never count), the footer of every embed says so after the version, for example `Fh_Report Ver. 14.5.0 • M · 📣 Ver. 14.6.0 available`. GitHub is looked at only when the day closes and when an admin runs `/fh_report update` (at most once every six hours otherwise), and nothing is shown if it cannot be reached. The note disappears by itself once that version is installed. Admins update with `/fh_report upgrade`. Turn it off with `show_new_release: false` in `DEFAULT`.
 
+## Pilots without a rank (`show_unranked_pilots`)
+
+Foothold writes its ranking file, `Foothold_Ranks.lua`, only when the ranking system is on: `RankingSystem = true` in the mission's `Foothold_Config.lua` (with `false`, the default of that file, no pilot is saved there). A pilot who has just joined a campaign that has ranks has no record yet either. The leaderboards are built from that file, so without a record the pilot would not be listed, however many points the campaign save holds for them.
+
+With `show_unranked_pilots: true` (the default) those pilots are read from the campaign save (`playerStats`: points and stats) and:
+
+- are listed in the **Session** and **Daily** tables with their points and, if enabled, their stats cards, **without a rank** (there are no credits to rank them by);
+- are **not** in the **Rank** table, which needs credits;
+- appear in the Podium without a rank, as pilots unknown to the ranking always did;
+- can use `/fh_report player` when their UCID can be matched (from the save or from the `ucidToName` table of `Foothold_Ranks.lua`).
+
+`false` goes back to listing only the pilots that have a record in `Foothold_Ranks.lua`. Turning the ranking system on in Foothold is a gameplay decision of its own (shop and carrier restrictions, rank loss when killed): this option only makes the report useful when it is off.
+
+## Configuration editor (`tools/fh_report_config.cmd`)
+
+A small window to change `fh_report.yaml` without editing the text: the options are grouped in tabs (Server, Layout, Refresh and reset, Map and zones, Pilot cards, Podium, Pilots, Footer), each with its explanation (the **?** button shows the full text from the file header), the release it appeared in, what applies now and where it comes from (this block, `DEFAULT` or the plugin's own default). You edit `DEFAULT` or one server at a time, and **Add server...** creates a new block.
+
+- The file keeps its comments and order; only the lines you change differ. Values are checked as you type (the reason appears under the field) and the whole file again when you save, with a list of **Problems** at the bottom; double-click one to go to it.
+- **Save** keeps the previous file next to it as `fh_report.yaml.<date>.bak` (the last ten are kept). DCSServerBot reads the file when it starts, so restart the bot afterwards.
+- If the file cannot be read (for example a key written twice, which stops the plugin from loading), the editor says which line and **File > Open the file in a text editor** lets you fix it.
+- **Without Python:** `Fh_Report_Config.exe` has Python, tkinter and the option list packed inside; nothing else to install. GitHub builds it by itself (a workflow, tested before it builds and run once built to check it starts) and keeps the latest one in the **[`builds` branch](https://github.com/pierpaolobirdi/fh_report-dcsserverbot-plugin/tree/builds)**: open `Fh_Report_Config.exe` there and download it (its SHA-256 is next to it). Put it next to `fh_report_config.cmd` (or in `tools\dist`) and the launcher uses it, or just run it from anywhere. It is rebuilt whenever the editor or the option list changes; it is not part of the plugin and `/fh_report upgrade` does not touch it. `tools\build_exe.cmd` builds the same file by hand. Without the `.exe` the launcher looks for a Python with tkinter and ruamel.yaml (DCSServerBot's own first, then the ones installed on the computer) and, if there is none, says so in a window.
+- It lives in `tools/` of the release (next to `install.cmd`), is run with `tools\fh_report_config.cmd [DCSServerBot folder]` and uses DCSServerBot's own Python (`%USERPROFILE%\.dcssb`), which already has ruamel.yaml; the last folder used is remembered. It is **not** installed or updated by `/fh_report upgrade`: use the copy that comes with the release you downloaded. It describes the options of the release it comes with and takes their types and limits from the schema of the installed plugin, so use the copy of the release you have installed.
+- Dark window with an amber accent. Windows only for now.
+
 ## Settings in the DCSServerBot web console
 
 The plugin ships a schema (`plugins/fh_report/schemas/fh_report_schema.yaml`), so the web console's **Settings** page builds a form for `fh_report.yaml` (switches, numbers and text fields for every option, per `DEFAULT`, node or server block). The same schema is used by DCSServerBot to check the file when it loads. Notes:
@@ -395,7 +447,7 @@ The map is read from DCSServerBot — it is never configured here, so it can't d
 
 ### Files in `.fhc`
 
-Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
+Everything Fh_Report keeps in `Saves\.fhc` starts with `fhr_` (`fhr_daily_snapshot.json`, `fhr_daily_history.json`, and `fhr_session.json` with the campaign session start, and `fhr_session_history.json` with the finished sessions); files starting with `fhc_` belong to Fh_Control (`fhc_waypoints.lua` is shared by both). Earlier versions kept the two daily files under the same names without `fhr_` (`daily_snapshot.json`, `daily_history.json`): they are still read until the new file exists, and the old copy is deleted by a later cycle, once the new one has been read back successfully. The deletion goes through DCSServerBot's node API, so it also works on remote agent nodes; on a DCSServerBot too old to have it, the old file is simply left unused.
 
 ### Footer reminder (`show_player_cmd_hint`)
 
@@ -700,6 +752,57 @@ Returns an ephemeral report listing whoever held those positions on each day in 
 
 ---
 
+## Session History
+
+The plugin records every session, so the report can show who won the last ones. A session is the life of one Foothold save: it **ends when the map changes** (the save file changes, finished or not) or when the same save is **reset** (its points and kills fall back to zero). When it ends, the season points (`Points` of the campaign save) of **every** pilot are kept in `Saves\.fhc\fhr_session_history.json`, so the result survives Foothold emptying the file. Coming back to a map whose points did not fall is the same session, not a new one: its entry is reopened and updated when it ends again.
+
+Add `H` to `report_layout` to show the finished sessions, newest on top. It looks like the Daily Podium: the most recent session lists its first places with its start and end dates, the older ones one line each with their end date, the map (in capitals) and the champion.
+
+```yaml
+report_layout: DPSRH
+session_history_count: 3         # sessions listed (0 = every one recorded)
+session_history_latest_top: 3    # positions of the most recent one (1-3)
+session_history_top: 1           # positions of each older one (1-3)
+session_history_min_points: 200  # recorded only if all its pilots add up to at least this many points
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `session_history_count` | `3` | Finished sessions listed by `H` (`0` = every one recorded) |
+| `session_history_latest_top` | `3` | Positions shown for the most recent session (1-3) |
+| `session_history_top` | `1` | Positions shown for each older session (1-3) |
+| `session_history_min_points` | `200` | A session whose pilots add up to fewer season points is not recorded (`0` = record all) |
+
+A session that was already running when Fh_Report first looked has an estimated start date (marked with `~`). Sessions that ended before this was installed are not recorded.
+
+Earlier development builds called the options `campaign_history_*` and the file `fhr_campaign_history.json`: `install.cmd` and `/fh_report upgrade` rename the options in `fh_report.yaml`, and the old file is still read (and the new one written) when the new one does not exist yet, so rename it to `fhr_session_history.json` with the bot stopped, or just delete the old one once the new one is there.
+
+### `/fh_report sessions` — look through the records (admins)
+
+Answers privately, and only to the admins (the `admin` setting, like `/fh_report update`). With no options it lists every recorded session, newest first, the first three places of each. Everything can be filtered, and the answer is paged like `/fh_report podium`.
+
+| Option | What it does |
+|---|---|
+| `view` | `list` (default), `detail` (the whole table of one session: length, how it ended, every pilot) or `champions` (wins, podiums and best score per pilot) |
+| `map` | Only sessions on this map (suggestions come from the recorded ones) |
+| `date_from` / `date_to` | Only sessions that **ended** between two dates — `dd-mm-yyyy`, `today`, `yesterday` or `7d` |
+| `pilot` | Only the sessions this pilot played (name or UCID). With `champions` it shows that pilot's record: position and points in each session |
+| `session` | For `detail`: which session (suggestions list them by map and dates); the latest finished one by default |
+| `order` | `newest` (default) or `oldest` first |
+| `top` | Positions shown: per session for `list` (default 3), in the table for `detail` and `champions` (default 10) |
+| `server` | Which server, when more than one is configured |
+
+### Correcting the history by hand (admins)
+
+Four commands change the records. They answer privately, are for the admins only, and leave an entry in DCSServerBot's audit log. `session_close`, `session_delete` and `session_reopen` ask for a confirmation first (only who asked can press the buttons); `session_edit` applies at once and says what it changed. Every `session` option suggests the recorded sessions.
+
+| Command | What it does |
+|---|---|
+| `/fh_report session_close` | Ends the running session now (its end is the current time) and starts the next one from now; the session counts start again too. A session closed this way is never reopened by itself, even if the save has not been reset — which is what to use when a reset went unnoticed. If Foothold did **not** reset its save, the new session starts with the points the save already has |
+| `/fh_report session_delete session:` | Deletes a **finished** session from the history (the running one must be closed first, or it would be recorded again at the next update) |
+| `/fh_report session_reopen session:` | Makes a finished session the running one again, for when it was closed by mistake (a hand edit of the points looked like a reset). It must be the map being played now. The session running in its place is dropped and its table merged in (each pilot keeps the higher score), and from then on it follows the save again |
+| `/fh_report session_edit session: map: start: end:` | Corrects the map or the dates (`dd-mm-yyyy`, `today`, `yesterday`, `7d`). A start given by hand is exact, so its `~` goes away. The end can only be set on a finished session |
+
 ## Zone ordering by mission waypoint (`sort_zones_by_waypoint`)
 
 By default, zones in each column are sorted by level and slot damage. Turning this on instead orders them by their mission waypoint number — BLUE zones highest-first, RED zones lowest-first — so the columns read like a front-line progression. Zones without a waypoint assigned fall to the end of the active list, same place suspended zones already sit.
@@ -719,11 +822,25 @@ This needs a one-time cache shared with Fh_Control (if installed) and only refre
 | `commands.py` | Main plugin logic |
 | `listener.py` | Placeholder event listener (required by DCSSB) |
 | `__init__.py` | Plugin registration |
-| `version.py` | Version string |
+| `version.py` | `PLUGIN_RELEASE` (this plugin's release, `x.y.z`) and `__version__` (DCSServerBot's database-schema version; leave it at `1.0`) |
 | `fh_report.yaml` | Configuration template (goes in `config/plugins/`) |
 | `migrate_config.py` | Migration script, called automatically by `install.cmd` on updates |
 | `install.cmd` | Installation and update script |
 | `tests/` | Automated tests (developers only — not needed to run the plugin) |
+
+---
+
+## Versioning (developers)
+
+The release number is `PLUGIN_RELEASE` in `plugins/fh_report/version.py`, and nowhere else: the
+footers, `/fh_report upgrade`, `install.cmd` and external tools read it from there. Bump it with
+every release, keeping the line exactly as it is (`PLUGIN_RELEASE = "x.y.z"`).
+
+`__version__`, in the same file, is **not** the release. DCSServerBot's core reads it as the
+plugin's database-schema version (it expects `major.minor` and logs `migrated to version ...`
+whenever it changes), and Fh_Report has no tables, so it stays at `1.0`.
+
+`commands.py` still carries one `FH_REPORT_RELEASE = "x.y.z"` line. It is a bridge for installations older than 14.6.1, whose `/fh_report upgrade` accepts a downloaded release only if it finds that line. The code does not use it and a test keeps it equal to `PLUGIN_RELEASE` (so bump both). **Keep it in every release**: without it an installation older than 14.6.1 refuses to jump straight to the new release. For the same reason a file that did not exist in 14.6.1 is not copied by those older upgrades: every file under `plugins/fh_report/` must be in the list of that version (a test checks it) or be put in place by `migrate_config.py`, which the older upgrade does run from the new release.
 
 ---
 

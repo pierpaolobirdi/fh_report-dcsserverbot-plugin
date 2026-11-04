@@ -16,7 +16,7 @@ from conftest import UCID, check_golden, commands, digest, embed_dump
 def _pin_release(monkeypatch):
     """The footer's length decides how many lines fit in Discord's 6000 characters, so a
     longer version number (14.1.9 -> 14.1.10) would shift the golden output."""
-    monkeypatch.setattr(commands, "FH_REPORT_RELEASE", "12.5.4")
+    monkeypatch.setattr(commands, "PLUGIN_RELEASE", "12.5.4")
 
 
 def _zone(name, level, active, suspended=False, true_max=None):
@@ -120,7 +120,7 @@ def test_embed_respects_discord_limits():
 
 
 def test_version_is_written_as_fh_report_ver_everywhere():
-    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.PLUGIN_RELEASE}"
     main = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, {"campaign_name": "C"})
     assert main.footer.text.splitlines()[0] == commands._version_text()
     notstarted = commands.build_not_started_embed({}, {"campaign_name": "C"}, "R", {})
@@ -195,8 +195,8 @@ def _tag(nodes, remote):
 def test_footer_says_where_the_server_runs_only_on_a_cluster():
     assert _tag(1, False) is None and _tag(1, True) is None            # a single node needs no tag
     assert _tag(2, False) == "M" and _tag(3, True) == "N"
-    assert commands._version_text("M") == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE} • M"
-    assert commands._version_text() == f"Fh_Report Ver. {commands.FH_REPORT_RELEASE}"
+    assert commands._version_text("M") == f"Fh_Report Ver. {commands.PLUGIN_RELEASE} • M"
+    assert commands._version_text() == f"Fh_Report Ver. {commands.PLUGIN_RELEASE}"
 
 
 def test_footer_tag_reaches_every_embed():
@@ -211,7 +211,7 @@ def test_footer_tag_reaches_every_embed():
 def test_every_pilot_gets_a_medal_and_only_the_top_three_differ():
     import discord
     players = {f"P{i:03d}": {"credits": 100000 - i, "ucid": f"u{i}"} for i in range(70)}
-    embed = discord.Embed(title="t")
+    embed = commands.discord.Embed(title="t")
     commands._render_layout_tables(embed, {"max_pilots": 0, "show_all_pilots": True}, "R", {}, players, {}, False, None, None, None)
     lines = [l for f in embed.fields for l in f.value.splitlines()
              if l.startswith(("🥇", "🥈", "🥉", "🎖", "•"))]
@@ -355,3 +355,122 @@ def test_the_spaces_above_the_table_are_worked_out_from_the_numbers():
 
 def test_without_daily_stats_the_title_is_just_the_session_part():
     assert "Daily" not in _title(8864, 0, daily=False)
+
+
+# ── pilots with nothing scored yet but a BoB or a punishment badge are listed in Session ──
+
+def _session_text(players, cfg, pp=None, layout="S"):
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, cfg, layout, {}, players, {}, False, pp or {}, None)
+    return "\n".join(f.value for f in embed.fields)
+
+
+def _pilot(name, pts=0, **kw):
+    return name, {"credits": 100, "session_points": pts, "ucid": "u" + name, **kw}
+
+
+def test_session_lists_a_pilot_with_only_bob_or_a_punishment_badge_after_the_scorers():
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 0, bnb={"session": 2}), _pilot("Cy", 0),
+                    _pilot("Dee", 0)])
+    cfg = {"show_session_card": True, "show_punishment": True}
+    text = _session_text(players, cfg, pp={"uDee": 40})
+    assert "Ann" in text and "Bob" in text and "Dee" in text and "Cy" not in text
+    assert text.index("Ann") < text.index("Dee") < text.index("Bob")           # scorers, then punished, then BoB
+    assert "2 BoB" in text and "🔨" in text and "S: 0" not in text
+
+
+def test_session_keeps_zero_point_pilots_out_when_the_features_are_off():
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 0, bnb={"session": 2}), _pilot("Dee", 0)])
+    text = _session_text(players, {"show_session_card": False, "show_punishment": False}, pp={"uDee": 40})
+    assert "Ann" in text and "Bob" not in text and "Dee" not in text
+
+
+def test_the_punished_pilot_only_counts_in_the_table_that_carries_the_badges():
+    players = dict([_pilot("Ann", 50), _pilot("Dee", 0)])
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "RS", {}, players, {}, False, {"uDee": 40}, None)
+    rank, session = embed.fields[0].value, embed.fields[-1].value               # R carries the badges
+    assert "Dee" in rank and "🔨" in rank
+    assert "Ann" in session and "Dee" not in session
+
+
+# ── pilots only the campaign save knows (no record in Foothold_Ranks.lua) ───────────────────
+
+def test_unranked_pilots_are_added_from_the_save_with_their_ucid_and_without_credits():
+    players = {"Ann": {"credits": 500.0, "ucid": "ua", "career": {}}}
+    camp = {"Ann": 10, "Bob": 891, "Cy": 0, "Dee": 40, "Ann2": 5}
+    sess = {"Cy": {"Air": 1}, "Eve": {}}
+    added = commands.add_unranked_pilots(
+        players, camp, sess, native_ucids={"Dee": "ud"}, identities={"Bob": "ub", "Ann2": "ua"}, excluded_ucids=["ud"])
+    assert added == ["Bob", "Cy"]                         # Dee is excluded, Ann2 is Ann (same UCID), Eve has nothing
+    assert players["Bob"] == {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True, "hide_credits": True}
+    assert players["Ann"]["credits"] == 500.0 and "unranked" not in players["Ann"]
+    again = commands.add_unranked_pilots(
+        players, camp, sess, native_ucids={"Dee": "ud"}, identities={"Bob": "ub", "Ann2": "ua"}, excluded_ucids=["ud"])
+    assert again == []                                     # nothing new the second time
+
+
+def test_show_unranked_pilots_is_on_unless_switched_off():
+    assert commands._show_unranked({}) and commands._show_unranked({"show_unranked_pilots": True})
+    assert not commands._show_unranked({"show_unranked_pilots": False})
+    assert not commands._show_unranked({"show_unranked_pilots": "false"})
+
+
+def test_session_and_daily_list_an_unranked_pilot_without_a_rank_and_rank_skips_it():
+    players = {"Ann": {"credits": 500.0, "ucid": "ua", "career": {}, "session_points": 20},
+               "Bob": {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True, "hide_credits": True,
+                       "session_points": 891}}
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {}, "SR", {}, players, {"Ann": 5, "Bob": 7}, True, {}, None)
+    session, rank = embed.fields[0].value, embed.fields[1].value
+    assert "Bob" in session and "(S: 891)" in session and "Recruit" not in session.split("Bob")[1].split("\n")[0]
+    assert "**" not in session.split("Bob")[1].split("\n")[0]          # no bold rank after the name
+    assert "Bob" not in rank and "Ann" in rank
+
+
+def test_the_podium_shows_an_unranked_pilot_without_a_rank():
+    players = {"Bob": {"credits": 0.0, "ucid": "ub", "career": {}, "unranked": True}}
+    history = {"2026-09-01": [{"top": [{"name": "Bob", "points": 438, "ucid": "ub"}]}]}
+    text = commands._build_podium_table(history, players, days=0, top=1)
+    assert "Bob" in text and "438 pts" in text and "**" not in text
+
+
+# ── the punishment badge ──────────────────────────────────────────────────────────────────────
+
+def test_a_custom_icon_replaces_the_hammers_instead_of_being_repeated():
+    assert commands.get_punishment_badge(30) .endswith("🔨🔨🔨")                              # level 3 = three hammers
+    assert commands.get_punishment_badge(30, "", "🍹🍹").endswith("(30 p.p.) 🍹🍹")        # exactly what was written
+    assert commands.get_punishment_badge(0) is None
+    plain = commands.get_punishment_badge(0, "", "🔨🔨🔨", "Late", "🥁", show_points=False)
+    assert plain == "·　🥁 Late 🔨🔨🔨" and "p.p." not in plain
+    assert commands.get_punishment_badge(0, show_points=False) == "·　🧿 JAG's watch 🔨"      # the lowest level
+
+
+def test_the_badge_of_a_pilot_follows_its_points_and_its_own_look():
+    f = commands.punishment_for
+    assert f({}, 0) == (None, 0.0) and f({"punishment_icon": ""}, 0) == (None, 0.0)
+    assert f({}, 2)[0] == "·　🧿 JAG's watch (2 p.p.) 🔨"
+    own = {"punishment_pre_icon": "🥁", "punishment_label": "Rowdy", "punishment_icon": "🔨🔨🔨"}
+    assert f(own, 0) == ("·　🥁 Rowdy 🔨🔨🔨", 0.0)                                           # a look of its own is enough
+    assert f(own, 30)[0] == "·　🥁 Rowdy (30 p.p.) 🔨🔨🔨"                                   # with real points, they show
+    assert f({**own, "hook_punishment": 0}, 30) == (None, 0.0)                              # 0 = forced to none
+    assert f({**own, "hook_punishment": 12}, 0)[0] == "·　🥁 Rowdy (12 p.p.) 🔨🔨🔨"         # a points value of its own
+    for yes in (True, "x", "yes"):
+        assert f({**own, "hook_punishment": yes}, 0) == ("·　🥁 Rowdy 🔨🔨🔨", 0.0)            # no number: shown without points
+    for no in (False, "no", "off"):
+        assert f({**own, "hook_punishment": no}, 30) == (None, 0.0)
+    assert f({**own, "hook_punishment": ""}, 5)[0].endswith("(5 p.p.) 🔨🔨🔨")                # empty = real points
+
+
+def test_the_table_shows_the_badge_of_a_pilot_with_a_look_of_its_own_and_no_points():
+    own = {"punishment_pre_icon": "🥁", "punishment_label": "Rowdy", "punishment_icon": "🔨🔨🔨"}
+    players = dict([_pilot("Ann", 50), _pilot("Bob", 20, **own), _pilot("Cy", 10)])
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "S", {}, players, {}, False, {}, None)
+    text = embed.fields[0].value
+    assert text.count("🥁 Rowdy 🔨🔨🔨") == 1 and "p.p." not in text
+    assert text.index("Bob") < text.index("🥁") < text.index("Cy")                           # under Bob, not under others
+    zero = dict([_pilot("Ann", 50), _pilot("Dee", 0, **own)])                                # with nothing scored it is listed too
+    embed = commands.discord.Embed(title="t")
+    commands._render_layout_tables(embed, {"show_punishment": True}, "S", {}, zero, {}, False, {}, None)
+    assert "Dee" in embed.fields[0].value and "🥁 Rowdy" in embed.fields[0].value

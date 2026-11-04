@@ -7,6 +7,7 @@ with front-line status and pilot leaderboard. No database required.
 from __future__ import annotations
 
 import asyncio
+import copy
 import calendar
 import functools
 import importlib.util
@@ -32,14 +33,19 @@ from core import Plugin, TEventListener, utils, Status, Group, Server
 from services.bot import DCSServerBot
 
 
-from .version import __version__
+from .version import PLUGIN_RELEASE, __version__
 
 log = logging.getLogger(__name__)
 
-# Shown in every embed footer — bumped manually alongside each GitHub
-# release, independent of version.py (which DCSSB manages/reads on its own
-# terms; keeping this separate avoids the conflicts that caused).
-FH_REPORT_RELEASE = "14.6.0"
+# The release shown in every embed footer is PLUGIN_RELEASE (version.py), bumped manually
+# alongside each GitHub release. DCSServerBot reads only __version__ there, not this one.
+#
+# Bridge line, KEEP IT: a plugin older than 14.6.1 checks a downloaded release by reading this
+# exact line (and name) in commands.py, so every release must carry it, equal to PLUGIN_RELEASE,
+# for those installations to be able to update straight to it. Nothing in the code uses it (a
+# test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
+# is expected to use /fh_report upgrade.
+FH_REPORT_RELEASE = "14.7.0"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -654,6 +660,114 @@ def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
     return prev_pts > 0 and cur_pts < prev_pts * 0.5 and prev_kills > 0 and cur_kills < prev_kills
 
 
+# ── Campaign history ──────────────────────────────────────────────────────────
+# The campaigns of a Saves folder, kept in .fhc/fhr_session_history.json. A campaign is the life of one
+# Foothold save: it ends when the map changes (another save file, finished or not) or when the same file
+# is reset (see "Campaign session start" above). Each entry keeps the whole season table (Points per
+# pilot) of the last intact reading, so the final result survives Foothold emptying the file. A campaign
+# whose pilots add up to fewer points than session_history_min_points is not kept. Coming back to a
+# map whose points did not fall is the same campaign: its entry is reopened, not duplicated.
+#   entry: {"id", "file", "map", "start", "start_kind" (detected | first_seen: the start is an estimate),
+#           "session" (the session start it is tracked by), "end", "closed_by" (map | reset), "open",
+#           "players": {id: {"name", "points"}}, "total",
+#           "final" (closed by hand: never reopened by itself, see session_close)}
+
+CAMPAIGN_HISTORY_MIN_POINTS = 200
+SESSION_HISTORY_FILE = "session_history.json"           # in .fhc, written as fhr_session_history.json
+_LEGACY_SESSION_HISTORY_FILE = "campaign_history.json"  # its name in 14.6.15 to 14.6.22: read when the new one is not there yet
+_CAMPAIGN_FLUSH_EVERY = _SESSION_SEEN_EVERY      # how often a changed table is written while the campaign runs
+
+
+def _session_history_dict(raw) -> dict:
+    """The history as the code uses it, {"sessions": [...]}: the files of 14.6.15 to 14.6.23 call the list
+    "campaigns"."""
+    if isinstance(raw, dict):
+        if isinstance(raw.get("sessions"), list):
+            return raw
+        if isinstance(raw.get("campaigns"), list):
+            return {**{k: v for k, v in raw.items() if k != "campaigns"}, "sessions": raw["campaigns"]}
+    return {"sessions": []}
+
+
+async def _read_session_history(node, saves_dir: str) -> dict:
+    """The session history of a Saves folder (an empty one when there is none), reading the file it was
+    called before when the new one does not exist yet."""
+    return _session_history_dict(await _read_json(node, _fhr_path(saves_dir, SESSION_HISTORY_FILE))
+                                 or await _read_json(node, _fhr_path(saves_dir, _LEGACY_SESSION_HISTORY_FILE)))
+
+
+def _campaign_min_points(cfg: dict | None) -> int:
+    try:
+        return max(0, int((cfg or {}).get("session_history_min_points", CAMPAIGN_HISTORY_MIN_POINTS)))
+    except (TypeError, ValueError):
+        return CAMPAIGN_HISTORY_MIN_POINTS
+
+
+def _campaign_id(file: str, start: str) -> str:
+    return f"{os.path.splitext(file)[0]}@{start[:16]}"
+
+
+def _campaign_table(points: dict, names: dict, excluded=()) -> dict:
+    """{id: {"name", "points"}} of the pilots that have season points."""
+    skip = set(excluded or ())
+    return {pid: {"name": names.get(pid) or pid, "points": int(pts)}
+            for pid, pts in points.items() if pts and pts > 0 and pid not in skip}
+
+
+def _campaign_total(players: dict) -> int:
+    return sum(int(p.get("points", 0)) for p in players.values())
+
+
+def campaign_ranking(entry: dict) -> list[dict]:
+    """The pilots of a campaign, best first: [{"id", "name", "points"}]."""
+    rows = [{"id": pid, "name": p.get("name") or pid, "points": int(p.get("points", 0))}
+            for pid, p in (entry.get("players") or {}).items()]
+    return sorted(rows, key=lambda r: (-r["points"], r["name"].lower()))
+
+
+def _same_campaign(prev: dict, cur: dict) -> bool:
+    """Is `cur`, a reading of a save, the campaign whose final table was `prev`? Season points only grow,
+    so the pilots both tables have must not have lost points (10 % is forgiven for hand edits)."""
+    common = set(prev) & set(cur)
+    if not common:
+        return not prev
+    return sum(cur[i]["points"] for i in common) >= 0.9 * sum(prev[i]["points"] for i in common)
+
+
+def campaign_history_update(hist: dict, *, file: str, session: str, kind: str, now: str, table: dict,
+                            map_name: str | None, min_points: int, pending: bool = False) -> tuple[bool, bool]:
+    """Bring `hist` ({"sessions": [...]}, oldest first) up to date with one reading of the save `file`,
+    tracked by the session start `session` (ISO text). Returns (structural, dirty): an entry was opened,
+    closed, reopened or dropped (worth writing at once) / the pilots' table changed. While `pending` (a
+    reset looks likely but is not confirmed) the table is left alone, so the last intact one is kept."""
+    campaigns = hist.setdefault("sessions", [])
+    structural = dirty = False
+    cur = next((c for c in campaigns if c.get("open")), None)
+    if cur and not (cur.get("file") == file and cur.get("session") == session):
+        cur["open"] = False                                      # the campaign it was tracking is over
+        cur["end"] = session if session >= cur.get("start", "") else now
+        cur["closed_by"] = "reset" if cur.get("file") == file else "map"
+        if cur.get("total", 0) < min_points:
+            campaigns.remove(cur)
+        cur, structural = None, True
+    if cur is None:
+        back = next((c for c in reversed(campaigns) if c.get("file") == file and not c.get("final")), None)
+        if back and _same_campaign(back.get("players") or {}, table):
+            back.update(open=True, end=None, closed_by=None, session=session)
+            cur = back
+        else:
+            cur = {"id": _campaign_id(file, session), "file": file, "map": "", "start": session,
+                   "start_kind": kind, "session": session, "end": None, "closed_by": None, "open": True,
+                   "players": {}, "total": 0}
+            campaigns.append(cur)
+        structural = True
+    if map_name:
+        cur["map"] = map_name
+    if table and not pending and cur.get("players") != table:
+        cur["players"], cur["total"], dirty = table, _campaign_total(table), True
+    return structural, dirty
+
+
 _unsupported_version_warned: set[str] = set()
 def _node_name(server) -> str:
     """Name of the node hosting `server` ("" when it has none, as some test stand-ins)."""
@@ -747,6 +861,50 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
         }
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
+
+
+async def read_rank_identities(filepath: str, node) -> dict:
+    """{name: ucid} from the ucidToName table of Foothold_Ranks.lua, which Foothold keeps even when
+    it saves no ranked player ({} when the file cannot be read)."""
+    try:
+        content = (await node.read_file(filepath)).decode("utf-8", errors="replace")
+    except Exception:
+        return {}
+    return {name.strip(): ucid for ucid, name in _ucid_names(content)}
+
+
+def _show_unranked(cfg: dict) -> bool:
+    """show_unranked_pilots: on unless explicitly disabled (also when the key is absent)."""
+    raw = cfg.get("show_unranked_pilots")
+    return True if raw is None else _bool_cfg(raw)
+
+
+def add_unranked_pilots(players: dict, campaign_stats: dict, session_stats_raw: dict,
+                        native_ucids: dict | None = None, identities: dict | None = None,
+                        excluded_ucids: list | None = None) -> list[str]:
+    """Add to `players`, in place, the pilots that have points or stats in the campaign save but no
+    record in Foothold_Ranks.lua (Foothold keeps no ranks with RankingSystem = false, or the pilot is
+    new). They get no credits and no rank: the Rank table skips them, the Session and Daily tables list
+    them without a rank. Returns the names added."""
+    native_ucids, identities = native_ucids or {}, identities or {}
+    excluded = set(excluded_ucids or [])
+    known_ucids = {d.get("ucid") for d in players.values() if d.get("ucid")}
+    known_base = {strip_callsign(n) for n in players}
+    added = []
+    for name in dict.fromkeys([*campaign_stats, *session_stats_raw]):
+        if name in players or strip_callsign(name) in known_base:
+            continue
+        ucid = native_ucids.get(name) or identities.get(name.strip())
+        if ucid and (ucid in known_ucids or ucid in excluded):
+            continue
+        if not (campaign_stats.get(name) or session_stats_raw.get(name)):
+            continue
+        players[name] = {"credits": 0.0, "ucid": ucid, "career": {}, "unranked": True, "hide_credits": True}
+        known_base.add(strip_callsign(name))
+        if ucid:
+            known_ucids.add(ucid)
+        added.append(name)
+    return added
 
 
 # Paths whose write failure was already logged at ERROR (then DEBUG until
@@ -1155,18 +1313,66 @@ PUNISHMENT_THRESHOLDS = [
 ]
 
 def get_punishment_badge(points: float, name: str = "", custom_icon: str = "",
-                         custom_label: str = "", pre_icon: str = "") -> str | None:
-    """Returns indented badge line for a given punishment points total, or None."""
-    for min_pts, icon, label, hammers in PUNISHMENT_THRESHOLDS:
-        if points >= min_pts:
-            prefix     = f"`{name}` " if name else ""
-            used_pre   = pre_icon if pre_icon else icon
-            hammer     = custom_icon if custom_icon else "🔨"
-            gravity    = hammer * hammers
-            used_label = custom_label if custom_label else label
-            pts_str = f"({int(points)} p.p.) "
-            return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
-    return None
+                         custom_label: str = "", pre_icon: str = "", show_points: bool = True) -> str | None:
+    """Returns indented badge line for a given punishment points total, or None.
+    A custom icon is shown exactly as written (it replaces the severity hammers, it is not repeated).
+    show_points=False leaves the "(n p.p.)" out and, below the first level, still gives the badge (of the
+    lowest level) instead of None."""
+    level = next((t for t in PUNISHMENT_THRESHOLDS if points >= t[0]), None)
+    if level is None:
+        if show_points:
+            return None
+        level = PUNISHMENT_THRESHOLDS[-1]
+    _min_pts, icon, label, hammers = level
+    prefix     = f"`{name}` " if name else ""
+    used_pre   = pre_icon if pre_icon else icon
+    gravity    = custom_icon if custom_icon else "🔨" * hammers
+    used_label = custom_label if custom_label else label
+    pts_str = f"({int(points)} p.p.) " if show_points else ""
+    return f"·　{used_pre} {prefix}{used_label} {pts_str}{gravity}"
+
+
+def _is_number(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def punishment_for(data: dict, real_points: float = 0) -> tuple[str | None, float]:
+    """(badge line, points) of one pilot. `real_points` are the ones the Punishment plugin holds.
+    A pilot's data may carry a look of its own (punishment_icon, punishment_label, punishment_pre_icon): it
+    changes the badge, and with any of them present the badge appears even with no points, without the
+    "(n p.p.)". A points value of its own replaces the real ones (0 = no badge); a yes or any text instead
+    of a number shows the badge without points."""
+    icon = data.get("punishment_icon") or ""
+    label = data.get("punishment_label") or ""
+    pre = data.get("punishment_pre_icon") or ""
+    forced = data.get("hook_punishment")
+    if forced is None or (isinstance(forced, str) and not forced.strip()):
+        points = float(real_points or 0)
+    elif not _is_number(forced):
+        shown = bool(forced) and str(forced).strip().lower() not in ("false", "no", "off")
+        return (get_punishment_badge(0, "", icon, label, pre, show_points=False) if shown else None), 0.0
+    else:
+        points = float(forced)
+        if points == 0:
+            return None, 0.0
+    if points >= 1:
+        return get_punishment_badge(points, "", icon, label, pre), points
+    if icon or label or pre:
+        return get_punishment_badge(0, "", icon, label, pre, show_points=False), 0.0
+    return None, 0.0
+
+
+def _int_cfg(cfg: dict, key: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(cfg.get(key) if cfg.get(key) is not None else default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _num(v) -> float:
@@ -1180,7 +1386,16 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                         strip_callsign_flag: bool = False,
                         min3_latest_day: bool = False,
                         name_to_ucid: dict | None = None) -> str | None:
-    """Podium text: for each closing event (newest date first), the top `top`
+    """The Podium as one text (see _podium_blocks); None if there is nothing to show."""
+    blocks = _podium_blocks(history, players, days, top, strip_callsign_flag, min3_latest_day, name_to_ucid)
+    return "\n".join("\n".join(b) for b in blocks) if blocks else None
+
+
+def _podium_blocks(history: dict, players: dict, days: int, top: int,
+                   strip_callsign_flag: bool = False,
+                   min3_latest_day: bool = False,
+                   name_to_ucid: dict | None = None) -> list[list[str]]:
+    """Podium blocks, one per closing event (newest first), each a list of lines: for each closing event (newest date first), the top `top`
     positions of that day as
         __date__ (Session End)
         🥇 `Name` — **Rank** — N,NNN pts
@@ -1190,10 +1405,10 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
     name, and shown with their CURRENT name and rank; unknown players show the
     stored name without rank. min3_latest_day forces at least 3 positions on
     the newest date (used when "P" is combined with other tables).
-    Field-size limits are handled by _add_podium_field. None if nothing to show.
+    Field-size limits are handled by _add_podium_field. [] if nothing to show.
     """
     if not history:
-        return None
+        return []
 
     dates_desc = sorted(history.keys(), reverse=True)
     if days and days > 0:
@@ -1259,7 +1474,7 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                 shown   = current_name or name
                 display = strip_callsign(shown) if strip_callsign_flag else shown
                 short   = _safe_code_span(display)
-                if player_data:
+                if player_data and not player_data.get("unranked"):
                     rank = player_data.get("custom_rank") or get_rank(float(player_data.get("credits", 0)))
                     rank = _fit_rank(f"{display} — ", rank, f" — {int(pts):,} pts")
                     rank_part = f" — **{rank}**"
@@ -1282,10 +1497,285 @@ def _build_podium_table(history: dict, players: dict, days: int, top: int,
                     block.append(f"{marker} {line_body}")
             blocks.append(block)
 
-    if not blocks:
-        return None
+    return blocks
 
-    return "\n".join("\n".join(b) for b in blocks)
+
+def _discord_date(iso: str | None) -> str:
+    """A Discord date (<t:...:d>, shown in each reader's own format) from a stored UTC time; "" if unreadable."""
+    dt = _parse_utc(iso)
+    return f"<t:{int(dt.replace(tzinfo=timezone.utc).timestamp())}:d>" if dt else ""
+
+
+_MAP_LABELS = {"caucasus": "CAUCASUS", "kola": "KOLA", "syria": "SYRIA", "persiangulf": "PERSIAN GULF",
+               "sinai": "SINAI", "sinaimap": "SINAI", "iraq": "IRAK", "irak": "IRAK", "germany": "GERMANY",
+               "germanycw": "GERMANY", "normandy": "NORMANDY", "afghanistan": "AFGHANISTAN"}
+
+
+def _map_label(name: str | None) -> str:
+    """A map as the History shows it, in capitals: the names Foothold's maps go by (DCS calls them
+    PersianGulf, SinaiMap, Iraq, GermanyCW...), else the name split into words."""
+    text = str(name or "").strip()
+    key = re.sub(r"[^a-z]", "", text.lower())
+    if key in _MAP_LABELS:
+        return _MAP_LABELS[key]
+    return re.sub(r"(?<=[a-z])(?=[A-Z])|[_\s]+", " ", text).strip().upper() or "?"
+
+
+def _campaign_map(entry: dict) -> str:
+    """The map of a campaign, in capitals: the one DCSServerBot reported, else what its save file name says."""
+    if entry.get("map"):
+        return _map_label(entry["map"])
+    return _map_label(re.sub(r"(?i)^foothold_?", "", os.path.splitext(entry.get("file") or "")[0]))
+
+
+def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, top: int,
+                     strip_callsign_flag: bool = False) -> list[list[str]]:
+    """The History block: the finished campaigns, newest first, each a list of lines. The most recent shows
+    `latest_top` positions under "start → end MAP" (the start is marked ~ when it is an estimate), the
+    older ones `top` positions; one position goes on one line, "end MAP champion", like the Daily Podium. `count` = 0 lists every one recorded. Pilots are shown with their current name and rank when
+    they can be found (by UCID, then name), else as recorded, without a rank. [] if nothing to show."""
+    closed = sorted((c for c in (history or {}).get("sessions", []) if not c.get("open") and c.get("end")),
+                    key=lambda c: c["end"], reverse=True)
+    if count and count > 0:
+        closed = closed[:count]
+    medals = ["🥇", "🥈", "🥉"]
+    ucid_to_current = {d.get("ucid"): (n, d) for n, d in players.items() if d.get("ucid")}
+    players_by_base = _stripped_index(players)
+    blocks: list[list[str]] = []
+    for idx, entry in enumerate(closed):
+        lines: list[tuple[str, str]] = []
+        rows = campaign_ranking(entry)[:max(1, latest_top if idx == 0 else top)]
+        end, where = _discord_date(entry["end"]), _campaign_map(entry)
+        # What comes before the name on the visible line: "03/11/2026 MAP 🥇 " on a one-line campaign
+        # (the date shows as 10 characters), just "🥇 " on the others. The rank is cut to fit under it.
+        lead = 10 + 1 + len(where) + 1 + 3 if len(rows) == 1 else 3
+        for pos, row in enumerate(rows):
+            current_name, data = None, None
+            if row["id"] in ucid_to_current:
+                current_name, data = ucid_to_current[row["id"]]
+            if not data and row["name"] in players:
+                current_name, data = row["name"], players[row["name"]]
+            if not data:
+                found = players_by_base.get(strip_callsign(row["name"]))
+                if found is not None:
+                    current_name, data = found, players[found]
+            marker = medals[pos] if pos < 3 else "🎖️"
+            if idx > 0 and data and data.get("custom_medal"):
+                marker = data["custom_medal"]
+            shown = current_name or row["name"]
+            display = strip_callsign(shown) if strip_callsign_flag else shown
+            pts = row["points"]
+            if data and not data.get("unranked"):
+                rank = data.get("custom_rank") or get_rank(float(data.get("credits", 0)))
+                rank = _fit_rank(" " * lead + f"{display} — ", rank, f" — {pts:,} pts")
+                rank_part = f" — **{rank}**" if rank else ""
+            else:
+                rank_part = ""
+            lines.append((marker, f"{_safe_code_span(display)}{rank_part} — {pts:,} pts"))
+        if not lines:
+            continue
+        if len(lines) == 1:
+            blocks.append([f"__{end}__ {where} {lines[0][0]} {lines[0][1]}"])
+        else:
+            estimate = "~" if entry.get("start_kind") == "first_seen" else ""
+            blocks.append([f"__{estimate}{_discord_date(entry.get('start'))} → {end}__ {where}"]
+                          + [f"{m} {body}" for m, body in lines])
+    return blocks
+
+
+def _local_date(iso: str | None, tz: tzinfo):
+    dt = _parse_utc(iso)
+    return dt.replace(tzinfo=timezone.utc).astimezone(tz).date() if dt else None
+
+
+def _campaign_pilot_ids(entry: dict, text: str) -> list[str]:
+    """The pilots of a session that `text` names: their ID (UCID) exactly, or part of their name."""
+    wanted = (text or "").strip().lower()
+    return [pid for pid, p in (entry.get("players") or {}).items()
+            if wanted and (pid.lower() == wanted or wanted in (p.get("name") or "").lower())]
+
+
+# ── Campaign history: what the session_* commands do to it ────────────────────────────────────────
+# Each one raises ValueError with the sentence to show the admin when it cannot be done.
+
+def _history_entry(hist: dict, cid: str) -> dict:
+    entry = next((c for c in hist.get("sessions", []) if c.get("id") == cid), None)
+    if entry is None:
+        raise ValueError("That session is not in the history (it may have been deleted already).")
+    return entry
+
+
+def campaign_close_now(hist: dict, now: str) -> dict:
+    """End the running session by hand: it gets `now` as its end and is final, so it is not reopened by
+    itself when the save has not been reset; the next reading starts another one."""
+    entry = next((c for c in hist.get("sessions", []) if c.get("open")), None)
+    if entry is None:
+        raise ValueError("There is no running session to close.")
+    entry.update(open=False, end=now if now >= entry.get("start", "") else entry["start"], closed_by="manual", final=True)
+    return entry
+
+
+def campaign_remove(hist: dict, cid: str) -> dict:
+    """Delete a finished session from the history."""
+    entry = _history_entry(hist, cid)
+    if entry.get("open"):
+        raise ValueError("That is the session running now: close it first (session_close); a running one "
+                         "would be recorded again at the next update.")
+    hist["sessions"].remove(entry)
+    return entry
+
+
+def campaign_reopen(hist: dict, cid: str, file: str, session: str) -> tuple[dict, dict | None]:
+    """Make a finished session the running one again. It must be the one of the save being played now
+    (`file`, tracked by the session start `session`). The session running in its place, if any, is
+    dropped and its table merged in (each pilot keeps the higher score of the two). Returns (entry, dropped)."""
+    entry = _history_entry(hist, cid)
+    if entry.get("open"):
+        raise ValueError("That session is already the one running.")
+    if entry.get("file") != file:
+        raise ValueError(f"The save being played now is `{file}`, and that session belongs to "
+                         f"`{entry.get('file')}`: a session can only be reopened while its own map is running.")
+    dropped = next((c for c in hist["sessions"] if c.get("open")), None)
+    if dropped is not None:
+        hist["sessions"].remove(dropped)
+        merged = dict(entry.get("players") or {})
+        for pid, p in (dropped.get("players") or {}).items():
+            if pid not in merged or p.get("points", 0) > merged[pid].get("points", 0):
+                merged[pid] = p
+        entry["players"], entry["total"] = merged, _campaign_total(merged)
+    entry.update(open=True, end=None, closed_by=None, session=session)
+    entry.pop("final", None)
+    return entry, dropped
+
+
+def campaign_edit(hist: dict, cid: str, *, map_name: str | None = None, start: str | None = None,
+                  end: str | None = None) -> tuple[dict, list[str]]:
+    """Correct the map or the dates (ISO text, UTC) of a session. A start given by hand is exact (no ~).
+    Returns (entry, what changed)."""
+    entry = _history_entry(hist, cid)
+    if end is not None and entry.get("open"):
+        raise ValueError("The running session has no end yet: close it with session_close.")
+    new_start, new_end = start or entry.get("start"), end or entry.get("end")
+    if new_end and new_start and new_end < new_start:
+        raise ValueError("The end cannot be before the start.")
+    changes = []
+    if map_name:
+        label, was = _map_label(map_name), _campaign_map(entry)
+        if label != was:
+            changes.append(f"map {was} → {label}")
+            entry["map"] = label
+    if start and start != entry.get("start"):
+        changes.append("start date")
+        entry["start"], entry["start_kind"] = start, "detected"
+    if end and end != entry.get("end"):
+        changes.append("end date")
+        entry["end"] = end
+    return entry, changes
+
+
+def campaign_filter(history: dict, *, map_name: str = "", date_from=None, date_to=None, pilot: str = "",
+                    tz: tzinfo = timezone.utc) -> list[dict]:
+    """The finished sessions that pass the filters, oldest first: on this map (part of its name), ended
+    between two dates (inclusive, in the time zone `tz`), and with this pilot in them."""
+    wanted_map = (map_name or "").strip().lower()
+    out = []
+    for c in (history or {}).get("sessions", []):
+        if c.get("open") or not c.get("end"):
+            continue
+        if wanted_map and wanted_map not in _campaign_map(c).lower():
+            continue
+        end = _local_date(c["end"], tz)
+        if (date_from and end < date_from) or (date_to and end > date_to):
+            continue
+        if pilot and not _campaign_pilot_ids(c, pilot):
+            continue
+        out.append(c)
+    return sorted(out, key=lambda c: c["end"])
+
+
+def campaign_champions(campaigns: list[dict]) -> list[dict]:
+    """Per pilot over these sessions: how many they played, won (first place), finished on the podium
+    (first three) and their best score. Most wins first. The name is the one of their latest session."""
+    stats: dict = {}
+    for c in sorted(campaigns, key=lambda c: c.get("end") or ""):
+        for pos, row in enumerate(campaign_ranking(c), 1):
+            s = stats.setdefault(row["id"], {"id": row["id"], "name": row["name"], "played": 0, "wins": 0,
+                                             "podiums": 0, "best": 0, "best_map": ""})
+            s["name"] = row["name"]
+            s["played"] += 1
+            s["wins"] += pos == 1
+            s["podiums"] += pos <= 3
+            if row["points"] > s["best"]:
+                s["best"], s["best_map"] = row["points"], _campaign_map(c)
+    return sorted(stats.values(), key=lambda s: (-s["wins"], -s["podiums"], -s["best"], s["name"].lower()))
+
+
+def campaign_pilot_history(campaigns: list[dict], pilot: str) -> list[dict]:
+    """What the pilot `pilot` names did in each of these sessions, oldest first:
+    [{"entry", "name", "position", "of", "points"}]."""
+    out = []
+    for c in sorted(campaigns, key=lambda c: c.get("end") or ""):
+        ids = set(_campaign_pilot_ids(c, pilot))
+        for pos, row in enumerate(campaign_ranking(c), 1):
+            if row["id"] in ids:
+                out.append({"entry": c, "name": row["name"], "position": pos, "of": len(c["players"]),
+                            "points": row["points"]})
+                break
+    return out
+
+
+def _campaign_length(entry: dict) -> str:
+    start, end = _parse_utc(entry.get("start")), _parse_utc(entry.get("end"))
+    if not (start and end and end >= start):
+        return "?"
+    days, hours = (end - start).days, (end - start).seconds // 3600
+    return f"{days} d {hours} h" if days else f"{hours} h"
+
+
+def _campaign_label(entry: dict, tz: tzinfo = timezone.utc) -> str:
+    """"Syria · 12-10-2026 → 03-11-2026" (the end is "running" for the session in progress)."""
+    start, end = _local_date(entry.get("start"), tz), _local_date(entry.get("end"), tz)
+    estimate = "~" if entry.get("start_kind") == "first_seen" else ""
+    return (f"{_campaign_map(entry)} · {estimate}{_fmt_date(start) if start else '?'} → "
+            f"{_fmt_date(end) if end else 'running'}")
+
+
+def _campaign_detail_lines(entry: dict, top: int, pilot: str = "") -> list[str]:
+    """The table of one session, best first: the first `top` pilots, then the pilot asked for if outside them."""
+    ranking = campaign_ranking(entry)
+    medals = ["🥇", "🥈", "🥉"]
+
+    def line(pos: int, row: dict) -> str:
+        return f"{medals[pos - 1] if pos <= 3 else f'`{pos}.`'} {_safe_code_span(row['name'])} — {row['points']:,} pts"
+    lines = [line(pos, row) for pos, row in enumerate(ranking[:top], 1)]
+    if pilot:
+        ids = set(_campaign_pilot_ids(entry, pilot))
+        lines += ["…"] * bool(len(ranking) > top) + [line(pos, row) for pos, row in enumerate(ranking, 1)
+                                                      if pos > top and row["id"] in ids]
+    return lines
+
+
+def _record_text(r: dict) -> str:
+    """"**2** wins · 3 podiums · 3 sessions · best 41,230 pts (Syria)" for one row of campaign_champions."""
+    def n(count: int, word: str) -> str:
+        return f"{count} {word}{'s' * (count != 1)}"
+    return (f"**{r['wins']}** win{'s' * (r['wins'] != 1)} · {n(r['podiums'], 'podium')} · "
+            f"{n(r['played'], 'session')} · best {r['best']:,} pts ({r['best_map']})")
+
+
+def _champion_lines(rows: list[dict], top: int) -> list[str]:
+    medals = ["🥇", "🥈", "🥉"]
+    return [f"{medals[i] if i < 3 else f'`{i + 1}.`'} {_safe_code_span(r['name'])} — {_record_text(r)}"
+            for i, r in enumerate(rows[:top])]
+
+
+def _pilot_record_lines(history: list[dict], tz: tzinfo = timezone.utc) -> list[str]:
+    lines = []
+    for h in reversed(history):                                         # newest first
+        end = _local_date(h["entry"].get("end"), tz)
+        lines.append(f"{_fmt_date(end) if end else '?'} · {_campaign_map(h['entry'])} — "
+                     f"**{h['position']}** of {h['of']} — {h['points']:,} pts")
+    return lines
 
 
 def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
@@ -1305,7 +1795,7 @@ def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
     return chunks
 
 
-def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None:
+def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str, name: str = "Daily Podium") -> None:
     """Add the Podium text as one or more fields (1024-char field limit),
     respecting Discord's 25-fields-per-embed cap: if it doesn't fit, the
     listing is truncated with a "+ N more" note, keeping room for the
@@ -1314,8 +1804,8 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
     MAX_EMBED_FIELDS    = DISCORD_MAX_FIELDS
     RESERVED_FOR_TRAILER = 2
 
-    title = f"{icon} __Daily Podium__"
-    cont_title = f"{icon} __Daily Podium (cont.)__"
+    title = f"{icon} __{name}__"
+    cont_title = f"{icon} __{name} (cont.)__"
     FIELD_LIMIT = 1020
     chunks = ["\n".join(c) for c in _chunk_lines(podium_text.split("\n"), FIELD_LIMIT)]
 
@@ -1339,6 +1829,104 @@ def _add_podium_field(embed: discord.Embed, icon: str, podium_text: str) -> None
 
 
 DISCORD_EMBED_LIMIT = 6000  # Discord hard limit for total embed size
+
+
+# ── /fh_report podium: typing dates and paging the answer ─────────────────────────────
+
+PODIUM_PAGE_CHARS = 3800     # text per page; with titles and footer a page stays well under Discord's 6000
+
+
+def _fmt_date(d) -> str:
+    """dd-mm-yyyy, the way dates are shown and typed."""
+    return d.strftime("%d-%m-%Y")
+
+
+def _parse_user_date(text: str | None, today):
+    """A date typed by an admin, as a `date`, or None when it cannot be read. Accepted:
+    dd-mm-yyyy (also with / or . or no separator: 25122026), dd-mm-yy, dd-mm (this year),
+    yyyy-mm-dd, `today`, `yesterday` and `Nd` (N days ago, e.g. 7d)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t == "today":
+        return today
+    if t == "yesterday":
+        return today - timedelta(days=1)
+    m = re.fullmatch(r"(\d{1,4})\s*d", t)
+    if m:
+        try:
+            return today - timedelta(days=int(m.group(1)))
+        except OverflowError:
+            return None
+    m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t)               # yyyy-mm-dd
+    if m:
+        y, mo, d = (int(x) for x in m.groups())
+    else:
+        m = re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})(?:[-/. ](\d{4}|\d{2}))?", t)   # dd-mm[-yyyy|-yy]
+        if m:
+            d, mo = int(m.group(1)), int(m.group(2))
+            y = m.group(3)
+            y = today.year if y is None else (int(y) + 2000 if len(y) == 2 else int(y))
+        else:
+            m = re.fullmatch(r"(\d{2})(\d{2})(\d{4})", t)                          # ddmmyyyy
+            if not m:
+                return None
+            d, mo, y = (int(x) for x in m.groups())
+    try:
+        return datetime(y, mo, d).date()
+    except ValueError:
+        return None
+
+
+def _podium_pages(blocks: list[list[str]], limit: int = PODIUM_PAGE_CHARS) -> list[str]:
+    """Pack Podium blocks (one per day/event) into pages of at most about `limit` characters,
+    never splitting a block unless it is longer than a page by itself."""
+    pages, cur, size = [], [], 0
+    for block in blocks:
+        n = sum(len(line) + 1 for line in block)
+        if cur and size + n > limit:
+            pages.append("\n".join("\n".join(b) for b in cur))
+            cur, size = [], 0
+        cur.append(block)
+        size += n
+    if cur:
+        pages.append("\n".join("\n".join(b) for b in cur))
+    return pages
+
+
+class _PodiumView(discord.ui.View):
+    """Previous / Next over the pages of a long Podium. Anyone who can see the message can press
+    the buttons (in a public channel the page changes for everybody)."""
+
+    def __init__(self, embeds: list):
+        super().__init__(timeout=300)
+        self.embeds, self.index = embeds, 0
+        self.message = None              # the message that carries this view, set once sent
+        self._sync()
+
+    def _sync(self) -> None:
+        self.previous.disabled = self.index <= 0
+        self.next.disabled = self.index >= len(self.embeds) - 1
+
+    async def _go(self, interaction: discord.Interaction, step: int) -> None:
+        self.index = max(0, min(len(self.embeds) - 1, self.index + step))
+        self._sync()
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button):
+        await self._go(interaction, -1)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button):
+        await self._go(interaction, +1)
+
+    async def on_timeout(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
 
 
 _pilot_cap_warned: set[str] = set()
@@ -1467,7 +2055,7 @@ def _build_pilot_card(career: dict, icon: str = "🔸", bnb: int = 0) -> str | N
     if kills > 0:      parts.append(f"{kills} Kills")
     if traps > 0:      parts.append(f"{traps} Traps")
     if refuel_lbs > 0: parts.append(f"{_fmt_compact(refuel_lbs)} lbs")
-    if bnb > 0:        parts.append(f"BoB: {bnb}")   # penultimate, never dropped
+    if bnb > 0:        parts.append(f"{bnb} BoB")   # penultimate, never dropped
     if deaths > 0:     parts.append(f"{deaths} Deaths")
 
     if not parts:
@@ -1534,7 +2122,7 @@ def _build_session_card(raw_stats: dict, icon: str = "🔸", bnb: int = 0) -> st
         (5, f"{ship} Ship") if ship > 0 else None,
         (6, f"{rescues} Resc") if rescues > 0 else None,
         (7, f"{refuels} Refuels") if refuels > 0 else None,
-        (8, f"BoB: {bnb}") if bnb > 0 else None,
+        (8, f"{bnb} BoB") if bnb > 0 else None,
         (9, f"{deaths} Death" + ("s" if deaths != 1 else "")) if deaths > 0 else None,
     ]
     candidates = [c for c in candidates if c is not None]
@@ -1921,6 +2509,7 @@ def _render_layout_tables(
     embed: discord.Embed, cfg: dict, report_layout: str, points_detail: dict,
     players: dict, dp: dict, has_daily: bool, punishment_points: dict | None,
     daily_history: dict | None, name_to_ucid: dict | None = None,
+    campaign_history: dict | None = None,
 ) -> None:
     """Render every table/Podium named in report_layout, in order, onto
     embed (table options read from `cfg`). `points_detail` is a dict
@@ -1956,7 +2545,21 @@ def _render_layout_tables(
 
     pp = punishment_points or {}
 
+    def _real_points(data: dict) -> float:
+        ucid = data.get("ucid")
+        return pp.get(ucid, 0) if (pp and ucid) else 0
+
     for letter in layout:
+        if letter == "H":
+            blocks = _campaign_blocks(
+                campaign_history or {}, players,
+                count=_int_cfg(cfg, "session_history_count", 3, 0, 1000),
+                latest_top=_int_cfg(cfg, "session_history_latest_top", 3, 1, 3),
+                top=_int_cfg(cfg, "session_history_top", 1, 1, 3),
+                strip_callsign_flag=strip_callsign_flag)
+            if blocks:
+                _add_podium_field(embed, "🏁", "\n".join("\n".join(b) for b in blocks), "Session History")
+            continue
         if letter == "P":
             if layout == "P":
                 p_lines = _build_podium_table(
@@ -1986,6 +2589,20 @@ def _render_layout_tables(
         elif role == "S":
             items = [(n, d) for n, d in players.items() if d.get("session_points", 0) > 0]
             items.sort(key=lambda x: x[1].get("session_points", 0), reverse=True)
+            # Pilots with nothing scored yet but something to show on their line (their BoB
+            # in the session card, a punishment badge) come last, so that is never hidden.
+            listed = {n for n, _ in items}
+            extras = []
+            for n, d in players.items():
+                if n in listed:
+                    continue
+                bob = (d.get("bnb") or {}).get("session", 0) if show_session_card else 0
+                badge, pun = (punishment_for(d, _real_points(d))
+                              if (show_punishment and role == badge_role and not badge_role_done) else (None, 0))
+                if bob > 0 or badge:
+                    extras.append((n, d, pun, bob))
+            extras.sort(key=lambda x: (-x[2], -x[3]))
+            items += [(n, d) for n, d, _, _ in extras]
         else:  # D
             items = [(n, d) for n, d in players.items() if dp.get(n, 0) > 0 or d.get("daily_stats")]
             items.sort(key=lambda x: dp.get(x[0], 0), reverse=True)
@@ -2023,8 +2640,11 @@ def _render_layout_tables(
             parts = [metrics[c] for c in order if metrics.get(c)]
             pts_str = f"({'  ·  '.join(parts)})" if parts else ""
 
-            rank  = _fit_rank(f"{short_src} — ", rank, f" {pts_str}")
-            block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
+            if data.get("unranked"):          # only the campaign save knows this pilot: no rank to show
+                block = [f"{medal} {short} {pts_str}".rstrip()]
+            else:
+                rank  = _fit_rank(f"{short_src} — ", rank, f" {pts_str}")
+                block = [f"{medal} {short} — **{rank}** {pts_str}".rstrip()]
 
             if show_pilot_card and role == "R":
                 card = _build_pilot_card(data.get("career") or {}, icon=pilot_card_icon,
@@ -2043,17 +2663,7 @@ def _render_layout_tables(
                     block.append(d_card)
 
             if show_punishment and role == badge_role and not badge_role_done:
-                ucid = data.get("ucid")
-                if "hook_punishment" in data:
-                    pts = data["hook_punishment"]
-                elif pp and ucid:
-                    pts = pp.get(ucid, 0)
-                else:
-                    pts = 0
-                badge = get_punishment_badge(
-                    pts, "", data.get("punishment_icon", ""),
-                    data.get("punishment_label", ""), data.get("punishment_pre_icon", "")
-                )
+                badge, _pts = punishment_for(data, _real_points(data))
                 if badge:
                     block.append(badge)
 
@@ -2117,6 +2727,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
                 daily_stats_raw: dict | None = None,
                 punishment_points: dict | None = None,
                 daily_history: dict | None = None,
+                campaign_history: dict | None = None,
                 waypoint_map: dict | None = None,
                 name_to_ucid: dict | None = None,
                 map_name: str | None = None,
@@ -2218,7 +2829,7 @@ def build_embed(zones: dict, players: dict, cfg: dict, *,
 
     _render_layout_tables(
         embed, cfg, report_layout, points_detail, players, dp, has_daily,
-        punishment_points, daily_history, name_to_ucid,
+        punishment_points, daily_history, name_to_ucid, campaign_history,
     )
 
     return _finish_embed(embed, cfg, where)
@@ -2258,9 +2869,9 @@ def _version_text(where: str | None = None) -> str:
     """How the version is written in the embed footers; `where` (M = the server runs
     on the Master, N = on a remote node) is added only on a cluster of several nodes.
     A newer stable release, when one was found, is added at the end."""
-    text = f"Fh_Report Ver. {FH_REPORT_RELEASE}" + (f" • {where}" if where else "")
+    text = f"Fh_Report Ver. {PLUGIN_RELEASE}" + (f" • {where}" if where else "")
     new = _release_version(_NEW_RELEASE)
-    if new and new > (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+    if new and new > (_release_version(PLUGIN_RELEASE) or (0, 0, 0)):
         text += f" · 📣 Ver. {_NEW_RELEASE} available"
     return text
 
@@ -2786,14 +3397,14 @@ def _pick_release(releases: list, current: tuple[int, int, int], stable_only: bo
 
 
 def _zip_version(files: dict[str, bytes]) -> str | None:
-    m = re.search(rb'^FH_REPORT_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/commands.py"], re.MULTILINE)
+    m = re.search(rb'^PLUGIN_RELEASE\s*=\s*"([^"]+)"', files["plugins/fh_report/version.py"], re.MULTILINE)
     return m.group(1).decode() if m else None
 
 
 def _read_release_zip(data: bytes, version_text: str | None = None) -> dict[str, bytes]:
     """The plugin's files out of GitHub's zip of a tag (everything sits under one folder named
     after the repository and commit). Only the expected files are taken, the rest of the
-    repository is ignored; every .py must compile and commands.py must announce the tag's version."""
+    repository is ignored; every .py must compile and version.py must announce the tag's version."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         entries = [i.filename for i in zf.infolist() if not i.is_dir()]
@@ -2846,7 +3457,7 @@ def _install_release_files(plugin_dir: str, files: dict[str, bytes]) -> str:
                 old[name] = f.read()
     os.makedirs(backup, exist_ok=True)
     with open(os.path.join(backup, "RESTORE.txt"), "w", encoding="utf-8") as f:
-        f.write(_RESTORE_TEXT.format(version=FH_REPORT_RELEASE))
+        f.write(_RESTORE_TEXT.format(version=PLUGIN_RELEASE))
     for name, content in old.items():
         os.makedirs(os.path.dirname(os.path.join(backup, name)), exist_ok=True)
         with open(os.path.join(backup, name), "wb") as f:
@@ -3024,6 +3635,39 @@ class _RestartView(discord.ui.View):
             pass
 
 
+class _ConfirmView(discord.ui.View):
+    """Confirm / Cancel under a question; only who asked can press. `action` is an async function that
+    does the work and returns the sentence to show."""
+
+    def __init__(self, user_id: int, action):
+        super().__init__(timeout=90)
+        self.user_id, self.action, self.message = user_id, action, None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return getattr(interaction.user, "id", None) == self.user_id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button):
+        self.stop()
+        try:
+            text = await self.action()
+        except Exception as e:                                  # ValueError carries a sentence meant for the admin
+            text = f"❌ {e}"
+        await interaction.response.edit_message(content=text, embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled, nothing was changed.", embed=None, view=None)
+
+    async def on_timeout(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(content="That question expired, nothing was changed.", view=None)
+            except Exception:
+                pass
+
+
 class Fh_Report(Plugin):
     """DCSServerBot plugin — posts Foothold campaign status to Discord.
     Supports multiple server instances defined in fh_report.yaml.
@@ -3040,6 +3684,8 @@ class Fh_Report(Plugin):
         self._cycle_punishment: dict | None = None
         self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
         self._campaign_watch: dict[str, dict] = {}   # saves_dir -> last intact reading, for _update_session
+        self._session_state: dict[str, dict] = {}    # saves_dir -> the session start found by _update_session
+        self._campaign_cache: dict[str, dict] = {}   # saves_dir -> its campaign history, as last read or written
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -3626,6 +4272,7 @@ class Fh_Report(Plugin):
         elif old:
             st = {k: old[k] for k in ("file", "start", "kind")}
         self._campaign_watch[saves_key] = watch
+        self._session_state[saves_key] = dict(st)
 
         stale = not raw or now - (_parse_utc(raw.get("seen")) or now) >= _SESSION_SEEN_EVERY
         if reset or not old or raw.get("start") != st["start"] or raw.get("file") != st["file"] or (stale and not watch["pending"]):
@@ -3635,6 +4282,47 @@ class Fh_Report(Plugin):
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)
         return _session_start_for(st, cfg or {}, self._reset_tz(server))
+
+    async def _campaign_cache_for(self, source_node, saves_dir: str) -> dict:
+        """The campaign history of a Saves folder as the updater holds it: {"hist", "flushed", "dirty"},
+        read from the file the first time."""
+        saves_key = _saves_key(source_node, saves_dir)
+        cache = self._campaign_cache.get(saves_key)
+        if cache is None:
+            hist = await _read_session_history(source_node, saves_dir)
+            cache = self._campaign_cache[saves_key] = {"hist": hist, "flushed": None, "dirty": False}
+        return cache
+
+    async def _write_campaign_cache(self, source_node, saves_dir: str, cache: dict, now: datetime) -> None:
+        await _ensure_fhc_dir(source_node, saves_dir)
+        data = {"version": 1, **cache["hist"]}
+        if await write_bytes_to_node(source_node, _fhr_path(saves_dir, SESSION_HISTORY_FILE),
+                                     json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"), log=self.log):
+            cache["flushed"], cache["dirty"] = now, False
+
+    async def _track_campaign(self, server, saves_dir: str, source_node, campaign_by_id: dict, names: dict,
+                              cfg: dict, map_name: str | None) -> None:
+        """Keep .fhc/fhr_session_history.json current (see "Campaign history"). Runs right after
+        _update_session, whose session start tells which campaign this reading belongs to. A failure here
+        never stops the report."""
+        try:
+            saves_key = _saves_key(source_node, saves_dir)
+            st = self._session_state.get(saves_key)
+            if not st:
+                return
+            cache = await self._campaign_cache_for(source_node, saves_dir)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            pending = bool((self._campaign_watch.get(saves_key) or {}).get("pending"))
+            table = _campaign_table(campaign_by_id, names, cfg.get("excluded_ucids") or [])
+            structural, dirty = campaign_history_update(
+                cache["hist"], file=st["file"], session=st["start"], kind=st["kind"], now=now.strftime(_SESSION_ISO),
+                table=table, map_name=map_name, min_points=_campaign_min_points(cfg), pending=pending)
+            cache["dirty"] = cache["dirty"] or dirty
+            due = cache["flushed"] is None or now - cache["flushed"] >= _CAMPAIGN_FLUSH_EVERY
+            if structural or (cache["dirty"] and due):
+                await self._write_campaign_cache(source_node, saves_dir, cache, now)
+        except Exception as e:
+            self.log.debug(f"Fh_Report [{server.instance.name}]: campaign history not updated: {e!r}")
 
     async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
@@ -3722,15 +4410,16 @@ class Fh_Report(Plugin):
         return bnb, penalties
 
     async def _fetch_punishment_points(self) -> dict:
-        """Fetch total punishment points per UCID from pu_events table."""
+        """Total punishment points per UCID from pu_events. A forgiven or decayed pilot has negative
+        rows that offset the positive ones, so the rows are summed first and only a positive total counts."""
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
-                        SELECT init_id, COALESCE(SUM(points), 0) AS total
+                        SELECT init_id, SUM(points) AS total
                         FROM pu_events
-                        WHERE points > 0
                         GROUP BY init_id
+                        HAVING SUM(points) > 0
                     """)
                     rows = await cur.fetchall()
                     return {row[0]: float(row[1]) for row in rows}
@@ -3829,6 +4518,8 @@ class Fh_Report(Plugin):
                 players = _fh_hook.post_process(players, cfg, hook_name, campaign_stats)
             except Exception as e:
                 self.log.debug(f"Fh_Report [{instance_name}]: fh_hook.post_process failed: {e}")
+        players = await self._with_unranked(players, cfg, campaign_stats, session_stats_raw,
+                                            name_to_ucid_native, ranks_file, node)
 
         show_punishment   = _bool_cfg(cfg.get("show_punishment"))
         punishment_points = {}
@@ -3873,6 +4564,10 @@ class Fh_Report(Plugin):
         session = await self._update_session(
             server, saves_dir, node, source_node, persistence_file, campaign_by_id,
             {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()}, cfg)
+        rank_names = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
+        await self._track_campaign(
+            server, saves_dir, source_node, campaign_by_id,
+            {pid: rank_names.get(pid) or names_by_id.get(pid) or pid for pid in campaign_by_id}, cfg, map_name)
         bnb = {}
         if _show_bob(cfg) and any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
             bnb = await self._fetch_bnb(
@@ -3882,6 +4577,10 @@ class Fh_Report(Plugin):
         current_layout, current_detail = self._resolve_report_layout(instance_name, cfg)
         daily_history_data = (await self._load_daily_history(saves_dir, source_node, cleanup=True)
                               if "P" in current_layout else None)
+        campaign_history_data = None
+        if "H" in current_layout:
+            cached = self._campaign_cache.get(_saves_key(source_node, saves_dir))
+            campaign_history_data = (cached or {}).get("hist") or await _read_session_history(source_node, saves_dir)
 
         # Waypoint ordering: dump WaypointList (in-memory only) via hot injection
         # when the shared cache is missing or a campaign restart was detected —
@@ -3920,6 +4619,7 @@ class Fh_Report(Plugin):
             daily_stats_raw   = _by_display_name(daily_stats, players, names_by_id, u2rn),
             punishment_points = punishment_points,
             daily_history     = daily_history_data,
+            campaign_history  = campaign_history_data,
             waypoint_map      = waypoint_map,
             # Full name -> UCID map for this cycle (every past name each
             # player has had, plus current ones) — lets the Podium identify
@@ -4400,6 +5100,9 @@ class Fh_Report(Plugin):
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading campaign files:\n```{e}```", ephemeral=True)
             return
+        players = await self._report_players(srv, saves_dir, node, players, cfg, campaign_stats)
+        players = await self._with_unranked(players, cfg, campaign_stats, session_stats_raw,
+                                            name_to_ucid_native, ranks_file, node)
 
         last_seen = None
         if player_name:
@@ -4562,7 +5265,7 @@ class Fh_Report(Plugin):
         """The release to offer, or None when the installed one is the newest."""
         releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
                                         as_json=True)
-        return _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0))
+        return _pick_release(releases, _release_version(PLUGIN_RELEASE) or (0, 0, 0))
 
     @staticmethod
     def _latest_release_file() -> str:
@@ -4601,7 +5304,7 @@ class Fh_Report(Plugin):
         try:
             releases = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/releases?per_page=15",
                                             as_json=True)
-            rel = _pick_release(releases, _release_version(FH_REPORT_RELEASE) or (0, 0, 0), stable_only=True)
+            rel = _pick_release(releases, _release_version(PLUGIN_RELEASE) or (0, 0, 0), stable_only=True)
         except Exception as e:
             self.log.debug(f"Fh_Report: could not look for a new release: {e!r}")
             return
@@ -4618,7 +5321,7 @@ class Fh_Report(Plugin):
         data = await self._http_get(f"https://api.github.com/repos/{UPGRADE_REPO}/zipball/dev")
         text = _zip_version(_read_release_zip(data))
         version = _release_version(text)
-        if not version or version <= (_release_version(FH_REPORT_RELEASE) or (0, 0, 0)):
+        if not version or version <= (_release_version(PLUGIN_RELEASE) or (0, 0, 0)):
             return None
         return {"channel": "dev", "version": version, "text": text, "tag": "dev", "prerelease": True,
                 "notes": "", "data": data}
@@ -4674,7 +5377,7 @@ class Fh_Report(Plugin):
             self._later(30, interaction.delete_original_response)
             return
         self.__dict__["_upgrading"] = False
-        self.log.info(f"Fh_Report: updated {FH_REPORT_RELEASE} -> {release['text']} (restart pending).")
+        self.log.info(f"Fh_Report: updated {PLUGIN_RELEASE} -> {release['text']} (restart pending).")
         view = _RestartView(self, interaction.user.id, release["text"])
         view.interaction = interaction
         await say(f"✅ Updated to Ver. {release['text']}." + (f" ⚠️ {note}." if note else "")
@@ -4741,12 +5444,12 @@ class Fh_Report(Plugin):
             if not isinstance(data, dict) or time.time() - float(data["created"]) > 14 * 60:
                 return                                   # too old: Discord no longer accepts its token
             expected = str(data["expected"])
-            if expected == FH_REPORT_RELEASE:
+            if expected == PLUGIN_RELEASE:
                 text = (f"✅ DCSServerBot has been updated successfully.\n"
-                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is now running.")
+                        f"Fh_Report Ver. {PLUGIN_RELEASE} is now running.")
             else:
                 text = (f"⚠️ DCSServerBot restarted, but the update was not applied.\n"
-                        f"Fh_Report Ver. {FH_REPORT_RELEASE} is running (Ver. {expected} was expected).")
+                        f"Fh_Report Ver. {PLUGIN_RELEASE} is running (Ver. {expected} was expected).")
             hook = self._notice_webhook(data["app_id"], data["token"])
             last_error = None
             # The message is the one the "Restart now" button sat on: "@original" for that button's
@@ -4783,12 +5486,12 @@ class Fh_Report(Plugin):
             dev = None                  # the release is as new (or newer) and more stable: no point in offering dev
         if release is None and dev is None:
             text = (f"❌ {' '.join(notes)}" if notes else
-                    f"✅ You already have the newest version (Ver. {FH_REPORT_RELEASE}).")
+                    f"✅ You already have the newest version (Ver. {PLUGIN_RELEASE}).")
             await self._reply_temporarily(interaction, text, delay=30 if notes else 10)
             return
         view = _UpgradeView(self, interaction.user.id, release, dev)
         view.interaction = interaction
-        await interaction.followup.send(embed=_upgrade_embed(FH_REPORT_RELEASE, release, dev, notes),
+        await interaction.followup.send(embed=_upgrade_embed(PLUGIN_RELEASE, release, dev, notes),
                                         view=view, ephemeral=True)
 
     @fh_report.command(name="update", description="Admin only: refresh the report embed now, even if the mission is paused or stopped.")
@@ -4836,16 +5539,80 @@ class Fh_Report(Plugin):
         link = f" {channel.get_partial_message(mid).jump_url}" if mid else ""
         await self._reply_temporarily(interaction, f"✅ Report of **{name}** updated.{link}", ok=True)
 
+    async def _with_unranked(self, players: dict, cfg: dict, campaign_stats: dict, session_stats_raw: dict,
+                             native_ucids: dict, ranks_file: str, node) -> dict:
+        """`players` plus the pilots only the campaign save knows (see add_unranked_pilots), when
+        show_unranked_pilots is on."""
+        if not _show_unranked(cfg):
+            return players
+        identities = await read_rank_identities(ranks_file, node)
+        added = add_unranked_pilots(players, campaign_stats, session_stats_raw, native_ucids, identities,
+                                    cfg.get("excluded_ucids") or [])
+        if added:
+            self.log.debug(f"Fh_Report: {len(added)} pilot(s) listed without a rank (no record in Foothold_Ranks.lua)")
+        return players
+
+    async def _report_players(self, srv, saves_dir: str, node, players: dict, cfg: dict,
+                              campaign_stats: dict | None = None) -> dict:
+        """The roster with the same adjustments the report applies to it (they need the campaign
+        points of the current save, read here unless the caller already has them). The leading
+        emoji of each line is left at its default."""
+        if not (players and _HAS_HOOK):
+            return players
+        if campaign_stats is None:
+            campaign_stats = {}
+            try:
+                persistence_file = await find_persistence_file(saves_dir, node)
+                if persistence_file:
+                    campaign_stats = (await parse_player_stats(persistence_file, node))[0]
+            except Exception as e:
+                self.log.debug(f"Fh_Report: campaign points not available for the roster: {e}")
+        try:
+            players = _fh_hook.post_process(players, cfg, srv.instance.name, campaign_stats)
+        except Exception as e:
+            self.log.debug(f"Fh_Report: roster adjustments failed: {e}")
+        for data in players.values():
+            if isinstance(data, dict):
+                data.pop("custom_medal", None)
+        return players
+
+    async def _autocomplete_podium_date(self, interaction: discord.Interaction,
+                                        current: str) -> list[app_commands.Choice[str]]:
+        """Suggestions for date_from / date_to: what is typed (read as a date), then handy days."""
+        server_param = getattr(interaction.namespace, "server", None)
+        name, _ = self._resolve_server(interaction, server_param)
+        srv = self._server_by_key(name) if name else None
+        today = datetime.now(self._reset_tz(srv) if srv else timezone.utc).date()
+        typed = (current or "").strip()
+        choices, seen = [], set()
+
+        def add(label: str, d) -> None:
+            text = _fmt_date(d)
+            if text not in seen:
+                seen.add(text)
+                choices.append(app_commands.Choice(name=f"{label} ({text})" if label else text, value=text))
+        read = _parse_user_date(typed, today) if typed else None
+        if read:
+            add("", read)
+        for label, d in (("Today", today), ("Yesterday", today - timedelta(days=1)),
+                         ("7 days ago", today - timedelta(days=7)), ("30 days ago", today - timedelta(days=30)),
+                         ("First day of this month", today.replace(day=1))):
+            if not typed or typed.lower() in label.lower() or typed in _fmt_date(d):
+                add(label, d)
+        return choices[:25]
+
     @fh_report.command(name="podium", description="Show who held a given daily-history position between two dates.")
     @app_commands.describe(
-        date_from="Start date (YYYY-MM-DD)",
-        date_to="End date (YYYY-MM-DD)",
-        top="Show the top N positions for each day (1-50)",
+        date_from="Start date: dd-mm-yyyy, today, yesterday or 7d (default: date_to, or today)",
+        date_to="End date: dd-mm-yyyy, today, yesterday or 7d (default: today)",
+        top="Show the top N positions for each day (1-50, default 3)",
         _server="Which server — only needed if more than one is configured."
     )
+    @app_commands.autocomplete(date_from=_autocomplete_podium_date, date_to=_autocomplete_podium_date)
     @app_commands.rename(_server="server")
     async def podium(self, interaction: discord.Interaction,
-                     date_from: str, date_to: str, top: app_commands.Range[int, 1, 50],
+                     date_from: str | None = None, date_to: str | None = None,
+                     top: app_commands.Range[int, 1, 50] = 3,
                      _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
         # See player()'s comment above on why this is `_server` + rename,
         # not a plain `server` parameter.
@@ -4854,26 +5621,37 @@ class Fh_Report(Plugin):
             return
         server, srv, cfg, saves_dir, node, ephemeral = ctx
 
-        try:
-            d_from = datetime.strptime(date_from.strip(), "%Y-%m-%d").date()
-            d_to   = datetime.strptime(date_to.strip(), "%Y-%m-%d").date()
-        except ValueError:
-            await interaction.followup.send(
-                "❌ Invalid date format — use `YYYY-MM-DD` for both `date_from` and `date_to` "
-                "(e.g. `2026-08-01`).", ephemeral=True)
-            return
-        if d_from > d_to:
-            await interaction.followup.send(
-                "❌ `date_from` must not be after `date_to`.", ephemeral=True)
-            return
+        today = datetime.now(self._reset_tz(srv)).date()
+        for label, text in (("date_from", date_from), ("date_to", date_to)):
+            if (text or "").strip() and _parse_user_date(text, today) is None:
+                await interaction.followup.send(
+                    f"❌ I couldn't read `{text}` as `{label}`. Use `dd-mm-yyyy` (e.g. `25-12-2026`), "
+                    "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
+                return
+        given_from, given_to = (date_from or "").strip(), (date_to or "").strip()
 
         try:
             history = await self._load_daily_history(saves_dir, node)
         except Exception as e:
             await interaction.followup.send(f"❌ Error reading daily history:\n```{e}```", ephemeral=True)
             return
+        recorded = []
+        for date_str in history:
+            try:
+                recorded.append(datetime.strptime(date_str, "%Y-%m-%d").date())
+            except ValueError:
+                continue
 
-        # Filter to the requested [date_from, date_to] range (inclusive)
+        if not given_from and not given_to:
+            d_from = d_to = max(recorded) if recorded else today                   # nothing typed: the latest day with data
+        else:
+            d_to = _parse_user_date(given_to, today) if given_to else today
+            d_from = _parse_user_date(given_from, today) if given_from else d_to    # only a start: up to today
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from                      # typed the other way round: no need to refuse
+        shown = _fmt_date(d_from) if d_from == d_to else f"{_fmt_date(d_from)} → {_fmt_date(d_to)}"
+
+        # Filter to the requested [d_from, d_to] range (inclusive)
         filtered_history = {}
         for date_str, events in history.items():
             try:
@@ -4884,9 +5662,15 @@ class Fh_Report(Plugin):
                 filtered_history[date_str] = events
 
         if not filtered_history:
-            await interaction.followup.send(
-                f"No history found for **{self._public_server_name(server)}** between `{date_from}` and `{date_to}`.",
-                ephemeral=True)
+            name = self._public_server_name(server)
+            if recorded:
+                note = (f" The history of this server goes from `{_fmt_date(min(recorded))}` "
+                        f"to `{_fmt_date(max(recorded))}`.")
+                if d_to >= today:
+                    note += " A day is recorded when it closes, so today is not there yet."
+            else:
+                note = " Nothing has been recorded yet: a day is recorded when it closes."
+            await interaction.followup.send(f"No history found for **{name}** for `{shown}`.{note}", ephemeral=True)
             return
 
         # Need the current roster for live rank lookups, same as the main embed
@@ -4896,26 +5680,445 @@ class Fh_Report(Plugin):
             players        = await parse_ranks(ranks_file, excluded_ucids, node)
         except Exception:
             players = {}
+        players = await self._report_players(srv, saves_dir, node, players, cfg)
 
-        podium_lines = _build_podium_table(
+        blocks = _podium_blocks(
             filtered_history, players, days=0, top=top,
             strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")),
             name_to_ucid=_unpack_daily_snapshot(await self._load_daily_snapshot(saves_dir, node)).get("name_to_ucid") or {}
         )
-        if not podium_lines:
+        if not blocks:
             await interaction.followup.send(
-                f"No history found with data for the top **{top}** position(s) between "
-                f"`{date_from}` and `{date_to}`.", ephemeral=True)
+                f"No history found with data for the top **{top}** position(s) for `{shown}`.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title=f"👑 Daily Podium — Top {top}",
-            description=f"{date_from} → {date_to}",
-            color=0xF1C40F, timestamp=datetime.now(timezone.utc)
-        )
-        _add_podium_field(embed, "👑", podium_lines)
-        embed.set_footer(text=f"{_version_text(self._where_tag(srv))} · Read-only historical report")
-        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        pages = _podium_pages(blocks)
+        footer = f"{_version_text(self._where_tag(srv))} · Read-only historical report"
+        embeds = []
+        for i, text in enumerate(pages, 1):
+            embed = discord.Embed(
+                title=f"👑 Daily Podium — Top {top}",
+                description=shown + (f" · page {i}/{len(pages)}" if len(pages) > 1 else ""),
+                color=0xF1C40F, timestamp=datetime.now(timezone.utc)
+            )
+            _add_podium_field(embed, "👑", text)
+            embed.set_footer(text=footer)
+            embeds.append(_trim_embed(embed))
+        if len(embeds) == 1:
+            await interaction.followup.send(embed=embeds[0], ephemeral=ephemeral)
+            return
+        view = _PodiumView(embeds)
+        view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=ephemeral)
+
+    # ── /fh_report campaigns ───────────────────────────────────────────────
+
+    async def _campaign_history_of(self, srv, saves_dir: str) -> dict:
+        """The session history of a server: what the updater holds in memory (it writes a changed table
+        only every quarter of an hour), else the file."""
+        cached = self._campaign_cache.get(_saves_key(srv.node, saves_dir))
+        if cached:
+            return cached["hist"]
+        hist = await _read_session_history(srv.node, saves_dir)
+        return hist
+
+    async def _campaigns_for_autocomplete(self, interaction: discord.Interaction) -> list[dict]:
+        """The recorded sessions, for the suggestions of /fh_report sessions (admins only)."""
+        try:
+            name, _ = self._resolve_server(interaction, getattr(interaction.namespace, "server", None))
+            srv = self._server_by_key(name) if name else None
+            if srv is None or not self._is_admin(interaction, name):
+                return []
+            saves_dir = await _resolve_saves_dir(srv, self._merged_cfg(name))
+            return (await self._campaign_history_of(srv, saves_dir)).get("sessions", [])
+        except Exception:
+            return []
+
+    async def _autocomplete_campaign_map(self, interaction: discord.Interaction,
+                                         current: str) -> list[app_commands.Choice[str]]:
+        maps = sorted({_campaign_map(c) for c in await self._campaigns_for_autocomplete(interaction)})
+        return [app_commands.Choice(name=m[:100], value=m[:100]) for m in maps
+                if current.lower() in m.lower()][:25]
+
+    async def _autocomplete_campaign_pilot(self, interaction: discord.Interaction,
+                                           current: str) -> list[app_commands.Choice[str]]:
+        names: dict = {}
+        for c in sorted(await self._campaigns_for_autocomplete(interaction), key=lambda c: c.get("start") or ""):
+            for pid, p in (c.get("players") or {}).items():
+                names[pid] = p.get("name") or pid                       # the latest name wins
+        return [app_commands.Choice(name=n[:100], value=pid[:100])
+                for pid, n in sorted(names.items(), key=lambda kv: kv[1].lower())
+                if current.lower() in n.lower()][:25]
+
+    async def _campaign_choices(self, interaction: discord.Interaction, current: str,
+                                closed_only: bool) -> list[app_commands.Choice[str]]:
+        tz = timezone.utc
+        try:
+            name, _ = self._resolve_server(interaction, getattr(interaction.namespace, "server", None))
+            tz = self._reset_tz(self._server_by_key(name))
+        except Exception:
+            pass
+        found = sorted((c for c in await self._campaigns_for_autocomplete(interaction)
+                        if not (closed_only and c.get("open"))), key=lambda c: c.get("start") or "", reverse=True)
+        return [app_commands.Choice(name=_campaign_label(c, tz)[:100], value=c["id"][:100]) for c in found
+                if current.lower() in _campaign_label(c, tz).lower()][:25]
+
+    # discord.py wants an autocomplete callback to take exactly (self, interaction, current): no extra parameter.
+    async def _autocomplete_campaign(self, interaction: discord.Interaction,
+                                     current: str) -> list[app_commands.Choice[str]]:
+        return await self._campaign_choices(interaction, current, closed_only=False)
+
+    async def _autocomplete_session_closed(self, interaction: discord.Interaction,
+                                           current: str) -> list[app_commands.Choice[str]]:
+        return await self._campaign_choices(interaction, current, closed_only=True)
+
+    async def _send_campaign_pages(self, interaction: discord.Interaction, srv, title: str, description: str,
+                                   pages: list[str], field_name: str) -> None:
+        footer = f"{_version_text(self._where_tag(srv))} · Read-only historical report"
+        embeds = []
+        for i, text in enumerate(pages, 1):
+            embed = discord.Embed(
+                title=title, description=description + (f" · page {i}/{len(pages)}" if len(pages) > 1 else ""),
+                color=0x3498DB, timestamp=datetime.now(timezone.utc))
+            _add_podium_field(embed, "🏁", text, field_name)
+            embed.set_footer(text=footer)
+            embeds.append(_trim_embed(embed))
+        if len(embeds) == 1:
+            await interaction.followup.send(embed=embeds[0], ephemeral=True)
+            return
+        view = _PodiumView(embeds)
+        view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
+    @fh_report.command(name="sessions", description="Admin only: the recorded sessions, with filters and the pilots' results.")
+    @app_commands.describe(
+        view="list (default), detail (one session's whole table) or champions (wins per pilot)",
+        map_name="Only sessions on this map",
+        date_from="Only sessions that ended on or after this date: dd-mm-yyyy, today, yesterday or 7d",
+        date_to="Only sessions that ended on or before this date",
+        pilot="Only sessions this pilot played (name or UCID); with champions, that pilot's record",
+        session="For detail: which session (default: the latest finished one)",
+        order="newest (default) or oldest first",
+        top="Positions shown: per session in list (default 3), in the table of detail and champions (10)",
+        _server="Which server — only needed if more than one is configured."
+    )
+    @app_commands.choices(
+        view=[app_commands.Choice(name="list", value="list"), app_commands.Choice(name="detail", value="detail"),
+              app_commands.Choice(name="champions", value="champions")],
+        order=[app_commands.Choice(name="newest first", value="newest"),
+               app_commands.Choice(name="oldest first", value="oldest")])
+    @app_commands.autocomplete(map_name=_autocomplete_campaign_map, pilot=_autocomplete_campaign_pilot,
+                               session=_autocomplete_campaign, date_from=_autocomplete_podium_date,
+                               date_to=_autocomplete_podium_date)
+    @app_commands.rename(_server="server", map_name="map")
+    async def sessions(self, interaction: discord.Interaction, view: str = "list", map_name: str | None = None,
+                       date_from: str | None = None, date_to: str | None = None, pilot: str | None = None,
+                       session: str | None = None, order: str = "newest",
+                       top: app_commands.Range[int, 1, 50] | None = None,
+                       _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        # Always private: an admin tool. See player()'s comment on `_server` + rename.
+        await interaction.response.defer(ephemeral=True)
+        key, err = self._resolve_server(interaction, _server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        srv = self._server_by_key(key)
+        if srv is None:
+            await interaction.followup.send(
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                ephemeral=True)
+            return
+        if not self._is_admin(interaction, key):
+            await interaction.followup.send("❌ Only admins can look at the session records.", ephemeral=True)
+            return
+        cfg = self._merged_cfg(key)
+        saves_dir = await _resolve_saves_dir(srv, cfg)
+        tz = self._reset_tz(srv)
+        today = datetime.now(tz).date()
+        for label, text in (("date_from", date_from), ("date_to", date_to)):
+            if (text or "").strip() and _parse_user_date(text, today) is None:
+                await interaction.followup.send(
+                    f"❌ I couldn't read `{text}` as `{label}`. Use `dd-mm-yyyy` (e.g. `25-12-2026`), "
+                    "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
+                return
+        d_from = _parse_user_date(date_from, today) if (date_from or "").strip() else None
+        d_to = _parse_user_date(date_to, today) if (date_to or "").strip() else None
+        if d_from and d_to and d_from > d_to:
+            d_from, d_to = d_to, d_from
+
+        history = await self._campaign_history_of(srv, saves_dir)
+        found = campaign_filter(history, map_name=map_name or "", date_from=d_from, date_to=d_to,
+                                pilot=pilot or "", tz=tz)
+        parts = [f"map {map_name}" if map_name else "", f"from {_fmt_date(d_from)}" if d_from else "",
+                 f"to {_fmt_date(d_to)}" if d_to else "", f"pilot {pilot}" if pilot and view != "detail" else ""]
+        shown = " · ".join(x for x in parts if x) or "all"
+        name = self._public_server_name(key)
+
+        if view == "detail":
+            entries = [c for c in history.get("sessions", []) if session and c.get("id") == session]
+            entry = entries[0] if entries else (None if session else (found[-1] if found else None))
+            if entry is None:
+                await interaction.followup.send(
+                    f"No session found for **{name}**" + (f" with the id `{session}`." if session else
+                    f" for `{shown}`."), ephemeral=True)
+                return
+            ranking = campaign_ranking(entry)
+            how = {"map": "map change", "reset": "reset of the save"}.get(entry.get("closed_by"), "running")
+            description = (f"{_campaign_label(entry, tz)}\nLength {_campaign_length(entry)} · ended by {how} · "
+                           f"{len(ranking)} pilots · {entry.get('total', 0):,} points in all")
+            lines = _campaign_detail_lines(entry, top or 10, pilot or "")
+            await self._send_campaign_pages(interaction, srv, f"🏁 Session — {name}", description,
+                                            ["\n".join(lines)] if lines else ["No points recorded."], "Classification")
+            return
+
+        if not found:
+            recorded = [c for c in history.get("sessions", []) if not c.get("open") and c.get("end")]
+            note = (f" {len(recorded)} session(s) are recorded; none matches the filters." if recorded else
+                    " Nothing has been recorded yet: a session is recorded when it ends (the map changes "
+                    "or the save is reset) with at least `session_history_min_points` points.")
+            await interaction.followup.send(f"No sessions found for **{name}** (`{shown}`).{note}", ephemeral=True)
+            return
+
+        if view == "champions":
+            if pilot:
+                record = campaign_pilot_history(found, pilot)
+                stats = campaign_champions(found)
+                wanted = {r["id"] for c in found for r in campaign_ranking(c)
+                          if r["id"] in set(_campaign_pilot_ids(c, pilot))}
+                mine = next((r for r in stats if r["id"] in wanted), None)
+                head = f"{_safe_code_span(mine['name'])} — {_record_text(mine)}" if mine else ""
+                lines = ([head] if head else []) + _pilot_record_lines(record, tz)
+                title = f"🏁 Pilot record — {name}"
+            else:
+                lines = _champion_lines(campaign_champions(found), top or 10)
+                title = f"🏁 Champions — {name}"
+            await self._send_campaign_pages(interaction, srv, title, f"{len(found)} session(s) · {shown}",
+                                            _podium_pages([lines]), "Sessions")
+            return
+
+        try:
+            players = await parse_ranks(os.path.join(saves_dir, "Foothold_Ranks.lua"),
+                                        cfg.get("excluded_ucids") or [], srv.node)
+        except Exception:
+            players = {}
+        players = await self._report_players(srv, saves_dir, _UpdateReadCache(srv.node), players, cfg)
+        blocks = _campaign_blocks({"sessions": found}, players, count=0, latest_top=top or 3, top=top or 3,
+                                  strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")))
+        if order == "oldest":
+            blocks.reverse()
+        await self._send_campaign_pages(interaction, srv, f"🏁 Sessions — {name}",
+                                        f"{len(found)} session(s) · {shown} · {order} first",
+                                        _podium_pages(blocks), "Session History")
+
+    # ── session_close / session_delete / session_reopen / session_edit ──────────────────────────────
+    # What an admin does by hand to the campaign history. They change the same data the updater keeps, so
+    # they take the same per-server lock as an update.
+
+    def _update_lock(self, srv) -> asyncio.Lock:
+        return self.__dict__.setdefault("_update_locks", {}).setdefault(_server_key(srv), asyncio.Lock())
+
+    async def _audit(self, interaction: discord.Interaction, text: str) -> None:
+        try:
+            await self.bot.audit(text, user=interaction.user)
+        except Exception as e:
+            self.log.debug(f"Fh_Report: audit entry not written: {e!r}")
+
+    async def _admin_prologue(self, interaction: discord.Interaction, _server, what: str):
+        """Defer privately, resolve the server and check the admin: (key, srv, cfg, saves_dir, tz), or None
+        after answering."""
+        await interaction.response.defer(ephemeral=True)
+        key, err = self._resolve_server(interaction, _server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return None
+        srv = self._server_by_key(key)
+        if srv is None:
+            await interaction.followup.send(
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                ephemeral=True)
+            return None
+        if not self._is_admin(interaction, key):
+            await interaction.followup.send(f"❌ Only admins can {what}.", ephemeral=True)
+            return None
+        cfg = self._merged_cfg(key)
+        return key, srv, cfg, await _resolve_saves_dir(srv, cfg), self._reset_tz(srv)
+
+    async def _ask_to_confirm(self, interaction: discord.Interaction, question: str, action) -> None:
+        view = _ConfirmView(getattr(interaction.user, "id", 0), action)
+        view.message = await interaction.followup.send(question, view=view, ephemeral=True)
+
+    @staticmethod
+    def _describe_campaign(entry: dict, tz: tzinfo) -> str:
+        ranking = campaign_ranking(entry)
+        first = f", first {ranking[0]['name']} with {ranking[0]['points']:,}" if ranking else ""
+        return f"**{_campaign_label(entry, tz)}** ({len(ranking)} pilots, {entry.get('total', 0):,} points{first})"
+
+    @fh_report.command(name="session_close", description="Admin only: end the running session now and start the next one.")
+    @app_commands.describe(_server="Which server — only needed if more than one is configured.")
+    @app_commands.rename(_server="server")
+    async def session_close(self, interaction: discord.Interaction,
+                            _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        ctx = await self._admin_prologue(interaction, _server, "close a session")
+        if ctx is None:
+            return
+        key, srv, cfg, saves_dir, tz = ctx
+        node, saves_key = srv.node, _saves_key(srv.node, saves_dir)
+        async with self._update_lock(srv):
+            running = next((c for c in (await self._campaign_cache_for(node, saves_dir))["hist"]["sessions"]
+                            if c.get("open")), None)
+        if running is None:
+            await interaction.followup.send("There is no running session to close (nothing has been recorded "
+                                            "for this server yet).", ephemeral=True)
+            return
+
+        async def action() -> str:
+            async with self._update_lock(srv):
+                cache = await self._campaign_cache_for(node, saves_dir)
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                iso = now.strftime(_SESSION_ISO)
+                entry = campaign_close_now(cache["hist"], iso)
+                raw = await _read_fhr_json(node, saves_dir, "session.json")
+                if raw:                                    # the next update starts a campaign (and a session) from now
+                    raw.update(start=iso, kind="detected")
+                    await _ensure_fhc_dir(node, saves_dir)
+                    await write_bytes_to_node(node, _fhr_path(saves_dir, "session.json"),
+                                              json.dumps(raw, indent=2).encode("utf-8"), log=self.log)
+                if self._session_state.get(saves_key):
+                    self._session_state[saves_key].update(start=iso, kind="detected")
+                await self._write_campaign_cache(node, saves_dir, cache, now)
+            await self._audit(interaction, f"Fh_Report: closed the session {_campaign_label(entry, tz)}")
+            return f"✅ Closed {self._describe_campaign(entry, tz)}. The next update starts the next session."
+
+        await self._ask_to_confirm(
+            interaction,
+            f"Close the running session {self._describe_campaign(running, tz)} now?\n"
+            "• Its end becomes now and the result is kept as it is.\n"
+            "• The next update starts another session from now, and the session counts start again.\n"
+            "• If Foothold has **not** reset its save, the new session starts with the points the save already has.",
+            action)
+
+    @fh_report.command(name="session_delete", description="Admin only: delete a finished session from the history.")
+    @app_commands.describe(session="The session to delete", _server="Which server — only needed if more than one is configured.")
+    @app_commands.autocomplete(session=_autocomplete_session_closed)
+    @app_commands.rename(_server="server")
+    async def session_delete(self, interaction: discord.Interaction, session: str,
+                             _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        ctx = await self._admin_prologue(interaction, _server, "delete a session")
+        if ctx is None:
+            return
+        key, srv, cfg, saves_dir, tz = ctx
+        node = srv.node
+        async with self._update_lock(srv):
+            hist = (await self._campaign_cache_for(node, saves_dir))["hist"]
+            try:
+                campaign_remove(copy.deepcopy(hist), session)             # only to find out whether it can be done
+                entry = _history_entry(hist, session)
+            except ValueError as e:
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+                return
+
+        async def action() -> str:
+            async with self._update_lock(srv):
+                cache = await self._campaign_cache_for(node, saves_dir)
+                gone = campaign_remove(cache["hist"], session)
+                await self._write_campaign_cache(node, saves_dir, cache, datetime.now(timezone.utc).replace(tzinfo=None))
+            await self._audit(interaction, f"Fh_Report: deleted the session {_campaign_label(gone, tz)}")
+            return f"✅ Deleted {self._describe_campaign(gone, tz)}."
+
+        await self._ask_to_confirm(interaction, f"Delete {self._describe_campaign(entry, tz)} from the history? "
+                                                "This cannot be undone.", action)
+
+    @fh_report.command(name="session_reopen", description="Admin only: make a finished session the running one again.")
+    @app_commands.describe(session="The session to reopen (it must be the map being played now)",
+                           _server="Which server — only needed if more than one is configured.")
+    @app_commands.autocomplete(session=_autocomplete_session_closed)
+    @app_commands.rename(_server="server")
+    async def session_reopen(self, interaction: discord.Interaction, session: str,
+                             _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        ctx = await self._admin_prologue(interaction, _server, "reopen a session")
+        if ctx is None:
+            return
+        key, srv, cfg, saves_dir, tz = ctx
+        node, saves_key = srv.node, _saves_key(srv.node, saves_dir)
+
+        def current() -> dict:
+            st = self._session_state.get(saves_key)
+            if not st:
+                raise ValueError("Fh_Report has not looked at this server's session yet: try again after the next update.")
+            return st
+
+        async with self._update_lock(srv):
+            hist = (await self._campaign_cache_for(node, saves_dir))["hist"]
+            try:
+                st = current()
+                entry, dropped = campaign_reopen(copy.deepcopy(hist), session, st["file"], st["start"])
+            except ValueError as e:
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+                return
+
+        async def action() -> str:
+            async with self._update_lock(srv):
+                cache = await self._campaign_cache_for(node, saves_dir)
+                st = current()
+                reopened, gone = campaign_reopen(cache["hist"], session, st["file"], st["start"])
+                await self._write_campaign_cache(node, saves_dir, cache, datetime.now(timezone.utc).replace(tzinfo=None))
+            await self._audit(interaction, f"Fh_Report: reopened the session {_campaign_label(reopened, tz)}")
+            return f"✅ Reopened {self._describe_campaign(reopened, tz)}; it follows the save again from now on."
+
+        replaced = (f"\n• The session running now, {self._describe_campaign(dropped, tz)}, is dropped and its points "
+                    "are merged into this one (each pilot keeps the higher score)." if dropped else "")
+        await self._ask_to_confirm(
+            interaction,
+            f"Reopen {self._describe_campaign(entry, tz)}?\n"
+            "• It becomes the running session and follows the points of the save again, so a table cut down "
+            f"by a reset of the save would be overwritten.{replaced}", action)
+
+    @fh_report.command(name="session_edit", description="Admin only: correct the map or the dates of a session.")
+    @app_commands.describe(session="The session to correct", map_name="The right map",
+                           start="The right start: dd-mm-yyyy, today, yesterday or 7d",
+                           end="The right end (a finished session only): same formats",
+                           _server="Which server — only needed if more than one is configured.")
+    @app_commands.autocomplete(session=_autocomplete_campaign, map_name=_autocomplete_campaign_map,
+                               start=_autocomplete_podium_date, end=_autocomplete_podium_date)
+    @app_commands.rename(_server="server", map_name="map")
+    async def session_edit(self, interaction: discord.Interaction, session: str, map_name: str | None = None,
+                           start: str | None = None, end: str | None = None,
+                           _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        ctx = await self._admin_prologue(interaction, _server, "edit a session")
+        if ctx is None:
+            return
+        key, srv, cfg, saves_dir, tz = ctx
+        if not ((map_name or "").strip() or (start or "").strip() or (end or "").strip()):
+            await interaction.followup.send("Say what to correct: `map`, `start` or `end`.", ephemeral=True)
+            return
+        today = datetime.now(tz).date()
+        given = {}
+        for label, text, hour in (("start", start, 0), ("end", end, 12)):
+            if (text or "").strip():
+                day = _parse_user_date(text, today)
+                if day is None:
+                    await interaction.followup.send(
+                        f"❌ I couldn't read `{text}` as `{label}`. Use `dd-mm-yyyy` (e.g. `25-12-2026`), "
+                        "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
+                    return
+                given[label] = datetime(day.year, day.month, day.day, hour, tzinfo=tz).astimezone(
+                    timezone.utc).replace(tzinfo=None).strftime(_SESSION_ISO)
+        node = srv.node
+        try:
+            async with self._update_lock(srv):
+                cache = await self._campaign_cache_for(node, saves_dir)
+                entry, changes = campaign_edit(cache["hist"], session, map_name=(map_name or "").strip() or None,
+                                               start=given.get("start"), end=given.get("end"))
+                if changes:
+                    await self._write_campaign_cache(node, saves_dir, cache,
+                                                     datetime.now(timezone.utc).replace(tzinfo=None))
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        if not changes:
+            await interaction.followup.send("Nothing to change: it already says that.", ephemeral=True)
+            return
+        await self._audit(interaction, f"Fh_Report: edited the session {_campaign_label(entry, tz)} ({', '.join(changes)})")
+        await interaction.followup.send(f"✅ Corrected {self._describe_campaign(entry, tz)}: {', '.join(changes)}.",
+                                        ephemeral=True)
 
 
 async def setup(bot: DCSServerBot):

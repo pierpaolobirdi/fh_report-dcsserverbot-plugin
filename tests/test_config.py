@@ -371,3 +371,13 @@ def test_disable_updates_in_node_block_and_enable_wins():
     assert "    enable_updates: false  # before: disable_updates: true" in out
     assert "disable_updates" not in out.split("B:")[1]
     assert "  enable_updates: true" in out.split("B:")[1]
+
+
+def test_migration_renames_the_history_options_of_the_development_builds(tmp_path):
+    old = ("DEFAULT:\n  channel_id: 1\n  report_layout: DPSRH\n  campaign_history_count: 5  # mine\n"
+           "  campaign_history_latest_top: 2\n  campaign_history_top: 1\n  campaign_history_min_points: 300\n")
+    migrated, out = _migrate(tmp_path, old)
+    for name, value in (("count", 5), ("latest_top", 2), ("top", 1), ("min_points", 300)):
+        assert f"  session_history_{name}: {value}" in migrated
+        assert f"campaign_history_{name}" not in migrated
+    assert "campaign_history_count -> session_history_count" in out
