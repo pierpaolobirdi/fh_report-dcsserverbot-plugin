@@ -98,6 +98,7 @@ def make_plugin(**attrs):
     p._message_ids, p._layout_cycle_index, p._cycle_punishment = {}, {}, None
     p._last_maps, p._map_probed = {}, set()
     p._campaign_absent, p._campaign_watch = set(), {}
+    p._session_state, p._campaign_cache = {}, {}
     p._base_interval, p._beat, p._beats_left, p._last_status = 300, 300, {}, {}
     p._reset_handled = {}
     p.locals = {}

@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.14"
+FH_REPORT_RELEASE = "14.6.15"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -657,6 +657,93 @@ def _campaign_looks_reset(prev: dict | None, cur: dict) -> bool:
     prev_kills = sum(prev["kills"].get(i, 0) for i in common)
     cur_kills = sum(cur["kills"].get(i, 0) for i in common)
     return prev_pts > 0 and cur_pts < prev_pts * 0.5 and prev_kills > 0 and cur_kills < prev_kills
+
+
+# ── Campaign history ──────────────────────────────────────────────────────────
+# The campaigns of a Saves folder, kept in .fhc/fhr_campaign_history.json. A campaign is the life of one
+# Foothold save: it ends when the map changes (another save file, finished or not) or when the same file
+# is reset (see "Campaign session start" above). Each entry keeps the whole season table (Points per
+# pilot) of the last intact reading, so the final result survives Foothold emptying the file. A campaign
+# whose pilots add up to fewer points than campaign_history_min_points is not kept. Coming back to a
+# map whose points did not fall is the same campaign: its entry is reopened, not duplicated.
+#   entry: {"id", "file", "map", "start", "start_kind" (detected | first_seen: the start is an estimate),
+#           "session" (the session start it is tracked by), "end", "closed_by" (map | reset), "open",
+#           "players": {id: {"name", "points"}}, "total"}
+
+CAMPAIGN_HISTORY_MIN_POINTS = 200
+_CAMPAIGN_FLUSH_EVERY = _SESSION_SEEN_EVERY      # how often a changed table is written while the campaign runs
+
+
+def _campaign_min_points(cfg: dict | None) -> int:
+    try:
+        return max(0, int((cfg or {}).get("campaign_history_min_points", CAMPAIGN_HISTORY_MIN_POINTS)))
+    except (TypeError, ValueError):
+        return CAMPAIGN_HISTORY_MIN_POINTS
+
+
+def _campaign_id(file: str, start: str) -> str:
+    return f"{os.path.splitext(file)[0]}@{start[:16]}"
+
+
+def _campaign_table(points: dict, names: dict, excluded=()) -> dict:
+    """{id: {"name", "points"}} of the pilots that have season points."""
+    skip = set(excluded or ())
+    return {pid: {"name": names.get(pid) or pid, "points": int(pts)}
+            for pid, pts in points.items() if pts and pts > 0 and pid not in skip}
+
+
+def _campaign_total(players: dict) -> int:
+    return sum(int(p.get("points", 0)) for p in players.values())
+
+
+def campaign_ranking(entry: dict) -> list[dict]:
+    """The pilots of a campaign, best first: [{"id", "name", "points"}]."""
+    rows = [{"id": pid, "name": p.get("name") or pid, "points": int(p.get("points", 0))}
+            for pid, p in (entry.get("players") or {}).items()]
+    return sorted(rows, key=lambda r: (-r["points"], r["name"].lower()))
+
+
+def _same_campaign(prev: dict, cur: dict) -> bool:
+    """Is `cur`, a reading of a save, the campaign whose final table was `prev`? Season points only grow,
+    so the pilots both tables have must not have lost points (10 % is forgiven for hand edits)."""
+    common = set(prev) & set(cur)
+    if not common:
+        return not prev
+    return sum(cur[i]["points"] for i in common) >= 0.9 * sum(prev[i]["points"] for i in common)
+
+
+def campaign_history_update(hist: dict, *, file: str, session: str, kind: str, now: str, table: dict,
+                            map_name: str | None, min_points: int, pending: bool = False) -> tuple[bool, bool]:
+    """Bring `hist` ({"campaigns": [...]}, oldest first) up to date with one reading of the save `file`,
+    tracked by the session start `session` (ISO text). Returns (structural, dirty): an entry was opened,
+    closed, reopened or dropped (worth writing at once) / the pilots' table changed. While `pending` (a
+    reset looks likely but is not confirmed) the table is left alone, so the last intact one is kept."""
+    campaigns = hist.setdefault("campaigns", [])
+    structural = dirty = False
+    cur = next((c for c in campaigns if c.get("open")), None)
+    if cur and not (cur.get("file") == file and cur.get("session") == session):
+        cur["open"] = False                                      # the campaign it was tracking is over
+        cur["end"] = session if session >= cur.get("start", "") else now
+        cur["closed_by"] = "reset" if cur.get("file") == file else "map"
+        if cur.get("total", 0) < min_points:
+            campaigns.remove(cur)
+        cur, structural = None, True
+    if cur is None:
+        back = next((c for c in reversed(campaigns) if c.get("file") == file), None)
+        if back and _same_campaign(back.get("players") or {}, table):
+            back.update(open=True, end=None, closed_by=None, session=session)
+            cur = back
+        else:
+            cur = {"id": _campaign_id(file, session), "file": file, "map": "", "start": session,
+                   "start_kind": kind, "session": session, "end": None, "closed_by": None, "open": True,
+                   "players": {}, "total": 0}
+            campaigns.append(cur)
+        structural = True
+    if map_name:
+        cur["map"] = map_name
+    if table and not pending and cur.get("players") != table:
+        cur["players"], cur["total"], dirty = table, _campaign_total(table), True
+    return structural, dirty
 
 
 _unsupported_version_warned: set[str] = set()
@@ -3245,6 +3332,8 @@ class Fh_Report(Plugin):
         self._cycle_punishment: dict | None = None
         self._campaign_absent: set[str] = set()      # saves_dirs whose Foothold save was missing last cycle
         self._campaign_watch: dict[str, dict] = {}   # saves_dir -> last intact reading, for _update_session
+        self._session_state: dict[str, dict] = {}    # saves_dir -> the session start found by _update_session
+        self._campaign_cache: dict[str, dict] = {}   # saves_dir -> its campaign history, as last read or written
         self._message_ids_file: str = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "message_ids.json"
         )
@@ -3831,6 +3920,7 @@ class Fh_Report(Plugin):
         elif old:
             st = {k: old[k] for k in ("file", "start", "kind")}
         self._campaign_watch[saves_key] = watch
+        self._session_state[saves_key] = dict(st)
 
         stale = not raw or now - (_parse_utc(raw.get("seen")) or now) >= _SESSION_SEEN_EVERY
         if reset or not old or raw.get("start") != st["start"] or raw.get("file") != st["file"] or (stale and not watch["pending"]):
@@ -3840,6 +3930,40 @@ class Fh_Report(Plugin):
             await write_bytes_to_node(source_node, _fhr_path(saves_dir, "session.json"),
                                       json.dumps(st, indent=2).encode("utf-8"), log=self.log)
         return _session_start_for(st, cfg or {}, self._reset_tz(server))
+
+    async def _track_campaign(self, server, saves_dir: str, source_node, campaign_by_id: dict, names: dict,
+                              cfg: dict, map_name: str | None) -> None:
+        """Keep .fhc/fhr_campaign_history.json current (see "Campaign history"). Runs right after
+        _update_session, whose session start tells which campaign this reading belongs to. A failure here
+        never stops the report."""
+        try:
+            saves_key = _saves_key(source_node, saves_dir)
+            st = self._session_state.get(saves_key)
+            if not st:
+                return
+            cache = self._campaign_cache.get(saves_key)
+            if cache is None:
+                hist = await _read_json(source_node, _fhr_path(saves_dir, "campaign_history.json"))
+                if not isinstance(hist.get("campaigns"), list):
+                    hist = {"campaigns": []}
+                cache = self._campaign_cache[saves_key] = {"hist": hist, "flushed": None, "dirty": False}
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            pending = bool((self._campaign_watch.get(saves_key) or {}).get("pending"))
+            table = _campaign_table(campaign_by_id, names, cfg.get("excluded_ucids") or [])
+            structural, dirty = campaign_history_update(
+                cache["hist"], file=st["file"], session=st["start"], kind=st["kind"], now=now.strftime(_SESSION_ISO),
+                table=table, map_name=map_name, min_points=_campaign_min_points(cfg), pending=pending)
+            cache["dirty"] = cache["dirty"] or dirty
+            due = cache["flushed"] is None or now - cache["flushed"] >= _CAMPAIGN_FLUSH_EVERY
+            if structural or (cache["dirty"] and due):
+                await _ensure_fhc_dir(source_node, saves_dir)
+                data = {"version": 1, **cache["hist"]}
+                if await write_bytes_to_node(source_node, _fhr_path(saves_dir, "campaign_history.json"),
+                                             json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+                                             log=self.log):
+                    cache["flushed"], cache["dirty"] = now, False
+        except Exception as e:
+            self.log.debug(f"Fh_Report [{server.instance.name}]: campaign history not updated: {e!r}")
 
     async def _fetch_bnb(self, server, cfg: dict, session: datetime | None, ucids: list) -> dict:
         """Blue-on-blue counts per UCID from DCSSB's Mission Statistics:
@@ -4081,6 +4205,10 @@ class Fh_Report(Plugin):
         session = await self._update_session(
             server, saves_dir, node, source_node, persistence_file, campaign_by_id,
             {pid: st.get("Air", 0) + st.get("Ground Units", 0) for pid, st in session_by_id.items()}, cfg)
+        rank_names = {d.get("ucid"): n for n, d in players.items() if d.get("ucid")}
+        await self._track_campaign(
+            server, saves_dir, source_node, campaign_by_id,
+            {pid: rank_names.get(pid) or names_by_id.get(pid) or pid for pid in campaign_by_id}, cfg, map_name)
         bnb = {}
         if _show_bob(cfg) and any(_bool_cfg(cfg.get(k)) for k in ("show_pilot_card", "show_session_card", "show_daily_card")):
             bnb = await self._fetch_bnb(
