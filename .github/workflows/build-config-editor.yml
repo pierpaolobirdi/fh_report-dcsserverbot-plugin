@@ -30,7 +30,26 @@ permissions:
   contents: read
 
 jobs:
+  # The release being built (PLUGIN_RELEASE of plugins/fh_report/version.py), so every job of a run says which
+  # version it is: its name below and the summary of the run.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: plugins/fh_report/version.py
+          sparse-checkout-cone-mode: false
+      - id: v
+        run: |
+          version=$(sed -n 's/^PLUGIN_RELEASE = "\(.*\)"$/\1/p' plugins/fh_report/version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "### Ver. $version" >> "$GITHUB_STEP_SUMMARY"
+
   test:
+    needs: version
+    name: Tests (Ver. ${{ needs.version.outputs.version }})
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +61,8 @@ jobs:
       - run: xvfb-run -a python3 -m pytest -q
 
   build:
-    needs: test
+    needs: [version, test]
+    name: Build exe (Ver. ${{ needs.version.outputs.version }})
     runs-on: windows-latest
     permissions:
       contents: write            # needed to push the exe to the `builds` branch
