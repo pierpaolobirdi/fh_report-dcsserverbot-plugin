@@ -327,3 +327,26 @@ def test_every_text_of_the_command_fits_discords_100_characters():
     src = open(commands.__file__, encoding="utf-8").read()
     block = src[src.index('@fh_report.command(name="campaigns"'):src.index("async def campaigns")]
     assert all(len(m.group(2)) <= 100 for m in re.finditer(r'(\w+)="([^"]+)"', block))
+
+
+def _visible(line: str) -> str:
+    """What a reader sees of a line: no Markdown, and a Discord date as its 10 characters."""
+    import re
+    return re.sub(r"<t:\d+:d>", "0" * 10, line).replace("__", "").replace("**", "").replace("`", "")
+
+
+def test_a_long_rank_is_cut_so_the_whole_line_stays_under_78_characters():
+    long_rank = "PILOTO POR INSTINTO DE COMBATE MUY LARGO Y MAS"
+    players = {"Eskuvy": {"ucid": "a", "credits": 5000, "custom_rank": long_rank},
+               "Pier_Paolo": {"ucid": "b", "credits": 5000, "custom_rank": long_rank}}
+    history = {"campaigns": [
+        _entry("old.lua", "2026-01-01T00:00:00", "2026-09-01T10:00:00", [("a", "Eskuvy", 28731)], map_name="PersianGulf"),
+        _entry("new.lua", "2026-01-01T00:00:00", "2026-11-03T10:00:00", [("a", "Eskuvy", 28731), ("b", "Pier_Paolo", 25245)],
+               map_name="PersianGulf")]}
+    newest, older = commands._campaign_blocks(history, players, count=0, latest_top=2, top=1)
+    assert all(len(_visible(line)) < 78 for line in newest[1:] + older)
+    assert older[0].count("..") == 1 and len(_visible(older[0])) < 78       # cut at the end of the rank
+    assert " — **PILOTO POR" in older[0] and older[0].index("..") < older[0].index("28,731")
+    # a short rank is left alone
+    players["Eskuvy"]["custom_rank"] = "Ace"
+    assert "**Ace**" in commands._campaign_blocks(history, players, count=0, latest_top=2, top=1)[1][0]

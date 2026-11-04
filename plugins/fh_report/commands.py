@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.18"
+FH_REPORT_RELEASE = "14.6.19"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1522,7 +1522,12 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
     blocks: list[list[str]] = []
     for idx, entry in enumerate(closed):
         lines: list[tuple[str, str]] = []
-        for pos, row in enumerate(campaign_ranking(entry)[:max(1, latest_top if idx == 0 else top)]):
+        rows = campaign_ranking(entry)[:max(1, latest_top if idx == 0 else top)]
+        end, where = _discord_date(entry["end"]), _campaign_map(entry)
+        # What comes before the name on the visible line: "03/11/2026 MAP 🥇 " on a one-line campaign
+        # (the date shows as 10 characters), just "🥇 " on the others. The rank is cut to fit under it.
+        lead = 10 + 1 + len(where) + 1 + 3 if len(rows) == 1 else 3
+        for pos, row in enumerate(rows):
             current_name, data = None, None
             if row["id"] in ucid_to_current:
                 current_name, data = ucid_to_current[row["id"]]
@@ -1540,14 +1545,13 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
             pts = row["points"]
             if data and not data.get("unranked"):
                 rank = data.get("custom_rank") or get_rank(float(data.get("credits", 0)))
-                rank = _fit_rank(f"{display} — ", rank, f" — {pts:,} pts")
-                rank_part = f" — **{rank}**"
+                rank = _fit_rank(" " * lead + f"{display} — ", rank, f" — {pts:,} pts")
+                rank_part = f" — **{rank}**" if rank else ""
             else:
                 rank_part = ""
             lines.append((marker, f"{_safe_code_span(display)}{rank_part} — {pts:,} pts"))
         if not lines:
             continue
-        end, where = _discord_date(entry["end"]), _campaign_map(entry)
         if len(lines) == 1:
             blocks.append([f"__{end}__ {where} {lines[0][0]} {lines[0][1]}"])
         else:
