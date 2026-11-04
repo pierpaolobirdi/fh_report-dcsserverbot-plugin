@@ -95,7 +95,7 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                        P = Daily Podium (historical closing events)
 #                        S = Session Leaderboard (current session)
 #                        R = Pilot Leaderboard (by Rank)
-#                        H = Campaign History (the finished campaigns)
+#                        H = Session History (the finished sessions)
 #                      Examples:
 #                        R        = just the Rank table (default)
 #                        DS       = Daily table, then Session table
@@ -319,17 +319,17 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #                              podium_combined_top is already 3 or higher.
 #                      Only affects "P" combined with other letters — "P" on
 #                      its own never uses this.
-#   campaign_history_count - How many finished campaigns the H block of report_layout
+#   session_history_count - How many finished sessions the H block of report_layout
 #                      lists, newest first                           (default: 3)
-#                      0 = every campaign recorded. A campaign is the life of one
+#                      0 = every session recorded. A session is the life of one
 #                      Foothold save: it ends when the map changes (finished or not)
 #                      or when the same save is reset. Its final season points are
 #                      recorded, so each one shows its best pilots.
-#   campaign_history_latest_top - Positions shown for the most recent campaign of the
+#   session_history_latest_top - Positions shown for the most recent session of the
 #                      H block, with its start and end dates        (default: 3)
-#   campaign_history_top - Positions shown for each older campaign of the H block
+#   session_history_top - Positions shown for each older session of the H block
 #                      (default: 1). 1 gives one line each: end date, map, champion.
-#   campaign_history_min_points - Season points all the pilots of a campaign must add
+#   session_history_min_points - Season points all the pilots of a session must add
 #                      up to for it to be recorded when it ends     (default: 200)
 #                      Keeps out a map that was loaded for a moment. 0 = record all.
 #   show_punishment  - Show punishment badges below sanctioned pilots (default: false)
@@ -432,10 +432,10 @@ KNOWN_VARS = {
     "podium_combined_days",
     "podium_combined_top",
     "podium_combined_min3_latest_day",
-    "campaign_history_count",
-    "campaign_history_latest_top",
-    "campaign_history_top",
-    "campaign_history_min_points",
+    "session_history_count",
+    "session_history_latest_top",
+    "session_history_top",
+    "session_history_min_points",
     "show_punishment",
     "show_bob",
     "excluded_ucids",
@@ -478,10 +478,10 @@ DEFAULTS = {
     "podium_combined_days":      7,
     "podium_combined_top":       1,
     "podium_combined_min3_latest_day": False,
-    "campaign_history_count":      3,
-    "campaign_history_latest_top": 3,
-    "campaign_history_top":        1,
-    "campaign_history_min_points": 200,
+    "session_history_count":      3,
+    "session_history_latest_top": 3,
+    "session_history_top":        1,
+    "session_history_min_points": 200,
     "show_punishment":  False,
     "show_bob":         True,
     "show_player_cmd_hint":  True,
@@ -516,10 +516,10 @@ COMMENTS = {
     "podium_combined_days":      "# Same as podium_days, but when \"P\" is combined with other letters",
     "podium_combined_top":       "# Same as podium_top, but when \"P\" is combined with other letters",
     "podium_combined_min3_latest_day": "# false = strictly follow podium_combined_top  |  true = force top 3 for the most recent day",
-    "campaign_history_count":      "# Finished campaigns the H block lists, newest first (0 = every one recorded)",
-    "campaign_history_latest_top": "# 1-3, positions shown for the most recent campaign of the H block",
-    "campaign_history_top":        "# 1-3, positions shown for each older campaign of the H block",
-    "campaign_history_min_points": "# A campaign whose pilots add up to fewer season points is not recorded (0 = record all)",
+    "session_history_count":      "# Finished sessions the H block lists, newest first (0 = every one recorded)",
+    "session_history_latest_top": "# 1-3, positions shown for the most recent session of the H block",
+    "session_history_top":        "# 1-3, positions shown for each older session of the H block",
+    "session_history_min_points": "# A session whose pilots add up to fewer season points is not recorded (0 = record all)",
     "show_punishment":  "# false = disabled  |  true = show punishment badges in leaderboard",
     "show_bob":         "# false = hide  |  true = show Blue on Blue (BoB) counts from DCSSB Mission Statistics",
     "show_player_cmd_hint": "# false = disabled  |  true = show /fh_report player reminder in footer",
@@ -1011,7 +1011,7 @@ schema;element_schema:
     disable_updates: {type: any, func: deprecated, enum: ['Use "enable_updates" instead (the opposite value).']}
     # What the report shows
     # report_layout: letters D/P/S/R, or several such groups separated by commas (one per update cycle)
-    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRHdpsrh]{1,5}(\s*,\s*[DPSRHdpsrh]{1,5})*\s*$', desc: 'Tables to show, any order - D daily, P podium, S session, R rank, H campaign history; groups separated by commas rotate'}
+    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRHdpsrh]{1,5}(\s*,\s*[DPSRHdpsrh]{1,5})*\s*$', desc: 'Tables to show, any order - D daily, P podium, S session, R rank, H session history; groups separated by commas rotate'}
     points_detail_D: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Daily table, in this order, from the letters D S R'}
     points_detail_S: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Session table, in this order, from the letters D S R'}
     points_detail_R: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Rank table, in this order, from the letters D S R'}
@@ -1053,10 +1053,10 @@ schema;element_schema:
     podium_combined_days: {type: int, nullable: false, range: {min: 0}, desc: 'Days shown when P is combined with other tables (0 = since the campaign started)'}
     podium_combined_top: {type: int, nullable: false, range: {min: 1, max: 50}, desc: 'Positions shown for each day when P is combined with other tables (1 to 50)'}
     podium_combined_min3_latest_day: {type: bool, nullable: false, desc: 'true always shows at least the top 3 for the most recent day when P is combined'}
-    campaign_history_count: {type: int, nullable: false, range: {min: 0}, desc: 'Finished campaigns listed by the H block (0 = every one recorded)'}
-    campaign_history_latest_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for the most recent campaign in the H block (1 to 3)'}
-    campaign_history_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for each older campaign in the H block (1 to 3)'}
-    campaign_history_min_points: {type: int, nullable: false, range: {min: 0}, desc: 'A campaign whose pilots add up to fewer season points is not recorded (0 records all)'}
+    session_history_count: {type: int, nullable: false, range: {min: 0}, desc: 'Finished sessions listed by the H block (0 = every one recorded)'}
+    session_history_latest_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for the most recent session in the H block (1 to 3)'}
+    session_history_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for each older session in the H block (1 to 3)'}
+    session_history_min_points: {type: int, nullable: false, range: {min: 0}, desc: 'A session whose pilots add up to fewer season points is not recorded (0 records all)'}
     show_punishment: {type: bool, nullable: false, desc: 'true shows punishment badges under sanctioned pilots (needs the Punishment plugin of DCSServerBot)'}
     show_bob: {type: bool, nullable: false, desc: 'Show blue-on-blue (friendly fire) counts, from the Mission Statistics plugin of DCSServerBot'}
     excluded_ucids:
@@ -1167,6 +1167,11 @@ def main():
         "podium_4x_days": "podium_combined_days",
         "podium_4x_top": "podium_combined_top",
         "podium_4x_min3_latest_day": "podium_combined_min3_latest_day",
+        # the History block options were named campaign_history_* in 14.6.16 to 14.6.22
+        "campaign_history_count": "session_history_count",
+        "campaign_history_latest_top": "session_history_latest_top",
+        "campaign_history_top": "session_history_top",
+        "campaign_history_min_points": "session_history_min_points",
     })
     if podium_rename_changes:
         print("  Renamed:")

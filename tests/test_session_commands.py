@@ -23,7 +23,7 @@ def test_closing_by_hand_ends_the_running_campaign_and_makes_it_final():
     hist = copy.deepcopy(HISTORY)
     entry = commands.campaign_close_now(hist, "2026-11-10T09:00:00")
     assert not entry["open"] and entry["end"] == "2026-11-10T09:00:00" and entry["closed_by"] == "manual" and entry["final"]
-    with pytest.raises(ValueError, match="no running campaign"):
+    with pytest.raises(ValueError, match="no running session"):
         commands.campaign_close_now(hist, "2026-11-10T10:00:00")
 
 
@@ -107,7 +107,7 @@ class _Response:
 def _setup(tmp_path, history=HISTORY, admin=True, state=True):
     d = str(tmp_path)
     os.makedirs(os.path.join(d, ".fhc"), exist_ok=True)
-    with open(os.path.join(d, ".fhc", "fhr_campaign_history.json"), "w") as f:
+    with open(os.path.join(d, ".fhc", "fhr_session_history.json"), "w") as f:
         json.dump(history, f)
     session = {"file": "foothold_syria.lua", "start": "2026-11-03T10:00:00", "kind": "detected",
                "seen": "2026-11-04T08:00:00", "base": {"points": {}, "kills": {}}}
@@ -134,7 +134,7 @@ def _setup(tmp_path, history=HISTORY, admin=True, state=True):
 
 
 def _stored(d):
-    with open(os.path.join(d, ".fhc", "fhr_campaign_history.json")) as f:
+    with open(os.path.join(d, ".fhc", "fhr_session_history.json")) as f:
         return json.load(f)["campaigns"]
 
 
@@ -158,7 +158,7 @@ def test_close_asks_first_and_only_the_one_who_asked_can_confirm(tmp_path):
     plugin, inter, d, audited = _setup(tmp_path)
     asyncio.run(plugin.session_close(inter))
     [(question, view, ephemeral)] = inter.followup.sent
-    assert ephemeral is True and "SYRIA" in question and "starts another campaign from now" in question
+    assert ephemeral is True and "SYRIA" in question and "starts another session from now" in question
     assert _stored(d) == HISTORY["campaigns"]                                          # nothing yet
     assert asyncio.run(view.interaction_check(type("I", (), {"user": type("U", (), {"id": 7})()})())) is False
     [edit] = _press(view, "cancel")
@@ -181,7 +181,7 @@ def test_confirming_the_close_ends_the_campaign_and_starts_a_new_session(tmp_pat
 def test_there_is_nothing_to_close_without_a_running_campaign(tmp_path):
     plugin, inter, d, _ = _setup(tmp_path, history={"campaigns": HISTORY["campaigns"][:3]})
     asyncio.run(plugin.session_close(inter))
-    assert inter.followup.sent[0][0].startswith("There is no running campaign") and inter.followup.sent[0][1] is None
+    assert inter.followup.sent[0][0].startswith("There is no running session") and inter.followup.sent[0][1] is None
 
 
 def test_delete_shows_what_goes_and_removes_it_on_confirmation(tmp_path):
@@ -219,7 +219,7 @@ def test_reopen_needs_the_save_of_that_campaign_to_be_the_one_played(tmp_path):
     assert "own map is running" in inter.followup.sent[0][0] and inter.followup.sent[0][1] is None
     plugin, inter, d, _ = _setup(tmp_path, state=False)
     asyncio.run(plugin.session_reopen(inter, session=FINISHED["id"]))
-    assert "has not looked at this server's campaign yet" in inter.followup.sent[0][0]
+    assert "has not looked at this server's session yet" in inter.followup.sent[0][0]
 
 
 def test_edit_applies_at_once_and_says_what_changed(tmp_path):
@@ -267,3 +267,18 @@ def test_every_autocomplete_callback_takes_exactly_self_interaction_current():
         func = getattr(commands.Fh_Report, name)
         assert inspect.iscoroutinefunction(func), name
         assert list(inspect.signature(func).parameters) == ["self", "interaction", "current"], name
+
+
+def test_the_history_is_read_from_the_file_it_had_before_until_the_new_one_exists(tmp_path):
+    d = str(tmp_path)
+    os.makedirs(os.path.join(d, ".fhc"))
+    node = FileNode()
+    old = os.path.join(d, ".fhc", "fhr_campaign_history.json")
+    new = os.path.join(d, ".fhc", "fhr_session_history.json")
+    assert asyncio.run(commands._read_session_history(node, d)) == {}
+    with open(old, "w") as f:
+        json.dump({"campaigns": [{"id": "old"}]}, f)
+    assert asyncio.run(commands._read_session_history(node, d)) == {"campaigns": [{"id": "old"}]}
+    with open(new, "w") as f:
+        json.dump({"campaigns": [{"id": "new"}]}, f)
+    assert asyncio.run(commands._read_session_history(node, d)) == {"campaigns": [{"id": "new"}]}

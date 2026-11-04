@@ -21,7 +21,7 @@ schema;element_schema:
     disable_updates: {type: any, func: deprecated, enum: ['Use "enable_updates" instead (the opposite value).']}
     # What the report shows
     # report_layout: letters D/P/S/R, or several such groups separated by commas (one per update cycle)
-    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRHdpsrh]{1,5}(\s*,\s*[DPSRHdpsrh]{1,5})*\s*$', desc: 'Tables to show, any order - D daily, P podium, S session, R rank, H campaign history; groups separated by commas rotate'}
+    report_layout: {type: str, nullable: false, pattern: '^\s*[DPSRHdpsrh]{1,5}(\s*,\s*[DPSRHdpsrh]{1,5})*\s*$', desc: 'Tables to show, any order - D daily, P podium, S session, R rank, H session history; groups separated by commas rotate'}
     points_detail_D: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Daily table, in this order, from the letters D S R'}
     points_detail_S: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Session table, in this order, from the letters D S R'}
     points_detail_R: {type: str, pattern: '^[DSRdsr]*$', desc: 'Values shown in the Rank table, in this order, from the letters D S R'}
@@ -63,10 +63,10 @@ schema;element_schema:
     podium_combined_days: {type: int, nullable: false, range: {min: 0}, desc: 'Days shown when P is combined with other tables (0 = since the campaign started)'}
     podium_combined_top: {type: int, nullable: false, range: {min: 1, max: 50}, desc: 'Positions shown for each day when P is combined with other tables (1 to 50)'}
     podium_combined_min3_latest_day: {type: bool, nullable: false, desc: 'true always shows at least the top 3 for the most recent day when P is combined'}
-    campaign_history_count: {type: int, nullable: false, range: {min: 0}, desc: 'Finished campaigns listed by the H block (0 = every one recorded)'}
-    campaign_history_latest_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for the most recent campaign in the H block (1 to 3)'}
-    campaign_history_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for each older campaign in the H block (1 to 3)'}
-    campaign_history_min_points: {type: int, nullable: false, range: {min: 0}, desc: 'A campaign whose pilots add up to fewer season points is not recorded (0 records all)'}
+    session_history_count: {type: int, nullable: false, range: {min: 0}, desc: 'Finished sessions listed by the H block (0 = every one recorded)'}
+    session_history_latest_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for the most recent session in the H block (1 to 3)'}
+    session_history_top: {type: int, nullable: false, range: {min: 1, max: 3}, desc: 'Positions shown for each older session in the H block (1 to 3)'}
+    session_history_min_points: {type: int, nullable: false, range: {min: 0}, desc: 'A session whose pilots add up to fewer season points is not recorded (0 records all)'}
     show_punishment: {type: bool, nullable: false, desc: 'true shows punishment badges under sanctioned pilots (needs the Punishment plugin of DCSServerBot)'}
     show_bob: {type: bool, nullable: false, desc: 'Show blue-on-blue (friendly fire) counts, from the Mission Statistics plugin of DCSServerBot'}
     excluded_ucids:

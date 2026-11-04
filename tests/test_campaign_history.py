@@ -1,4 +1,4 @@
-"""Campaign history: one entry per campaign, with the final season table, kept in .fhc/fhr_campaign_history.json."""
+"""Campaign history: one entry per campaign, with the final season table, kept in .fhc/fhr_session_history.json."""
 import asyncio
 import json
 from datetime import timedelta
@@ -21,10 +21,10 @@ class _Hist(_Game):
         asyncio.run(self.plugin._update_session(
             _Server(), str(self.dir), node, self.source, str(self.dir / name), points, kills))
         asyncio.run(self.plugin._track_campaign(
-            _Server(), str(self.dir), self.source, points, NAMES, {"campaign_history_min_points": min_points}, map_name))
+            _Server(), str(self.dir), self.source, points, NAMES, {"session_history_min_points": min_points}, map_name))
 
     def history(self):
-        return json.loads((self.dir / ".fhc" / "fhr_campaign_history.json").read_text())["campaigns"]
+        return json.loads((self.dir / ".fhc" / "fhr_session_history.json").read_text())["campaigns"]
 
     def restart_bot(self):
         self.plugin = make_plugin(apool=self.pool)
@@ -134,7 +134,7 @@ HISTORY = {"campaigns": [
 ]}
 
 
-def test_the_newest_campaign_lists_its_places_and_the_older_ones_one_line(tmp_path):
+def test_the_newest_session_lists_its_places_and_the_older_ones_one_line(tmp_path):
     blocks = commands._campaign_blocks(HISTORY, {}, count=3, latest_top=3, top=1)
     assert len(blocks) == 3                                            # the running campaign is not listed
     newest, middle, oldest = blocks
@@ -164,13 +164,13 @@ def test_an_estimated_start_is_marked_and_a_pilot_found_by_ucid_shows_the_curren
 
 
 def test_the_block_is_a_field_of_the_embed_and_nothing_is_shown_without_campaigns():
-    cfg = {"report_layout": "RH", "campaign_history_count": 2}
+    cfg = {"report_layout": "RH", "session_history_count": 2}
     embed = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, cfg, report_layout="RH",
                                  campaign_history=HISTORY)
-    [field] = [f for f in embed.fields if "Campaign History" in f.name]
+    [field] = [f for f in embed.fields if "Session History" in f.name]
     assert field.name.startswith("🏁") and field.value.count("\n") == 4
     bare = commands.build_embed({"blue": [], "red": [], "neutral": 0}, {}, cfg, report_layout="RH")
-    assert not [f for f in bare.fields if "Campaign History" in f.name]
+    assert not [f for f in bare.fields if "Session History" in f.name]
 
 
 def test_a_map_name_is_made_from_the_file_when_dcssb_never_reported_one():
@@ -220,7 +220,7 @@ def test_the_champions_table_counts_wins_podiums_and_the_best_score():
     assert (zarpa["name"], zarpa["wins"], zarpa["podiums"], zarpa["campaigns"], zarpa["best"]) == ("Zarpa", 2, 3, 3, 41230)
     assert zarpa["best_map"] == "SYRIA"
     assert (viper["name"], viper["wins"], viper["podiums"], viper["best"], viper["best_map"]) == ("Viper", 1, 3, 35900, "CAUCASUS")
-    assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 campaigns · best 41,230 pts (SYRIA)")
+    assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 sessions · best 41,230 pts (SYRIA)")
     assert len(commands._champion_lines(rows, 2)) == 2
 
 
@@ -260,7 +260,7 @@ class _Response:
 def _command(tmp_path, history=HISTORY, admin=True, **kw):
     d = str(tmp_path)
     os.makedirs(os.path.join(d, ".fhc"), exist_ok=True)
-    with open(os.path.join(d, ".fhc", "fhr_campaign_history.json"), "w") as f:
+    with open(os.path.join(d, ".fhc", "fhr_session_history.json"), "w") as f:
         json.dump(history, f)
     srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
                          "instance": type("N", (), {"name": "inst"})()})()
@@ -273,7 +273,7 @@ def _command(tmp_path, history=HISTORY, admin=True, **kw):
     plugin._reset_tz = lambda server: UTC
     plugin._where_tag = lambda server: None
     interaction = type("I", (), {"followup": _Followup(), "response": _Response(), "user": object()})()
-    asyncio.run(plugin.campaigns(interaction, **kw))
+    asyncio.run(plugin.sessions(interaction, **kw))
     return interaction
 
 
@@ -286,7 +286,7 @@ def test_only_admins_can_use_it_and_the_answer_is_always_private(tmp_path):
 
 def test_the_list_shows_the_campaigns_newest_first_with_the_filters_in_the_description(tmp_path):
     [(_, embed, view, _e)] = _command(tmp_path, map_name="Syria", top=2).followup.sent
-    assert embed.description == "2 campaign(s) · map Syria · newest first"
+    assert embed.description == "2 session(s) · map Syria · newest first"
     text = embed.fields[0].value
     assert text.index("Zarpa` — 41,230") < text.index("28,400") and view is None
     [(_, embed, _v, _e)] = _command(tmp_path, order="oldest", top=1).followup.sent
@@ -298,10 +298,10 @@ def test_detail_picks_the_latest_finished_campaign_or_the_one_asked_for(tmp_path
     assert "SYRIA · 12-10-2026 → 03-11-2026" in embed.description and "4 pilots" in embed.description
     assert "ended by map change" in embed.description
     running = HISTORY["campaigns"][-1]["id"]
-    [(_, embed, _v, _e)] = _command(tmp_path, view="detail", campaign=running).followup.sent
+    [(_, embed, _v, _e)] = _command(tmp_path, view="detail", session=running).followup.sent
     assert "running" in embed.description
-    [(content, *_)] = _command(tmp_path, view="detail", campaign="nope").followup.sent
-    assert "No campaign found" in content
+    [(content, *_)] = _command(tmp_path, view="detail", session="nope").followup.sent
+    assert "No session found" in content
 
 
 def test_champions_shows_the_table_or_one_pilots_record(tmp_path):
@@ -325,7 +325,7 @@ def test_every_text_of_the_command_fits_discords_100_characters():
     """Discord refuses to register a command whose description or option help is longer."""
     import re
     src = open(commands.__file__, encoding="utf-8").read()
-    block = src[src.index('@fh_report.command(name="campaigns"'):src.index("async def campaigns")]
+    block = src[src.index('@fh_report.command(name="sessions"'):src.index("async def sessions")]
     assert all(len(m.group(2)) <= 100 for m in re.finditer(r'(\w+)="([^"]+)"', block))
 
 
