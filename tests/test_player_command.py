@@ -375,3 +375,28 @@ def test_player_works_for_a_pilot_only_the_campaign_save_knows(saves_dir):
 def test_player_says_no_stats_when_show_unranked_pilots_is_off(saves_dir):
     sent = _unranked_player_cmd(saves_dir, {"show_unranked_pilots": False})
     assert "No campaign stats found for you" in sent[0]
+
+
+def test_punishment_points_are_summed_before_the_positive_filter():
+    """A forgiven pilot has negative rows offsetting the positive ones: the total decides, not each row."""
+    seen = []
+
+    class Cur:
+        async def execute(self, sql, *a): seen.append(" ".join(sql.split()))
+        async def fetchall(self): return [("u1", 4.0)]
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Conn:
+        def cursor(self): return Cur()
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class Pool:
+        def connection(self): return Conn()
+
+    import asyncio
+    cog = commands.Fh_Report.__new__(commands.Fh_Report)
+    cog.apool = Pool()
+    assert asyncio.run(cog._fetch_punishment_points()) == {"u1": 4.0}
+    assert "HAVING SUM(points) > 0" in seen[0] and "WHERE points" not in seen[0]

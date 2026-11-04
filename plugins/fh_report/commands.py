@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.12"
+FH_REPORT_RELEASE = "14.6.13"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -3927,15 +3927,16 @@ class Fh_Report(Plugin):
         return bnb, penalties
 
     async def _fetch_punishment_points(self) -> dict:
-        """Fetch total punishment points per UCID from pu_events table."""
+        """Total punishment points per UCID from pu_events. A forgiven or decayed pilot has negative
+        rows that offset the positive ones, so the rows are summed first and only a positive total counts."""
         try:
             async with self.apool.connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
-                        SELECT init_id, COALESCE(SUM(points), 0) AS total
+                        SELECT init_id, SUM(points) AS total
                         FROM pu_events
-                        WHERE points > 0
                         GROUP BY init_id
+                        HAVING SUM(points) > 0
                     """)
                     rows = await cur.fetchall()
                     return {row[0]: float(row[1]) for row in rows}
