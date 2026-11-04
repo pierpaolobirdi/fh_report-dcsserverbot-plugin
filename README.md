@@ -778,6 +778,17 @@ Answers privately, and only to the admins (the `admin` setting, like `/fh_report
 | `top` | Positions shown: per campaign for `list` (default 3), in the table for `detail` and `champions` (default 10) |
 | `server` | Which server, when more than one is configured |
 
+### Correcting the history by hand (admins)
+
+Four commands change the records. They answer privately, are for the admins only, and leave an entry in DCSServerBot's audit log. `session_close`, `session_delete` and `session_reopen` ask for a confirmation first (only who asked can press the buttons); `session_edit` applies at once and says what it changed. Every `session` option suggests the recorded campaigns.
+
+| Command | What it does |
+|---|---|
+| `/fh_report session_close` | Ends the running campaign now (its end is the current time) and starts the next one from now; the session counts start again too. A campaign closed this way is never reopened by itself, even if the save has not been reset — which is what to use when a reset went unnoticed. If Foothold did **not** reset its save, the new campaign starts with the points the save already has |
+| `/fh_report session_delete session:` | Deletes a **finished** campaign from the history (the running one must be closed first, or it would be recorded again at the next update) |
+| `/fh_report session_reopen session:` | Makes a finished campaign the running one again, for when it was closed by mistake (a hand edit of the points looked like a reset). It must be the map being played now. The campaign running in its place is dropped and its table merged in (each pilot keeps the higher score), and from then on it follows the save again |
+| `/fh_report session_edit session: map: start: end:` | Corrects the map or the dates (`dd-mm-yyyy`, `today`, `yesterday`, `7d`). A start given by hand is exact, so its `~` goes away. The end can only be set on a finished campaign |
+
 ## Zone ordering by mission waypoint (`sort_zones_by_waypoint`)
 
 By default, zones in each column are sorted by level and slot damage. Turning this on instead orders them by their mission waypoint number — BLUE zones highest-first, RED zones lowest-first — so the columns read like a front-line progression. Zones without a waypoint assigned fall to the end of the active list, same place suspended zones already sit.
