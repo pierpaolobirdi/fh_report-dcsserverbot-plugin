@@ -26,10 +26,22 @@ On a configurable interval the plugin reads the Foothold `.lua` save files and u
 - **Progress bar** showing the balance of zone control between BLUE and RED
 - **BLUE and RED zone columns** with zone levels and optional upgrade slot indicators, sorted by level and damage state
 - **Pilot leaderboard** with rank, session, daily points, optional career card, and optional punishment status
+- **Daily Podium** of the best pilots of past days, and a **Session History** of the finished sessions (one per map played) with the best pilots of each
 
 The embed is always **edited in place** — it never spams new messages.
 
 Multiple server instances are supported — each can have its own channel, campaign name, and display settings.
+
+### Slash commands
+
+| Command | Who | What it does |
+|---|---|---|
+| `/fh_report player` | everyone (admins can look up anyone) | a pilot's rank, session and career stats — see [personal stats](#fh_report-player--personal-stats-command) |
+| `/fh_report podium` | everyone | who held the top places of the Daily Podium over a range of days — see [Daily Podium](#daily-podium) |
+| `/fh_report sessions` | admins | the recorded sessions, with filters, per-session tables and a champions table — see [Session History](#fh_report-sessions--look-through-the-records-admins) |
+| `/fh_report session_close`, `session_delete`, `session_reopen`, `session_edit` | admins | correct the session history by hand — see [Correcting the history](#correcting-the-history-by-hand-admins) |
+| `/fh_report update` | admins | refresh the report now — see [update](#fh_report-update--refresh-the-report-now-admins) |
+| `/fh_report upgrade` | admins | update the plugin from GitHub — see [upgrade](#fh_report-upgrade--update-from-discord-admins) |
 
 ---
 

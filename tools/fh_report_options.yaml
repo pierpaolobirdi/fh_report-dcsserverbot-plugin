@@ -517,7 +517,7 @@ options:
       #                      Only affects "P" combined with other letters — "P" on
       #                      its own never uses this.
   session_history_count:
-    since: "14.6.23"
+    since: "14.7.0"
     default: 3
     desc: Finished sessions listed by the H block (0 = every one recorded)
     help: |-
@@ -528,21 +528,21 @@ options:
       #                      or when the same save is reset. Its final season points are
       #                      recorded, so each one shows its best pilots.
   session_history_latest_top:
-    since: "14.6.23"
+    since: "14.7.0"
     default: 3
     desc: Positions shown for the most recent session in the H block (1 to 3)
     help: |-
       #   session_history_latest_top - Positions shown for the most recent session of the
       #                      H block, with its start and end dates        (default: 3)
   session_history_top:
-    since: "14.6.23"
+    since: "14.7.0"
     default: 1
     desc: Positions shown for each older session in the H block (1 to 3)
     help: |-
       #   session_history_top - Positions shown for each older session of the H block
       #                      (default: 1). 1 gives one line each: end date, map, champion.
   session_history_min_points:
-    since: "14.6.23"
+    since: "14.7.0"
     default: 200
     desc: A session whose pilots add up to fewer season points is not recorded (0 records all)
     help: |-
@@ -555,7 +555,7 @@ options:
     help: |-
       #   excluded_ucids   - UCIDs to hide from the leaderboard          (default: none)
   show_unranked_pilots:
-    since: "14.6.9"
+    since: "14.7.0"
     default: true
     desc: true also lists pilots that only the campaign save knows (no record in Foothold_Ranks.lua), without a rank
     help: |-
