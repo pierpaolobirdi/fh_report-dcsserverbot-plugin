@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.17"
+FH_REPORT_RELEASE = "14.6.18"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1484,20 +1484,33 @@ def _discord_date(iso: str | None) -> str:
     return f"<t:{int(dt.replace(tzinfo=timezone.utc).timestamp())}:d>" if dt else ""
 
 
+_MAP_LABELS = {"caucasus": "CAUCASUS", "kola": "KOLA", "syria": "SYRIA", "persiangulf": "PERSIAN GULF",
+               "sinai": "SINAI", "sinaimap": "SINAI", "iraq": "IRAK", "irak": "IRAK", "germany": "GERMANY",
+               "germanycw": "GERMANY", "normandy": "NORMANDY", "afghanistan": "AFGHANISTAN"}
+
+
+def _map_label(name: str | None) -> str:
+    """A map as the History shows it, in capitals: the names Foothold's maps go by (DCS calls them
+    PersianGulf, SinaiMap, Iraq, GermanyCW...), else the name split into words."""
+    text = str(name or "").strip()
+    key = re.sub(r"[^a-z]", "", text.lower())
+    if key in _MAP_LABELS:
+        return _MAP_LABELS[key]
+    return re.sub(r"(?<=[a-z])(?=[A-Z])|[_\s]+", " ", text).strip().upper() or "?"
+
+
 def _campaign_map(entry: dict) -> str:
-    """The map of a campaign: the one DCSServerBot reported, else what its save file name says."""
+    """The map of a campaign, in capitals: the one DCSServerBot reported, else what its save file name says."""
     if entry.get("map"):
-        return str(entry["map"])
-    stem = os.path.splitext(entry.get("file") or "")[0]
-    return re.sub(r"(?i)^foothold_", "", stem).replace("_", " ").title() or "?"
+        return _map_label(entry["map"])
+    return _map_label(re.sub(r"(?i)^foothold_?", "", os.path.splitext(entry.get("file") or "")[0]))
 
 
 def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, top: int,
                      strip_callsign_flag: bool = False) -> list[list[str]]:
     """The History block: the finished campaigns, newest first, each a list of lines. The most recent shows
-    `latest_top` positions under "start → end · map" (the start is marked ~ when it is an estimate), the
-    older ones `top` positions; one position goes on one line, "end · champion · map", like the Daily
-    Podium. `count` = 0 lists every one recorded. Pilots are shown with their current name and rank when
+    `latest_top` positions under "start → end MAP" (the start is marked ~ when it is an estimate), the
+    older ones `top` positions; one position goes on one line, "end MAP champion", like the Daily Podium. `count` = 0 lists every one recorded. Pilots are shown with their current name and rank when
     they can be found (by UCID, then name), else as recorded, without a rank. [] if nothing to show."""
     closed = sorted((c for c in (history or {}).get("campaigns", []) if not c.get("open") and c.get("end")),
                     key=lambda c: c["end"], reverse=True)
@@ -1536,10 +1549,10 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
             continue
         end, where = _discord_date(entry["end"]), _campaign_map(entry)
         if len(lines) == 1:
-            blocks.append([f"__{end}__ {lines[0][0]} {lines[0][1]} · {where}"])
+            blocks.append([f"__{end}__ {where} {lines[0][0]} {lines[0][1]}"])
         else:
             estimate = "~" if entry.get("start_kind") == "first_seen" else ""
-            blocks.append([f"__{estimate}{_discord_date(entry.get('start'))} → {end}__ · {where}"]
+            blocks.append([f"__{estimate}{_discord_date(entry.get('start'))} → {end}__ {where}"]
                           + [f"{m} {body}" for m, body in lines])
     return blocks
 

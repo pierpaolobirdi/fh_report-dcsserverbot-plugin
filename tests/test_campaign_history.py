@@ -138,10 +138,10 @@ def test_the_newest_campaign_lists_its_places_and_the_older_ones_one_line(tmp_pa
     blocks = commands._campaign_blocks(HISTORY, {}, count=3, latest_top=3, top=1)
     assert len(blocks) == 3                                            # the running campaign is not listed
     newest, middle, oldest = blocks
-    assert newest[0].endswith("· Syria") and "→" in newest[0] and len(newest) == 4
+    assert newest[0].endswith("__ SYRIA") and "→" in newest[0] and len(newest) == 4
     assert newest[1] == "🥇 `Zarpa` — 41,230 pts" and newest[3] == "🥉 `Excl` — 22,004 pts"
-    assert len(middle) == 1 and middle[0].endswith("`Viper` — 35,900 pts · Caucasus") and "→" not in middle[0]
-    assert len(oldest) == 1 and "`Zarpa` — 28,400 pts · Syria" in oldest[0]
+    assert len(middle) == 1 and middle[0].endswith("__ CAUCASUS 🥇 `Viper` — 35,900 pts") and "→" not in middle[0]
+    assert len(oldest) == 1 and oldest[0].endswith("__ SYRIA 🥇 `Zarpa` — 28,400 pts")
 
 
 def test_count_and_places_follow_the_options():
@@ -174,8 +174,16 @@ def test_the_block_is_a_field_of_the_embed_and_nothing_is_shown_without_campaign
 
 
 def test_a_map_name_is_made_from_the_file_when_dcssb_never_reported_one():
-    assert commands._campaign_map({"file": "foothold_afghanistan.lua"}) == "Afghanistan"
-    assert commands._campaign_map({"file": "x.lua", "map": "Syria"}) == "Syria"
+    assert commands._campaign_map({"file": "foothold_afghanistan.lua"}) == "AFGHANISTAN"
+    assert commands._campaign_map({"file": "x.lua", "map": "Syria"}) == "SYRIA"
+
+
+def test_the_maps_are_shown_in_capitals_under_the_names_foothold_goes_by():
+    names = {"Caucasus": "CAUCASUS", "Kola": "KOLA", "Syria": "SYRIA", "PersianGulf": "PERSIAN GULF",
+             "SinaiMap": "SINAI", "Sinai": "SINAI", "Iraq": "IRAK", "GermanyCW": "GERMANY", "Normandy": "NORMANDY",
+             "PERSIAN GULF": "PERSIAN GULF", "TheChannel": "THE CHANNEL", "MarianaIslands": "MARIANA ISLANDS",
+             "": "?", None: "?"}
+    assert {k: commands._map_label(k) for k in names} == names
 
 
 # ── the filters and the statistics ──────────────────────────────────────────────────────────
@@ -210,9 +218,9 @@ def test_the_champions_table_counts_wins_podiums_and_the_best_score():
     rows = commands.campaign_champions(commands.campaign_filter(HISTORY))
     zarpa, viper = rows[0], rows[1]
     assert (zarpa["name"], zarpa["wins"], zarpa["podiums"], zarpa["campaigns"], zarpa["best"]) == ("Zarpa", 2, 3, 3, 41230)
-    assert zarpa["best_map"] == "Syria"
-    assert (viper["name"], viper["wins"], viper["podiums"], viper["best"], viper["best_map"]) == ("Viper", 1, 3, 35900, "Caucasus")
-    assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 campaigns · best 41,230 pts (Syria)")
+    assert zarpa["best_map"] == "SYRIA"
+    assert (viper["name"], viper["wins"], viper["podiums"], viper["best"], viper["best_map"]) == ("Viper", 1, 3, 35900, "CAUCASUS")
+    assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 campaigns · best 41,230 pts (SYRIA)")
     assert len(commands._champion_lines(rows, 2)) == 2
 
 
@@ -220,7 +228,7 @@ def test_a_pilots_record_lists_position_and_points_newest_first():
     record = commands.campaign_pilot_history(commands.campaign_filter(HISTORY), "viper")
     assert [(h["position"], h["of"], h["points"]) for h in record] == [(2, 2, 900), (1, 2, 35900), (2, 4, 30110)]
     lines = commands._pilot_record_lines(record)
-    assert lines[0] == "03-11-2026 · Syria — **2** of 4 — 30,110 pts"
+    assert lines[0] == "03-11-2026 · SYRIA — **2** of 4 — 30,110 pts"
 
 
 def test_the_table_of_one_campaign_adds_the_pilot_asked_for_when_outside_the_top():
@@ -228,7 +236,7 @@ def test_the_table_of_one_campaign_adds_the_pilot_asked_for_when_outside_the_top
     assert commands._campaign_detail_lines(newest, 2) == ["🥇 `Zarpa` — 41,230 pts", "🥈 `Viper` — 30,110 pts"]
     assert commands._campaign_detail_lines(newest, 2, "fourth")[-2:] == ["…", "`4.` `Fourth` — 5 pts"]
     assert commands._campaign_length(newest) == "22 d 0 h"
-    assert commands._campaign_label(newest) == "Syria · 12-10-2026 → 03-11-2026"
+    assert commands._campaign_label(newest) == "SYRIA · 12-10-2026 → 03-11-2026"
 
 
 # ── the command ────────────────────────────────────────────────────────────────────────────────
@@ -287,7 +295,7 @@ def test_the_list_shows_the_campaigns_newest_first_with_the_filters_in_the_descr
 
 def test_detail_picks_the_latest_finished_campaign_or_the_one_asked_for(tmp_path):
     [(_, embed, _v, _e)] = _command(tmp_path, view="detail", top=3).followup.sent
-    assert "Syria · 12-10-2026 → 03-11-2026" in embed.description and "4 pilots" in embed.description
+    assert "SYRIA · 12-10-2026 → 03-11-2026" in embed.description and "4 pilots" in embed.description
     assert "ended by map change" in embed.description
     running = HISTORY["campaigns"][-1]["id"]
     [(_, embed, _v, _e)] = _command(tmp_path, view="detail", campaign=running).followup.sent

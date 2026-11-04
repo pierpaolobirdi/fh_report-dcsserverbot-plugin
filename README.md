@@ -744,7 +744,7 @@ Returns an ephemeral report listing whoever held those positions on each day in 
 
 The plugin records every campaign, so the report can show who won the last ones. A campaign is the life of one Foothold save: it **ends when the map changes** (the save file changes, finished or not) or when the same save is **reset** (its points and kills fall back to zero). When it ends, the season points (`Points` of the campaign save) of **every** pilot are kept in `Saves\.fhc\fhr_campaign_history.json`, so the result survives Foothold emptying the file. Coming back to a map whose points did not fall is the same campaign, not a new one: its entry is reopened and updated when it ends again.
 
-Add `H` to `report_layout` to show the finished campaigns, newest on top. It looks like the Daily Podium: the most recent campaign lists its first places with its start and end dates, the older ones one line each with their end date, the champion and the map.
+Add `H` to `report_layout` to show the finished campaigns, newest on top. It looks like the Daily Podium: the most recent campaign lists its first places with its start and end dates, the older ones one line each with their end date, the map (in capitals) and the champion.
 
 ```yaml
 report_layout: DPSRH

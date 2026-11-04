@@ -540,7 +540,7 @@ options:
     desc: Positions shown for each older campaign in the H block (1 to 3)
     help: |-
       #   campaign_history_top - Positions shown for each older campaign of the H block
-      #                      (default: 1). 1 gives one line each: end date, champion, map.
+      #                      (default: 1). 1 gives one line each: end date, map, champion.
   campaign_history_min_points:
     since: "14.6.16"
     default: 200

@@ -328,7 +328,7 @@ HEADER_COMMENT = """# fh_report.yaml — Fh_Report Plugin Configuration
 #   campaign_history_latest_top - Positions shown for the most recent campaign of the
 #                      H block, with its start and end dates        (default: 3)
 #   campaign_history_top - Positions shown for each older campaign of the H block
-#                      (default: 1). 1 gives one line each: end date, champion, map.
+#                      (default: 1). 1 gives one line each: end date, map, champion.
 #   campaign_history_min_points - Season points all the pilots of a campaign must add
 #                      up to for it to be recorded when it ends     (default: 200)
 #                      Keeps out a map that was loaded for a moment. 0 = record all.
