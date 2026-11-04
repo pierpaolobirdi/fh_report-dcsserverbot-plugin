@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.6.16"
+FH_REPORT_RELEASE = "14.6.17"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1542,6 +1542,123 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
             blocks.append([f"__{estimate}{_discord_date(entry.get('start'))} → {end}__ · {where}"]
                           + [f"{m} {body}" for m, body in lines])
     return blocks
+
+
+def _local_date(iso: str | None, tz: tzinfo):
+    dt = _parse_utc(iso)
+    return dt.replace(tzinfo=timezone.utc).astimezone(tz).date() if dt else None
+
+
+def _campaign_pilot_ids(entry: dict, text: str) -> list[str]:
+    """The pilots of a campaign that `text` names: their ID (UCID) exactly, or part of their name."""
+    wanted = (text or "").strip().lower()
+    return [pid for pid, p in (entry.get("players") or {}).items()
+            if wanted and (pid.lower() == wanted or wanted in (p.get("name") or "").lower())]
+
+
+def campaign_filter(history: dict, *, map_name: str = "", date_from=None, date_to=None, pilot: str = "",
+                    tz: tzinfo = timezone.utc) -> list[dict]:
+    """The finished campaigns that pass the filters, oldest first: on this map (part of its name), ended
+    between two dates (inclusive, in the time zone `tz`), and with this pilot in them."""
+    wanted_map = (map_name or "").strip().lower()
+    out = []
+    for c in (history or {}).get("campaigns", []):
+        if c.get("open") or not c.get("end"):
+            continue
+        if wanted_map and wanted_map not in _campaign_map(c).lower():
+            continue
+        end = _local_date(c["end"], tz)
+        if (date_from and end < date_from) or (date_to and end > date_to):
+            continue
+        if pilot and not _campaign_pilot_ids(c, pilot):
+            continue
+        out.append(c)
+    return sorted(out, key=lambda c: c["end"])
+
+
+def campaign_champions(campaigns: list[dict]) -> list[dict]:
+    """Per pilot over these campaigns: how many they played, won (first place), finished on the podium
+    (first three) and their best score. Most wins first. The name is the one of their latest campaign."""
+    stats: dict = {}
+    for c in sorted(campaigns, key=lambda c: c.get("end") or ""):
+        for pos, row in enumerate(campaign_ranking(c), 1):
+            s = stats.setdefault(row["id"], {"id": row["id"], "name": row["name"], "campaigns": 0, "wins": 0,
+                                             "podiums": 0, "best": 0, "best_map": ""})
+            s["name"] = row["name"]
+            s["campaigns"] += 1
+            s["wins"] += pos == 1
+            s["podiums"] += pos <= 3
+            if row["points"] > s["best"]:
+                s["best"], s["best_map"] = row["points"], _campaign_map(c)
+    return sorted(stats.values(), key=lambda s: (-s["wins"], -s["podiums"], -s["best"], s["name"].lower()))
+
+
+def campaign_pilot_history(campaigns: list[dict], pilot: str) -> list[dict]:
+    """What the pilot `pilot` names did in each of these campaigns, oldest first:
+    [{"entry", "name", "position", "of", "points"}]."""
+    out = []
+    for c in sorted(campaigns, key=lambda c: c.get("end") or ""):
+        ids = set(_campaign_pilot_ids(c, pilot))
+        for pos, row in enumerate(campaign_ranking(c), 1):
+            if row["id"] in ids:
+                out.append({"entry": c, "name": row["name"], "position": pos, "of": len(c["players"]),
+                            "points": row["points"]})
+                break
+    return out
+
+
+def _campaign_length(entry: dict) -> str:
+    start, end = _parse_utc(entry.get("start")), _parse_utc(entry.get("end"))
+    if not (start and end and end >= start):
+        return "?"
+    days, hours = (end - start).days, (end - start).seconds // 3600
+    return f"{days} d {hours} h" if days else f"{hours} h"
+
+
+def _campaign_label(entry: dict, tz: tzinfo = timezone.utc) -> str:
+    """"Syria · 12-10-2026 → 03-11-2026" (the end is "running" for the campaign in progress)."""
+    start, end = _local_date(entry.get("start"), tz), _local_date(entry.get("end"), tz)
+    estimate = "~" if entry.get("start_kind") == "first_seen" else ""
+    return (f"{_campaign_map(entry)} · {estimate}{_fmt_date(start) if start else '?'} → "
+            f"{_fmt_date(end) if end else 'running'}")
+
+
+def _campaign_detail_lines(entry: dict, top: int, pilot: str = "") -> list[str]:
+    """The table of one campaign, best first: the first `top` pilots, then the pilot asked for if outside them."""
+    ranking = campaign_ranking(entry)
+    medals = ["🥇", "🥈", "🥉"]
+
+    def line(pos: int, row: dict) -> str:
+        return f"{medals[pos - 1] if pos <= 3 else f'`{pos}.`'} {_safe_code_span(row['name'])} — {row['points']:,} pts"
+    lines = [line(pos, row) for pos, row in enumerate(ranking[:top], 1)]
+    if pilot:
+        ids = set(_campaign_pilot_ids(entry, pilot))
+        lines += ["…"] * bool(len(ranking) > top) + [line(pos, row) for pos, row in enumerate(ranking, 1)
+                                                      if pos > top and row["id"] in ids]
+    return lines
+
+
+def _record_text(r: dict) -> str:
+    """"**2** wins · 3 podiums · 3 campaigns · best 41,230 pts (Syria)" for one row of campaign_champions."""
+    def n(count: int, word: str) -> str:
+        return f"{count} {word}{'s' * (count != 1)}"
+    return (f"**{r['wins']}** win{'s' * (r['wins'] != 1)} · {n(r['podiums'], 'podium')} · "
+            f"{n(r['campaigns'], 'campaign')} · best {r['best']:,} pts ({r['best_map']})")
+
+
+def _champion_lines(rows: list[dict], top: int) -> list[str]:
+    medals = ["🥇", "🥈", "🥉"]
+    return [f"{medals[i] if i < 3 else f'`{i + 1}.`'} {_safe_code_span(r['name'])} — {_record_text(r)}"
+            for i, r in enumerate(rows[:top])]
+
+
+def _pilot_record_lines(history: list[dict], tz: tzinfo = timezone.utc) -> list[str]:
+    lines = []
+    for h in reversed(history):                                         # newest first
+        end = _local_date(h["entry"].get("end"), tz)
+        lines.append(f"{_fmt_date(end) if end else '?'} · {_campaign_map(h['entry'])} — "
+                     f"**{h['position']}** of {h['of']} — {h['points']:,} pts")
+    return lines
 
 
 def _chunk_lines(lines: list[str], limit: int) -> list[list[str]]:
@@ -5436,6 +5553,195 @@ class Fh_Report(Plugin):
             return
         view = _PodiumView(embeds)
         view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=ephemeral)
+
+    # ── /fh_report campaigns ───────────────────────────────────────────────
+
+    async def _campaign_history_of(self, srv, saves_dir: str) -> dict:
+        """The campaign history of a server: what the updater holds in memory (it writes a changed table
+        only every quarter of an hour), else the file."""
+        cached = self._campaign_cache.get(_saves_key(srv.node, saves_dir))
+        if cached:
+            return cached["hist"]
+        hist = await _read_json(srv.node, _fhr_path(saves_dir, "campaign_history.json"))
+        return hist if isinstance(hist.get("campaigns"), list) else {"campaigns": []}
+
+    async def _campaigns_for_autocomplete(self, interaction: discord.Interaction) -> list[dict]:
+        """The recorded campaigns, for the suggestions of /fh_report campaigns (admins only)."""
+        try:
+            name, _ = self._resolve_server(interaction, getattr(interaction.namespace, "server", None))
+            srv = self._server_by_key(name) if name else None
+            if srv is None or not self._is_admin(interaction, name):
+                return []
+            saves_dir = await _resolve_saves_dir(srv, self._merged_cfg(name))
+            return (await self._campaign_history_of(srv, saves_dir)).get("campaigns", [])
+        except Exception:
+            return []
+
+    async def _autocomplete_campaign_map(self, interaction: discord.Interaction,
+                                         current: str) -> list[app_commands.Choice[str]]:
+        maps = sorted({_campaign_map(c) for c in await self._campaigns_for_autocomplete(interaction)})
+        return [app_commands.Choice(name=m[:100], value=m[:100]) for m in maps
+                if current.lower() in m.lower()][:25]
+
+    async def _autocomplete_campaign_pilot(self, interaction: discord.Interaction,
+                                           current: str) -> list[app_commands.Choice[str]]:
+        names: dict = {}
+        for c in sorted(await self._campaigns_for_autocomplete(interaction), key=lambda c: c.get("start") or ""):
+            for pid, p in (c.get("players") or {}).items():
+                names[pid] = p.get("name") or pid                       # the latest name wins
+        return [app_commands.Choice(name=n[:100], value=pid[:100])
+                for pid, n in sorted(names.items(), key=lambda kv: kv[1].lower())
+                if current.lower() in n.lower()][:25]
+
+    async def _autocomplete_campaign(self, interaction: discord.Interaction,
+                                     current: str) -> list[app_commands.Choice[str]]:
+        tz = timezone.utc
+        try:
+            name, _ = self._resolve_server(interaction, getattr(interaction.namespace, "server", None))
+            tz = self._reset_tz(self._server_by_key(name))
+        except Exception:
+            pass
+        found = sorted(await self._campaigns_for_autocomplete(interaction), key=lambda c: c.get("start") or "",
+                       reverse=True)
+        return [app_commands.Choice(name=_campaign_label(c, tz)[:100], value=c["id"][:100]) for c in found
+                if current.lower() in _campaign_label(c, tz).lower()][:25]
+
+    async def _send_campaign_pages(self, interaction: discord.Interaction, srv, title: str, description: str,
+                                   pages: list[str], field_name: str) -> None:
+        footer = f"{_version_text(self._where_tag(srv))} · Read-only historical report"
+        embeds = []
+        for i, text in enumerate(pages, 1):
+            embed = discord.Embed(
+                title=title, description=description + (f" · page {i}/{len(pages)}" if len(pages) > 1 else ""),
+                color=0x3498DB, timestamp=datetime.now(timezone.utc))
+            _add_podium_field(embed, "🏁", text, field_name)
+            embed.set_footer(text=footer)
+            embeds.append(_trim_embed(embed))
+        if len(embeds) == 1:
+            await interaction.followup.send(embed=embeds[0], ephemeral=True)
+            return
+        view = _PodiumView(embeds)
+        view.message = await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
+    @fh_report.command(name="campaigns", description="Admin only: the recorded campaigns, with filters and the pilots' results.")
+    @app_commands.describe(
+        view="list (default), detail (one campaign's whole table) or champions (wins per pilot)",
+        map_name="Only campaigns on this map",
+        date_from="Only campaigns that ended on or after this date: dd-mm-yyyy, today, yesterday or 7d",
+        date_to="Only campaigns that ended on or before this date",
+        pilot="Only campaigns this pilot played (name or UCID); with champions, that pilot's record",
+        campaign="For detail: which campaign (default: the latest finished one)",
+        order="newest (default) or oldest first",
+        top="Positions shown: per campaign in list (default 3), in the table of detail and champions (10)",
+        _server="Which server — only needed if more than one is configured."
+    )
+    @app_commands.choices(
+        view=[app_commands.Choice(name="list", value="list"), app_commands.Choice(name="detail", value="detail"),
+              app_commands.Choice(name="champions", value="champions")],
+        order=[app_commands.Choice(name="newest first", value="newest"),
+               app_commands.Choice(name="oldest first", value="oldest")])
+    @app_commands.autocomplete(map_name=_autocomplete_campaign_map, pilot=_autocomplete_campaign_pilot,
+                               campaign=_autocomplete_campaign, date_from=_autocomplete_podium_date,
+                               date_to=_autocomplete_podium_date)
+    @app_commands.rename(_server="server", map_name="map")
+    async def campaigns(self, interaction: discord.Interaction, view: str = "list", map_name: str | None = None,
+                        date_from: str | None = None, date_to: str | None = None, pilot: str | None = None,
+                        campaign: str | None = None, order: str = "newest",
+                        top: app_commands.Range[int, 1, 50] | None = None,
+                        _server: app_commands.Transform[Server, _FHServerTransformer] | None = None):
+        # Always private: an admin tool. See player()'s comment on `_server` + rename.
+        await interaction.response.defer(ephemeral=True)
+        key, err = self._resolve_server(interaction, _server)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        srv = self._server_by_key(key)
+        if srv is None:
+            await interaction.followup.send(
+                "❌ That server isn't currently available in DCSServerBot — it may still be registering, try again shortly.",
+                ephemeral=True)
+            return
+        if not self._is_admin(interaction, key):
+            await interaction.followup.send("❌ Only admins can look at the campaign records.", ephemeral=True)
+            return
+        cfg = self._merged_cfg(key)
+        saves_dir = await _resolve_saves_dir(srv, cfg)
+        tz = self._reset_tz(srv)
+        today = datetime.now(tz).date()
+        for label, text in (("date_from", date_from), ("date_to", date_to)):
+            if (text or "").strip() and _parse_user_date(text, today) is None:
+                await interaction.followup.send(
+                    f"❌ I couldn't read `{text}` as `{label}`. Use `dd-mm-yyyy` (e.g. `25-12-2026`), "
+                    "`today`, `yesterday` or `7d` (seven days ago).", ephemeral=True)
+                return
+        d_from = _parse_user_date(date_from, today) if (date_from or "").strip() else None
+        d_to = _parse_user_date(date_to, today) if (date_to or "").strip() else None
+        if d_from and d_to and d_from > d_to:
+            d_from, d_to = d_to, d_from
+
+        history = await self._campaign_history_of(srv, saves_dir)
+        found = campaign_filter(history, map_name=map_name or "", date_from=d_from, date_to=d_to,
+                                pilot=pilot or "", tz=tz)
+        parts = [f"map {map_name}" if map_name else "", f"from {_fmt_date(d_from)}" if d_from else "",
+                 f"to {_fmt_date(d_to)}" if d_to else "", f"pilot {pilot}" if pilot and view != "detail" else ""]
+        shown = " · ".join(x for x in parts if x) or "all"
+        name = self._public_server_name(key)
+
+        if view == "detail":
+            entries = [c for c in history.get("campaigns", []) if campaign and c.get("id") == campaign]
+            entry = entries[0] if entries else (None if campaign else (found[-1] if found else None))
+            if entry is None:
+                await interaction.followup.send(
+                    f"No campaign found for **{name}**" + (f" with the id `{campaign}`." if campaign else
+                    f" for `{shown}`."), ephemeral=True)
+                return
+            ranking = campaign_ranking(entry)
+            how = {"map": "map change", "reset": "reset of the save"}.get(entry.get("closed_by"), "running")
+            description = (f"{_campaign_label(entry, tz)}\nLength {_campaign_length(entry)} · ended by {how} · "
+                           f"{len(ranking)} pilots · {entry.get('total', 0):,} points in all")
+            lines = _campaign_detail_lines(entry, top or 10, pilot or "")
+            await self._send_campaign_pages(interaction, srv, f"🏁 Campaign — {name}", description,
+                                            ["\n".join(lines)] if lines else ["No points recorded."], "Classification")
+            return
+
+        if not found:
+            recorded = [c for c in history.get("campaigns", []) if not c.get("open") and c.get("end")]
+            note = (f" {len(recorded)} campaign(s) are recorded; none matches the filters." if recorded else
+                    " Nothing has been recorded yet: a campaign is recorded when it ends (the map changes "
+                    "or the save is reset) with at least `campaign_history_min_points` points.")
+            await interaction.followup.send(f"No campaigns found for **{name}** (`{shown}`).{note}", ephemeral=True)
+            return
+
+        if view == "champions":
+            if pilot:
+                record = campaign_pilot_history(found, pilot)
+                stats = campaign_champions(found)
+                wanted = {r["id"] for c in found for r in campaign_ranking(c)
+                          if r["id"] in set(_campaign_pilot_ids(c, pilot))}
+                mine = next((r for r in stats if r["id"] in wanted), None)
+                head = f"{_safe_code_span(mine['name'])} — {_record_text(mine)}" if mine else ""
+                lines = ([head] if head else []) + _pilot_record_lines(record, tz)
+                title = f"🏁 Pilot record — {name}"
+            else:
+                lines = _champion_lines(campaign_champions(found), top or 10)
+                title = f"🏁 Champions — {name}"
+            await self._send_campaign_pages(interaction, srv, title, f"{len(found)} campaign(s) · {shown}",
+                                            _podium_pages([lines]), "Campaigns")
+            return
+
+        try:
+            players = await parse_ranks(os.path.join(saves_dir, "Foothold_Ranks.lua"),
+                                        cfg.get("excluded_ucids") or [], srv.node)
+        except Exception:
+            players = {}
+        players = await self._report_players(srv, saves_dir, _UpdateReadCache(srv.node), players, cfg)
+        blocks = _campaign_blocks({"campaigns": found}, players, count=0, latest_top=top or 3, top=top or 3,
+                                  strip_callsign_flag=_bool_cfg(cfg.get("strip_callsign")))
+        if order == "oldest":
+            blocks.reverse()
+        await self._send_campaign_pages(interaction, srv, f"🏁 Campaigns — {name}",
+                                        f"{len(found)} campaign(s) · {shown} · {order} first",
+                                        _podium_pages(blocks), "Campaign History")
 
 
 async def setup(bot: DCSServerBot):

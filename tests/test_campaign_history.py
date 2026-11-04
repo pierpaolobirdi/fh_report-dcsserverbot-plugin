@@ -176,3 +176,146 @@ def test_the_block_is_a_field_of_the_embed_and_nothing_is_shown_without_campaign
 def test_a_map_name_is_made_from_the_file_when_dcssb_never_reported_one():
     assert commands._campaign_map({"file": "foothold_afghanistan.lua"}) == "Afghanistan"
     assert commands._campaign_map({"file": "x.lua", "map": "Syria"}) == "Syria"
+
+
+# ── the filters and the statistics ──────────────────────────────────────────────────────────
+
+import os                                                    # noqa: E402
+from datetime import date                                    # noqa: E402
+
+from conftest import FileNode                                # noqa: E402
+
+UTC = commands.timezone.utc
+
+
+def test_the_filters_combine_and_the_answer_is_oldest_first():
+    everything = commands.campaign_filter(HISTORY)
+    assert [c["end"][:10] for c in everything] == ["2026-09-20", "2026-10-12", "2026-11-03"]   # the running one is not there
+    assert [c["map"] for c in commands.campaign_filter(HISTORY, map_name="syr")] == ["Syria", "Syria"]
+    inside = commands.campaign_filter(HISTORY, date_from=date(2026, 10, 1), date_to=date(2026, 10, 31))
+    assert [c["map"] for c in inside] == ["Caucasus"]
+    assert len(commands.campaign_filter(HISTORY, pilot="excl")) == 1                          # part of a name
+    assert len(commands.campaign_filter(HISTORY, pilot="b")) == 3                             # a UCID, exactly
+    assert commands.campaign_filter(HISTORY, map_name="syria", pilot="viper", date_from=date(2026, 11, 4)) == []
+
+
+def test_the_dates_are_those_of_the_servers_time_zone():
+    late = {"campaigns": [_entry("foothold_syria.lua", "2026-10-01T10:00:00", "2026-10-31T23:30:00", [("a", "Z", 500)])]}
+    madrid = commands._tz_from_name("Europe/Madrid")
+    assert commands.campaign_filter(late, date_to=date(2026, 10, 31), tz=UTC)
+    assert not commands.campaign_filter(late, date_to=date(2026, 10, 31), tz=madrid)        # already 1 November there
+
+
+def test_the_champions_table_counts_wins_podiums_and_the_best_score():
+    rows = commands.campaign_champions(commands.campaign_filter(HISTORY))
+    zarpa, viper = rows[0], rows[1]
+    assert (zarpa["name"], zarpa["wins"], zarpa["podiums"], zarpa["campaigns"], zarpa["best"]) == ("Zarpa", 2, 3, 3, 41230)
+    assert zarpa["best_map"] == "Syria"
+    assert (viper["name"], viper["wins"], viper["podiums"], viper["best"], viper["best_map"]) == ("Viper", 1, 3, 35900, "Caucasus")
+    assert commands._champion_lines(rows, 2)[0].startswith("🥇 `Zarpa` — **2** wins · 3 podiums · 3 campaigns · best 41,230 pts (Syria)")
+    assert len(commands._champion_lines(rows, 2)) == 2
+
+
+def test_a_pilots_record_lists_position_and_points_newest_first():
+    record = commands.campaign_pilot_history(commands.campaign_filter(HISTORY), "viper")
+    assert [(h["position"], h["of"], h["points"]) for h in record] == [(2, 2, 900), (1, 2, 35900), (2, 4, 30110)]
+    lines = commands._pilot_record_lines(record)
+    assert lines[0] == "03-11-2026 · Syria — **2** of 4 — 30,110 pts"
+
+
+def test_the_table_of_one_campaign_adds_the_pilot_asked_for_when_outside_the_top():
+    newest = commands.campaign_filter(HISTORY)[-1]
+    assert commands._campaign_detail_lines(newest, 2) == ["🥇 `Zarpa` — 41,230 pts", "🥈 `Viper` — 30,110 pts"]
+    assert commands._campaign_detail_lines(newest, 2, "fourth")[-2:] == ["…", "`4.` `Fourth` — 5 pts"]
+    assert commands._campaign_length(newest) == "22 d 0 h"
+    assert commands._campaign_label(newest) == "Syria · 12-10-2026 → 03-11-2026"
+
+
+# ── the command ────────────────────────────────────────────────────────────────────────────────
+
+class _Followup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, embed=None, view=None, ephemeral=None):
+        self.sent.append((content, embed, view, ephemeral))
+        return object()
+
+
+class _Response:
+    deferred = None
+
+    async def defer(self, ephemeral=None):
+        self.deferred = ephemeral
+
+
+def _command(tmp_path, history=HISTORY, admin=True, **kw):
+    d = str(tmp_path)
+    os.makedirs(os.path.join(d, ".fhc"), exist_ok=True)
+    with open(os.path.join(d, ".fhc", "fhr_campaign_history.json"), "w") as f:
+        json.dump(history, f)
+    srv = type("S", (), {"node": FileNode(), "status": commands.Status.RUNNING, "name": "Public",
+                         "instance": type("N", (), {"name": "inst"})()})()
+    plugin = make_plugin()
+    plugin._resolve_server = lambda interaction, param: ("inst", None)
+    plugin._server_by_key = lambda key: srv
+    plugin._is_admin = lambda interaction, key: admin
+    plugin._merged_cfg = lambda key: {"saves_dir": d}
+    plugin._public_server_name = lambda key: "Public"
+    plugin._reset_tz = lambda server: UTC
+    plugin._where_tag = lambda server: None
+    interaction = type("I", (), {"followup": _Followup(), "response": _Response(), "user": object()})()
+    asyncio.run(plugin.campaigns(interaction, **kw))
+    return interaction
+
+
+def test_only_admins_can_use_it_and_the_answer_is_always_private(tmp_path):
+    refused = _command(tmp_path, admin=False)
+    assert refused.followup.sent[0][0].startswith("❌ Only admins") and refused.response.deferred is True
+    answered = _command(tmp_path)
+    assert answered.followup.sent[0][3] is True
+
+
+def test_the_list_shows_the_campaigns_newest_first_with_the_filters_in_the_description(tmp_path):
+    [(_, embed, view, _e)] = _command(tmp_path, map_name="Syria", top=2).followup.sent
+    assert embed.description == "2 campaign(s) · map Syria · newest first"
+    text = embed.fields[0].value
+    assert text.index("Zarpa` — 41,230") < text.index("28,400") and view is None
+    [(_, embed, _v, _e)] = _command(tmp_path, order="oldest", top=1).followup.sent
+    assert embed.fields[0].value.index("Zarpa` — 28,400") < embed.fields[0].value.index("Viper` — 35,900")
+
+
+def test_detail_picks_the_latest_finished_campaign_or_the_one_asked_for(tmp_path):
+    [(_, embed, _v, _e)] = _command(tmp_path, view="detail", top=3).followup.sent
+    assert "Syria · 12-10-2026 → 03-11-2026" in embed.description and "4 pilots" in embed.description
+    assert "ended by map change" in embed.description
+    running = HISTORY["campaigns"][-1]["id"]
+    [(_, embed, _v, _e)] = _command(tmp_path, view="detail", campaign=running).followup.sent
+    assert "running" in embed.description
+    [(content, *_)] = _command(tmp_path, view="detail", campaign="nope").followup.sent
+    assert "No campaign found" in content
+
+
+def test_champions_shows_the_table_or_one_pilots_record(tmp_path):
+    [(_, embed, _v, _e)] = _command(tmp_path, view="champions").followup.sent
+    assert embed.title.startswith("🏁 Champions") and "`Zarpa` — **2** wins" in embed.fields[0].value
+    [(_, embed, _v, _e)] = _command(tmp_path, view="champions", pilot="b").followup.sent
+    value = embed.fields[0].value
+    assert embed.title.startswith("🏁 Pilot record") and value.startswith("`Viper` — **1** win · 3 podiums ·") and value.count("\n") == 3
+
+
+def test_a_bad_date_or_no_match_is_explained(tmp_path):
+    [(content, *_)] = _command(tmp_path, date_from="31-02-2026").followup.sent
+    assert "couldn't read `31-02-2026`" in content
+    [(content, *_)] = _command(tmp_path, map_name="Nevada").followup.sent
+    assert "none matches the filters" in content
+    [(content, *_)] = _command(tmp_path, history={"campaigns": []}).followup.sent
+    assert "Nothing has been recorded yet" in content
+
+
+def test_every_text_of_the_command_fits_discords_100_characters():
+    """Discord refuses to register a command whose description or option help is longer."""
+    import re
+    src = open(commands.__file__, encoding="utf-8").read()
+    block = src[src.index('@fh_report.command(name="campaigns"'):src.index("async def campaigns")]
+    assert all(len(m.group(2)) <= 100 for m in re.finditer(r'(\w+)="([^"]+)"', block))

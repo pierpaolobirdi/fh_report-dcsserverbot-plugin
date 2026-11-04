@@ -763,6 +763,21 @@ campaign_history_min_points: 200  # recorded only if all its pilots add up to at
 
 A campaign that was already running when Fh_Report first looked has an estimated start date (marked with `~`). Campaigns that ended before this was installed are not recorded.
 
+### `/fh_report campaigns` — look through the records (admins)
+
+Answers privately, and only to the admins (the `admin` setting, like `/fh_report update`). With no options it lists every recorded campaign, newest first, the first three places of each. Everything can be filtered, and the answer is paged like `/fh_report podium`.
+
+| Option | What it does |
+|---|---|
+| `view` | `list` (default), `detail` (the whole table of one campaign: length, how it ended, every pilot) or `champions` (wins, podiums and best score per pilot) |
+| `map` | Only campaigns on this map (suggestions come from the recorded ones) |
+| `date_from` / `date_to` | Only campaigns that **ended** between two dates — `dd-mm-yyyy`, `today`, `yesterday` or `7d` |
+| `pilot` | Only the campaigns this pilot played (name or UCID). With `champions` it shows that pilot's record: position and points in each campaign |
+| `campaign` | For `detail`: which campaign (suggestions list them by map and dates); the latest finished one by default |
+| `order` | `newest` (default) or `oldest` first |
+| `top` | Positions shown: per campaign for `list` (default 3), in the table for `detail` and `champions` (default 10) |
+| `server` | Which server, when more than one is configured |
+
 ## Zone ordering by mission waypoint (`sort_zones_by_waypoint`)
 
 By default, zones in each column are sorted by level and slot damage. Turning this on instead orders them by their mission waypoint number — BLUE zones highest-first, RED zones lowest-first — so the columns read like a front-line progression. Zones without a waypoint assigned fall to the end of the active list, same place suspended zones already sit.
