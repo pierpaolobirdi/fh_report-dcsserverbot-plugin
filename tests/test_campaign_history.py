@@ -350,3 +350,15 @@ def test_a_long_rank_is_cut_so_the_whole_line_stays_under_78_characters():
     # a short rank is left alone
     players["Eskuvy"]["custom_rank"] = "Ace"
     assert "**Ace**" in commands._campaign_blocks(history, players, count=0, latest_top=2, top=1)[1][0]
+
+
+def test_a_pilots_own_medal_replaces_the_first_place_medal_when_only_the_champion_is_shown():
+    players = {"Zarpa": {"ucid": "a", "credits": 5000, "custom_medal": "🦇"},
+               "Viper": {"ucid": "b", "credits": 5000}}
+    one_line = commands._campaign_blocks(HISTORY, players, count=0, latest_top=1, top=1)
+    assert one_line[0][0].startswith("__") and " 🦇 `Zarpa`" in one_line[0][0] and "🥇" not in one_line[0][0]   # the newest
+    assert " 🦇 `Zarpa`" in one_line[2][0] and " 🥇 `Viper`" in one_line[1][0]                                 # older ones, as before
+    plain = {"Zarpa": {"ucid": "a", "credits": 5000}}
+    assert " 🥇 `Zarpa`" in commands._campaign_blocks(HISTORY, plain, count=0, latest_top=1, top=1)[0][0]    # none: the medal
+    several = commands._campaign_blocks(HISTORY, players, count=0, latest_top=3, top=1)
+    assert several[0][1].startswith("🥇 `Zarpa`") and "🦇" not in "".join(several[0])                       # three places: medals
