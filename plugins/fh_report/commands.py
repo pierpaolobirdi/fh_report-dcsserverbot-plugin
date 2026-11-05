@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.7.0"
+FH_REPORT_RELEASE = "14.7.1"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -1560,7 +1560,9 @@ def _campaign_blocks(history: dict, players: dict, count: int, latest_top: int, 
                 if found is not None:
                     current_name, data = found, players[found]
             marker = medals[pos] if pos < 3 else "🎖️"
-            if idx > 0 and data and data.get("custom_medal"):
+            # A pilot's own medal replaces the first-place one on a campaign shown in a single line (only the
+            # champion), and on every older campaign; the first places of the most recent one keep the medals.
+            if (idx > 0 or len(rows) == 1) and data and data.get("custom_medal"):
                 marker = data["custom_medal"]
             shown = current_name or row["name"]
             display = strip_callsign(shown) if strip_callsign_flag else shown
