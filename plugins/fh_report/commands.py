@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # for those installations to be able to update straight to it. Nothing in the code uses it (a
 # test keeps it equal to PLUGIN_RELEASE). It can only go once no installation older than 14.6.1
 # is expected to use /fh_report upgrade.
-FH_REPORT_RELEASE = "14.7.1"
+FH_REPORT_RELEASE = "14.7.2"
 
 # ── Rank thresholds from Foothold engine (zoneCommander.lua) ─────────────────
 RANK_THRESHOLDS = [0, 3000, 5000, 8000, 12000, 16000, 22000, 30000, 45000, 65000,
@@ -148,6 +148,33 @@ def _lua_entries(block: str, ucid_only: bool = False):
             yield key, inner
 
 
+def _lua_flat_entries(text: str, table: str, root: str = "zonePersistance", ucid_only: bool = False):
+    """Yield (key, inner) for each flat assignment `root["table"]["key"] = {...}`: how Foothold's background
+    (staged) save writes a table, one line per entry after `root["table"] = {}`. The older save wrote the
+    whole table in one block, which _lua_entries reads."""
+    pattern = re.compile(root + r"\[\s*[\"']" + re.escape(table) + r"[\"']\s*\]\s*\[\s*(" + _LUA_STR + r")\s*\]\s*=\s*\{")
+    pos = 0
+    while True:
+        m = pattern.search(text, pos)
+        if not m:
+            return
+        inner, pos = _lua_block(text, m.end() - 1)
+        key = _lua_unquote(m.group(1))
+        if not ucid_only or _UCID_RE.fullmatch(key):
+            yield key, inner
+
+
+def _table_entries(text: str, table: str, root: str = "zonePersistance", ucid_only: bool = False):
+    """(key, inner) of every entry of `root["table"]`, written either way (one block, or one line per
+    entry); a key found in both is yielded once."""
+    block = _lua_table(text, root + r"\[[\"']" + re.escape(table) + r"[\"']\]\s*=\s*\{")
+    seen = set()
+    for key, inner in [*_lua_entries(block or "", ucid_only), *_lua_flat_entries(text, table, root, ucid_only)]:
+        if key not in seen:
+            seen.add(key)
+            yield key, inner
+
+
 def _find_entry(text: str, key: str):
     """The match of the first `["key"]={` whose decoded key is `key`, or None."""
     for m in _LUA_KEY.finditer(text):
@@ -208,7 +235,17 @@ class _UpdateReadCache:
 
     async def read_file(self, path: str) -> bytes:
         if path not in self._files:
-            self._files[path] = await self._node.read_file(path)
+            try:
+                self._files[path] = await self._node.read_file(path)
+            except FileNotFoundError:
+                if not path.lower().endswith(".lua"):
+                    raise
+                # Foothold saves by writing `<file>.staged`, moving the old file to `<file>.staged-backup`
+                # and renaming the new one into place: caught in between, the backup is the file.
+                try:
+                    self._files[path] = await self._node.read_file(path + ".staged-backup")
+                except Exception:
+                    raise FileNotFoundError(path) from None
         return self._files[path]
 
     def invalidate(self, path: str) -> None:
@@ -514,16 +551,13 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
                 )
             return {}, {}, {}
 
-        block = _lua_table(content, _PLAYER_STATS_RE)
-        if block is None:
-            return {}, {}, {}
         results = {}
         raw_all = {}
         name_to_ucid: dict = {}
 
         # Old format: name-keyed, stats inline in the player block.
         # New format (4.9.1+): UCID-keyed, "name" + nested "stats" table.
-        for key, player_block in _lua_entries(block, ucid_only=version is not None):
+        for key, player_block in _table_entries(content, "playerStats", ucid_only=version is not None):
             if version is None:
                 name, stats_block = key, player_block
             else:
@@ -541,14 +575,22 @@ async def parse_player_stats(filepath: str, node) -> tuple[dict, dict, dict]:
             if version is not None:
                 name_to_ucid[name] = key
 
+        # Pilots Foothold could not tie to a UCID are kept by name, with their stats inline (the
+        # old format's shape): they are listed too, without a UCID, until Foothold claims them.
+        for name, stats_block in _table_entries(content, "legacyPlayerStats"):
+            if name in results:
+                continue
+            pts_m = re.search(r'\[(?:"Points"|\'Points\')\]\s*=\s*(\d+)', stats_block)
+            if pts_m:
+                results[name] = int(pts_m.group(1))
+                raw_all[name] = _lua_numbers(stats_block, skip=("Points",))
+
         if version is None:
             # Native ucidToName may still be present as a supplementary
             # table even in an old-format file (an interim Foothold step) —
             # use it opportunistically if so, costs nothing if absent.
-            ucid_block = _lua_table(content, r"zonePersistance\[[\"']ucidToName[\"']\]\s*=\s*\{")
-            if ucid_block:
-                for ucid, name in _ucid_names(ucid_block):
-                    name_to_ucid[name] = ucid
+            for ucid, name in _ucid_names(content):
+                name_to_ucid[name] = ucid
 
         return results, raw_all, name_to_ucid
     except Exception:
@@ -848,29 +890,52 @@ async def parse_ranks(filepath: str, excluded_ucids: list[str], node) -> dict:
         if len(clean_name) < 2 or (ucid and ucid in excluded):
             continue
 
-        career: dict = {}
-        career_block = _lua_table(block, r'\[(?:"career"|\'career\')\]\s*=\s*\{')
-        if career_block:
-            for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
-                career[int(cm.group(1))] = float(cm.group(2))
-
         players[clean_name] = {
             "credits": float(credit_m.group(1)),
             "ucid":    ucid,
-            "career":  career,
+            "career":  _rank_career(block),
         }
+
+    # Records Foothold keeps by name until it can tie them to a UCID (the pilot joins): listed too, unless
+    # the pilot already has a record under the same name.
+    if version is not None:
+        known_base = {strip_callsign(n) for n in players}
+        for name, block in _table_entries(content, "legacyPlayers", root="RankSave"):
+            clean_name = name.strip()
+            credit_m = re.search(r'\[(?:"credits"|\'credits\')\]\s*=\s*([\d.]+)', block)
+            if (not credit_m or len(clean_name) < 2 or clean_name in players
+                    or strip_callsign(clean_name) in known_base):
+                continue
+            players[clean_name] = {"credits": float(credit_m.group(1)), "ucid": None, "career": _rank_career(block)}
+            known_base.add(strip_callsign(clean_name))
 
     return dict(sorted(players.items(), key=lambda x: x[1]["credits"], reverse=True))
 
 
+def _rank_career(block: str) -> dict:
+    """{stat id: value} of the career table of one pilot's record in Foothold_Ranks.lua."""
+    career: dict = {}
+    career_block = _lua_table(block, r'\[(?:"career"|\'career\')\]\s*=\s*\{')
+    if career_block:
+        for cm in re.finditer(r'\[(\d+)\]\s*=\s*([\d.]+)', career_block):
+            career[int(cm.group(1))] = float(cm.group(2))
+    return career
+
+
 async def read_rank_identities(filepath: str, node) -> dict:
-    """{name: ucid} from the ucidToName table of Foothold_Ranks.lua, which Foothold keeps even when
-    it saves no ranked player ({} when the file cannot be read)."""
+    """{name: ucid} of the pilots Foothold_Ranks.lua knows: the ucidToName table of the older files and
+    the name of every UCID-keyed record, even one with no credits yet ({} when the file cannot be read)."""
     try:
         content = (await node.read_file(filepath)).decode("utf-8", errors="replace")
     except Exception:
         return {}
-    return {name.strip(): ucid for ucid, name in _ucid_names(content)}
+    identities = {name.strip(): ucid for ucid, name in _ucid_names(content)}
+    block = _lua_table(content, _RANKS_PLAYERS_RE)
+    for ucid, record in _lua_entries(block or "", ucid_only=True):
+        name = _lua_field_str(record, "name")
+        if name and name.strip():
+            identities.setdefault(name.strip(), ucid)
+    return identities
 
 
 def _show_unranked(cfg: dict) -> bool:
