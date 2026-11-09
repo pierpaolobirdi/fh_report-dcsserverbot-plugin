@@ -50,6 +50,8 @@ Multiple server instances are supported — each can have its own channel, campa
 - [DCSServerBot](https://github.com/Special-K-s-Flightsim-Bots/DCSServerBot) v3.x or later (by Special K)
 - [Foothold campaign](https://github.com/leka1986/Lekas-Foothold) (by Leka) active on at least one DCS instance
 
+Both ways Foothold writes its files are read: the older one (each table in one block) and the newer one, which saves in the background and writes each table one line per entry, through a temporary `.staged` file and a `.staged-backup` of the previous one. Pilots that Foothold keeps by name until it can tie them to a UCID (`legacyPlayers` in `Foothold_Ranks.lua`, `legacyPlayerStats` in the campaign save) are listed too, without a UCID, until they join and Foothold claims them.
+
 ---
 
 ## Installation
